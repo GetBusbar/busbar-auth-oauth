@@ -1,0 +1,21 @@
+# SPDX-License-Identifier: Apache-2.0
+[package]
+name = "busbar-auth-oauth"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "The oauth auth: the logic a busbar build links (its door), and nothing else."
+
+[lib]
+# rlib: the LINKED door, which a busbar build names as a compiled-in row. The dropped-in door is the
+# sibling `busbar-auth-oauth-plugin` cdylib, which exports this same door as its one symbol; this crate exports none.
+crate-type = ["rlib"]
+
+# DEPENDENCY POLICY. A plugin's busbar closure is busbar-contract and nothing else; third-party crates
+# come from the workspace table (`{ workspace = true }`), which is busbar's dependency policy. No
+# plugin opens its own socket, dials, binds or does TLS: a connection is a declared need the kernel
+# serves through the connector.
+[dependencies]
+busbar-contract = { workspace = true }
