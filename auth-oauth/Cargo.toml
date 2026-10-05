@@ -1,21 +1,41 @@
 # SPDX-License-Identifier: Apache-2.0
 [package]
 name = "busbar-auth-oauth"
-version = "0.1.0"
+version = "1.6.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
-description = "The oauth auth: the logic a busbar build links (its door), and nothing else."
+description = "The OAuth self-minting auth styles (jwt-bearer, oauth-client-credentials), as one auth-kind plugin on the auth kind's memory ABI."
+
+# MOVED from busbar (crates/busbar-auth-oauth at busbar bb0c7f71d4, history imported;
+# BUSBAR-1.6.0.md §9: every plugin lives in its own repo). The source is busbar's verbatim.
 
 [lib]
-# rlib: the LINKED door, which a busbar build names as a compiled-in row. The dropped-in door is the
-# sibling `busbar-auth-oauth-plugin` cdylib, which exports this same door as its one symbol; this crate exports none.
+# rlib only: the LINKED door (`busbar_auth_oauth::door`, the `DoorFn` a compiled-in row holds) and the
+# tests. The DROPPED door is the sibling `busbar-auth-oauth-plugin` cdylib, the same door behind the
+# one exported symbol.
 crate-type = ["rlib"]
 
-# DEPENDENCY POLICY. A plugin's busbar closure is busbar-contract and nothing else; third-party crates
-# come from the workspace table (`{ workspace = true }`), which is busbar's dependency policy. No
-# plugin opens its own socket, dials, binds or does TLS: a connection is a declared need the kernel
-# serves through the connector.
+[features]
+# DECLARED SO THE SOURCE COMPILES VERBATIM (src/lib.rs gates its `export_door!` on it). Nothing in
+# this repo enables it: the dropped-in artifact is the sibling `busbar-auth-oauth-plugin` cdylib, which
+# exports this crate's door unconditionally. Enabling it here as well would export the one
+# `busbar_plugin_door` symbol twice.
+dropped-in = []
+
+# DEPENDENCY POLICY. A plugin's closure is `busbar-contract` plus the third-party crates it needs to
+# do its job (owner ruling 2026-09-28, PLUGIN LIBRARIES): the RFC 7523 RS256 signature (`ring`,
+# `base64`), the token request form (`serde_urlencoded`) and response (`serde`, `serde_json`), the
+# status line a mint failure names (the `http` crate), and the cache key hash (`sha2`). No kernel
+# crate, no plane, no sibling auth-kind plugin.
+# Every version is the workspace table's (busbar's at the pin).
 [dependencies]
 busbar-contract = { workspace = true }
+base64 = { workspace = true }
+http = { workspace = true }
+ring = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_urlencoded = { workspace = true }
+sha2 = { workspace = true }
