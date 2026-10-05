@@ -2,7 +2,7 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! THE MINT THROUGH THE INSTANCE AND THE `fields` SLOT (BUSBAR-1.6.0.md THE DESIGN, §6.5: jwt-bearer and
-//! oauth-client-credentials "mint through the plugin's own `open-web` need and refresh ahead of
+//! oauth-client-credentials "mint through the plugin's own `operator-infrastructure` need and refresh ahead of
 //! expiry in the background on `tick`"), over a scripted need: the request the plugin sends, the
 //! first mint on the first tick, the per-request call presenting the minted bearer, and THE
 //! EXPIRED-TOKEN RULE end to end — an expired token whose refresh failed answers PENDING on a
