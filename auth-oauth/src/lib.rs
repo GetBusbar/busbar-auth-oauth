@@ -28,7 +28,9 @@
 //! (AUTH-SPLIT): each module names the file it came from. The inbound operations (`verify`, the
 //! login pair) are not served and answer REFUSED (the tail declares only [`CAP_OUTBOUND`]).
 //!
-//! THE NEEDS ([`NEEDS`]; THE DESIGN §5, egress class `open-web`: "auth mint endpoints (`token_url`,
+//! THE NEEDS ([`NEEDS`]; THE DESIGN §5, egress class `operator-infrastructure`, as ARCHITECT ruled
+//! for D1 2026-10-05 (1.5.5 minted over plaintext to a private or loopback endpoint; the ONE
+//! destination guard still applies on top): "auth mint endpoints (`token_url`,
 //! `token_uri`)"): one outbound need per token endpoint, over the http transport, its target the
 //! binding's own setting (`target_from`), so the host declares it pinned to that endpoint when it
 //! opens the instance with the binding's settings. The token exchange is ONE framed request and its
@@ -56,7 +58,7 @@ use busbar_contract::abi::auth::{
     CANCEL_CONTINUES, CAP_OUTBOUND, LOGIN_KIND_NONE, MODE_OWN, POINT_HEAD,
 };
 use busbar_contract::abi::host::conn::connector::{
-    Need, DIRECTION_OUTBOUND, EGRESS_OPEN_WEB, KEEP_NAMED,
+    Need, DIRECTION_OUTBOUND, EGRESS_OPERATOR_INFRASTRUCTURE, KEEP_NAMED,
 };
 use busbar_contract::abi::mechanism::call::{
     AbiStr, Blob, Envelope, InHead, OutHead, Outcome, BLOB_ABSENT,
@@ -117,12 +119,12 @@ const NO_STR: AbiStr = AbiStr {
     len: 0,
 };
 
-/// One token endpoint's need: outbound, `open-web`, over the http transport, its target the
+/// One token endpoint's need: outbound, `operator-infrastructure`, over the http transport, its target the
 /// binding's setting `target_from` names. It reads no response field beyond the reply's code.
 const fn token_need(target_from: &'static str) -> Need {
     Need {
         direction: DIRECTION_OUTBOUND,
-        egress_class: EGRESS_OPEN_WEB,
+        egress_class: EGRESS_OPERATOR_INFRASTRUCTURE,
         transport: abi_str("http"),
         auth: NO_STR,
         target_from: abi_str(target_from),
