@@ -177,6 +177,18 @@ busbar_contract::plugin_door! {
     },
 }
 
+/// THE COMPILED-IN ENTRY a composition root's `auths` row names: the door at
+/// `compiled_in::door::door`, the same [`door`] the dropped-in build exports (compiled-in =
+/// dropped-in). busbar links this row in its default build, so a provider's `jwt-bearer` or
+/// `oauth-client-credentials` credential binds here, the kernel's own copies deleted (P2 D1, the
+/// auth split).
+pub mod compiled_in {
+    /// The door.
+    pub mod door {
+        pub use crate::door;
+    }
+}
+
 // The dropped door's one symbol, under `dropped-in` only: a build linking this crate beside other
 // plugins must not carry a second `busbar_plugin_door`.
 #[cfg(feature = "dropped-in")]
