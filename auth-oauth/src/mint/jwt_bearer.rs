@@ -22,6 +22,7 @@
 
 use super::TokenRequest;
 use base64::Engine as _;
+use zeroize::{Zeroize, Zeroizing};
 
 /// Default OAuth scope when the provider does not override it — the Vertex/GCP common case.
 const DEFAULT_SCOPE: &str = "https://www.googleapis.com/auth/cloud-platform";
@@ -180,14 +181,34 @@ fn jwt_claims_json(
 /// argument published an RSA private key to a terminal, a CI log and a crash report in one step.
 /// Callers already name the lane and the secret's configured source, so what this layer owes is the
 /// io failure and nothing else.
-fn read_credential(credential: &str) -> Result<String, String> {
+///
+/// The JSON (it holds the private key) is read into a buffer sized once and wiped on drop, so no
+/// copy of it is left behind (THE DESIGN §6: "auth material is zeroised").
+fn read_credential(credential: &str) -> Result<Zeroizing<String>, String> {
     let trimmed = credential.trim_start();
     if trimmed.starts_with('{') {
-        return Ok(credential.to_string());
+        return Ok(Zeroizing::new(credential.to_string()));
     }
-    std::fs::read_to_string(credential).map_err(|e| {
+    let cause = |e: std::io::Error| {
         format!("could not read service-account key file named by this lane's credential: {e}")
-    })
+    };
+    let mut file = std::fs::File::open(credential).map_err(cause)?;
+    let size = file
+        .metadata()
+        .map_or(0, |m| usize::try_from(m.len()).unwrap_or(0));
+    let mut bytes = Zeroizing::new(Vec::with_capacity(size.saturating_add(1)));
+    std::io::Read::read_to_end(&mut file, &mut bytes).map_err(cause)?;
+    match String::from_utf8(std::mem::take(&mut *bytes)) {
+        Ok(text) => Ok(Zeroizing::new(text)),
+        Err(e) => {
+            let mut raw = e.into_bytes();
+            raw.zeroize();
+            Err(cause(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "stream did not contain valid UTF-8",
+            )))
+        }
+    }
 }
 
 /// Strip the PEM armor from a PKCS#8 private key and base64-decode the body to DER.
@@ -208,18 +229,26 @@ fn read_credential(credential: &str) -> Result<String, String> {
 /// base64-decode, and WHICH KIND of malformation it was all survive — enough for an operator to
 /// tell a truncated key from a re-wrapped one from a missing one, which is every repair they would
 /// make. Only the key's own bytes go.
-fn pem_to_pkcs8_der(pem: &str) -> Result<Vec<u8>, String> {
-    let body: String = pem
+///
+/// The armor-stripped body and the DER are key material: each is sized once (no growth leaves a
+/// copy) and wiped on drop.
+fn pem_to_pkcs8_der(pem: &str) -> Result<Zeroizing<Vec<u8>>, String> {
+    let mut body = Zeroizing::new(String::with_capacity(pem.len()));
+    for c in pem
         .lines()
         .filter(|l| !l.starts_with("-----"))
         .flat_map(|l| l.chars())
         .filter(|c| !c.is_whitespace())
-        .collect();
+    {
+        body.push(c);
+    }
     if body.is_empty() {
         return Err("service-account private_key is empty or not PEM-armored".to_string());
     }
+    let mut der = Zeroizing::new(Vec::with_capacity(body.len() / 4 * 3 + 3));
     base64::engine::general_purpose::STANDARD
-        .decode(body.as_bytes())
+        .decode_vec(body.as_bytes(), &mut der)
+        .map(|()| der)
         .map_err(|e| {
             // The CLASS of malformation, spelled here rather than taken from `e`'s Display — see
             // this fn's docs. Matched exhaustively and with no `_` arm on purpose: `DecodeError` is

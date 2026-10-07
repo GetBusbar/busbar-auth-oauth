@@ -11,7 +11,7 @@ fn pem_to_pkcs8_der_strips_armor_and_decodes() {
     // The function only strips the PEM armor and base64-decodes the body — it does not require a
     // real key, so a known base64 payload round-trips to its bytes.
     let pem = "-----BEGIN PRIVATE KEY-----\nSGVsbG8sIFBLQ1M4\n-----END PRIVATE KEY-----\n";
-    assert_eq!(pem_to_pkcs8_der(pem).unwrap(), b"Hello, PKCS8");
+    assert_eq!(pem_to_pkcs8_der(pem).unwrap().as_slice(), b"Hello, PKCS8");
 }
 
 #[test]
@@ -32,8 +32,11 @@ fn b64url_is_url_safe_and_unpadded() {
 #[test]
 fn read_credential_passes_inline_json_through() {
     let json = r#"{"client_email":"x@y.iam.gserviceaccount.com"}"#;
-    assert_eq!(read_credential(json).unwrap(), json);
-    assert_eq!(read_credential("  {\"a\":1}").unwrap(), "  {\"a\":1}");
+    assert_eq!(read_credential(json).unwrap().as_str(), json);
+    assert_eq!(
+        read_credential("  {\"a\":1}").unwrap().as_str(),
+        "  {\"a\":1}"
+    );
 }
 
 /// THE SIGNING KEY MUST NOT REACH THE ERROR TEXT.
@@ -309,4 +312,23 @@ fn validate_never_echoes_a_byte_of_the_service_account_key() {
         !e.contains("122"),
         "the helper must not name a byte of the key either, got: {e}"
     );
+}
+
+/// The type a value is held as.
+fn held_as<T>(_: &T) -> &'static str {
+    std::any::type_name::<T>()
+}
+
+/// RED (BUSBAR-1.6.0.md THE DESIGN §6, the per-request auth call: "auth material is zeroised"):
+/// the service-account JSON (it holds the private key) and the decoded key are held in buffers
+/// wiped on drop, never plain strings and vectors.
+#[test]
+fn the_service_account_and_its_key_are_held_wiped_on_drop() {
+    let json = read_credential("{\"private_key\":\"k\"}").expect("inline JSON");
+    assert!(held_as(&json).contains("Zeroizing"), "{}", held_as(&json));
+    let der = pem_to_pkcs8_der(
+        "-----BEGIN PRIVATE KEY-----\nSGVsbG8sIFBLQ1M4\n-----END PRIVATE KEY-----\n",
+    )
+    .expect("decodes");
+    assert!(held_as(&der).contains("Zeroizing"), "{}", held_as(&der));
 }
