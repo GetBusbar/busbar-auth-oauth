@@ -10,8 +10,8 @@
 # `.busbar-ref`; no sibling-checkout path dependency ships in any manifest.
 #
 # THIRD-PARTY VERSIONS ARE THE FLEET'S, NOT THIS REPO'S. The table below is busbar's own root
-# `[workspace.dependencies]` (third-party rows) at busbar 2d14d0b3619b361fa9d539e8f8ce022c15690c66, followed by the plugin-only rows
-# of busbar's `.github/fleet/deps.toml` at 2d14d0b3619b361fa9d539e8f8ce022c15690c66. A member takes a crate with
+# `[workspace.dependencies]` (third-party rows) at busbar a01bc22aeef00f9ebf5c03d6b03cf0d8711272db, followed by the plugin-only rows
+# of busbar's `.github/fleet/deps.toml` at a01bc22aeef00f9ebf5c03d6b03cf0d8711272db. A member takes a crate with
 # `{ workspace = true }` (adding features if it needs them); a crate in neither table is a new
 # `deps.toml` row in busbar first. CI holds this repo's Cargo.lock to busbar's lock at the pin.
 [workspace]
@@ -29,9 +29,15 @@ publish = false
 repository = "https://github.com/GetBusbar/busbar-auth-oauth"
 
 [workspace.dependencies]
-busbar-contract = { git = "https://github.com/GetBusbar/busbar", rev = "2d14d0b3619b361fa9d539e8f8ce022c15690c66" }
-busbar-plugin-loader = { git = "https://github.com/GetBusbar/busbar", rev = "2d14d0b3619b361fa9d539e8f8ce022c15690c66" }
-# busbar's root [workspace.dependencies], third-party rows, at 2d14d0b3619b361fa9d539e8f8ce022c15690c66
+busbar-contract = { git = "https://github.com/GetBusbar/busbar", rev = "a01bc22aeef00f9ebf5c03d6b03cf0d8711272db" }
+busbar-plugin-loader = { git = "https://github.com/GetBusbar/busbar", rev = "a01bc22aeef00f9ebf5c03d6b03cf0d8711272db" }
+# THE SUITE'S HOST CONNECTOR (dev-only; auth-oauth-plugin/tests/support/conformance_host.rs,
+# rendered because the declares file states network needs): busbar's connector and its TLS
+# test kit at the pin, and the transport framers those needs name, at the revs busbar links.
+busbar-core-connector = { git = "https://github.com/GetBusbar/busbar", rev = "a01bc22aeef00f9ebf5c03d6b03cf0d8711272db", features = ["test-support"] }
+busbar-transport-http = { git = "https://github.com/GetBusbar/busbar-transport-http", rev = "9e0d6fee15e14d9a4b6af1f0e1b9f0e95655f03a" }
+busbar-transport-tcp = { git = "https://github.com/GetBusbar/busbar-transport-tcp", rev = "86987e4030e6ed3ccae51f547964e4e94ff902c2" }
+# busbar's root [workspace.dependencies], third-party rows, at a01bc22aeef00f9ebf5c03d6b03cf0d8711272db
 a2a-lf = "0.3.0"
 a2a-pb = "0.2.0"
 arc-swap = "1"
@@ -107,11 +113,19 @@ url = "2"
 webpki = { package = "rustls-webpki", version = "0.103", default-features = false, features = ["std", "ring"] }
 webpki-roots = "1"
 zeroize = "1"
-# busbar .github/fleet/deps.toml [plugin-deps], at 2d14d0b3619b361fa9d539e8f8ce022c15690c66
+# busbar .github/fleet/deps.toml [plugin-deps], at a01bc22aeef00f9ebf5c03d6b03cf0d8711272db
 ldap3 = { version = "0.12", default-features = false, features = ["sync"] }
-mysql = { version = "26", default-features = false, features = ["minimal"] }
+mysql = { version = "28", default-features = false, features = ["minimal-rust"] }
+mysql_common = { version = "0.35", default-features = false }
+percent-encoding = "2"
 postgres = "0.19"
 redis = { version = "1", default-features = false, features = ["script"] }
 rusqlite = { version = "0.40", features = ["bundled"] }
 ulid = "1"
 
+# ONE busbar-contract (the suite's host connector): the transport framers above name
+# busbar-contract at their own revs of busbar; this repo's pin serves them all, as busbar
+# patches them to its own tree. The source is busbar spelled through www.github.com: Cargo
+# refuses a patch that names the source it patches.
+[patch."https://github.com/GetBusbar/busbar"]
+busbar-contract = { git = "https://www.github.com/GetBusbar/busbar", rev = "a01bc22aeef00f9ebf5c03d6b03cf0d8711272db" }
