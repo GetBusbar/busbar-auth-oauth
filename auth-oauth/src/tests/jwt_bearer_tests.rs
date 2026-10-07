@@ -310,3 +310,22 @@ fn validate_never_echoes_a_byte_of_the_service_account_key() {
         "the helper must not name a byte of the key either, got: {e}"
     );
 }
+
+/// The type a value is held as.
+fn held_as<T>(_: &T) -> &'static str {
+    std::any::type_name::<T>()
+}
+
+/// RED (BUSBAR-1.6.0.md THE DESIGN §6, the per-request auth call: "auth material is zeroised"):
+/// the service-account JSON (it holds the private key) and the decoded key are held in buffers
+/// wiped on drop, never plain strings and vectors.
+#[test]
+fn the_service_account_and_its_key_are_held_wiped_on_drop() {
+    let json = read_credential("{\"private_key\":\"k\"}").expect("inline JSON");
+    assert!(held_as(&json).contains("Zeroizing"), "{}", held_as(&json));
+    let der = pem_to_pkcs8_der(
+        "-----BEGIN PRIVATE KEY-----\nSGVsbG8sIFBLQ1M4\n-----END PRIVATE KEY-----\n",
+    )
+    .expect("decodes");
+    assert!(held_as(&der).contains("Zeroizing"), "{}", held_as(&der));
+}
