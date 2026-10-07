@@ -367,19 +367,20 @@ fn no_granted_need_mints_nothing() {
     assert_eq!(m.tick(1, None), (due, None));
 }
 
-/// THE MINT ENDPOINTS ARE `loopback-allowed` (BUSBAR-1.6.0.md l.611, the egress-class table: "auth
-/// mint endpoints (`token_url`, `token_uri`)", ARCHITECT 2026-10-04 parity ruling: https, or
-/// loopback plaintext, exactly as 1.5.5 validated them, the destination guard still applying).
-/// Every token need the Statement declares states that class. RED on busbar-auth-oauth dev 98fb861,
-/// whose merge 4f6e4e0 declared them `operator-infrastructure`.
+/// THE MINT ENDPOINTS ARE `operator-infrastructure` (ARCHITECT D1 2026-10-05, MINT CLASS (B),
+/// re-measured against v1.5.5 2026-10-07): 1.5.5's config_validate/mod.rs:436-476 accepted a
+/// `token_url` that is https, or http to a PRIVATE or LOOPBACK host, and refused http only to a
+/// public host (plus the metadata denylist) — plaintext to a private token endpoint is the
+/// operator-infrastructure class, not loopback-allowed. Every token need the Statement declares
+/// states that class. RED on busbar-auth-oauth dev 44341ab, which declared them loopback-allowed.
 #[test]
-fn every_mint_need_is_declared_loopback_allowed() {
-    use busbar_contract::abi::host::conn::connector::EGRESS_LOOPBACK_ALLOWED;
+fn every_mint_need_is_declared_operator_infrastructure() {
+    use busbar_contract::abi::host::conn::connector::EGRESS_OPERATOR_INFRASTRUCTURE;
     assert_eq!(crate::NEEDS.len(), 2, "token_url and token_uri");
     for (i, n) in crate::NEEDS.iter().enumerate() {
         assert_eq!(
-            n.egress_class, EGRESS_LOOPBACK_ALLOWED,
-            "need {i}: an auth mint endpoint is loopback-allowed"
+            n.egress_class, EGRESS_OPERATOR_INFRASTRUCTURE,
+            "need {i}: an auth mint endpoint is operator-infrastructure"
         );
     }
 }
