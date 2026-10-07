@@ -38,4 +38,7 @@ ring = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_urlencoded = { workspace = true }
+# Key material and token bodies are wiped on drop (BUSBAR-1.6.0.md THE DESIGN §6: "auth material is
+# zeroised").
+zeroize = { workspace = true }
 sha2 = { workspace = true }

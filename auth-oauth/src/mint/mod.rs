@@ -30,6 +30,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use busbar_contract::conn::{ConnError, ConnId, PieceKind};
 use busbar_contract::redacted::Redacted;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::token_response::{
     default_expires_in, deserialize_expires_in, deserialize_redacted, json_err,
@@ -49,6 +50,8 @@ pub(crate) const MINT_DEADLINE_SECS: u64 = 30;
 /// `limits.upstream_error_body_max_bytes` default (256 KiB). The kernel passes the operator's value
 /// in the binding's settings (`max_response_bytes`).
 pub(crate) const DEFAULT_MAX_RESPONSE_BYTES: usize = 256 * 1024;
+/// One read of a token response, in bytes.
+const READ_BUF_BYTES: usize = 16 * 1024;
 /// How long `tick` waits before reading an in-flight exchange again.
 pub(crate) const IN_FLIGHT_POLL_NS: u64 = 5_000_000;
 
@@ -155,10 +158,11 @@ impl CachedToken {
         let (header, invalid) = if token.expose_secret().is_empty() {
             (None, false)
         } else {
-            let v = token_value(token.expose_secret());
+            let mut v = token_value(token.expose_secret());
             if is_legal_header_value(&v) {
                 (Some(Redacted::new(v)), false)
             } else {
+                v.zeroize();
                 (None, true)
             }
         };
@@ -225,7 +229,8 @@ pub(crate) fn parse_response(
     body: &[u8],
     now: u64,
 ) -> Result<(CachedToken, bool), String> {
-    let body = String::from_utf8_lossy(body);
+    // The body carries the access token: a lossy copy (bytes that are not UTF-8) is wiped too.
+    let body = Zeroizing::new(String::from_utf8_lossy(body).into_owned());
     if !(200..300).contains(&status) {
         // Never log the request/assertion wholesale (may echo claims or the client secret); status +
         // a short snippet only. Diagnostic-only: the request has already failed on `status`.
@@ -281,7 +286,9 @@ enum Exchange {
         conn: ConnId,
         started_ns: u64,
         status: Option<u32>,
-        body: Vec<u8>,
+        /// The response so far: it carries the access token, so it is sized once for the cap
+        /// (no growth leaves a copy) and wiped on drop.
+        body: Zeroizing<Vec<u8>>,
     },
 }
 
@@ -434,7 +441,10 @@ impl Minted {
                         conn,
                         started_ns: now_ns,
                         status: None,
-                        body: Vec::new(),
+                        // The cap, plus one read past it (the read that trips the cap).
+                        body: Zeroizing::new(Vec::with_capacity(
+                            self.max_response_bytes.saturating_add(READ_BUF_BYTES),
+                        )),
                     }
                 }
                 Err(e) => {
@@ -459,7 +469,7 @@ impl Minted {
             return (now_ns + IN_FLIGHT_POLL_NS, None);
         };
         let conn = *conn;
-        let mut buf = [0_u8; 16 * 1024];
+        let mut buf = Zeroizing::new([0_u8; READ_BUF_BYTES]);
         let finished = loop {
             if now_ns.saturating_sub(*started_ns) >= MINT_DEADLINE_SECS * NS {
                 break Err(
@@ -468,7 +478,7 @@ impl Minted {
                         .to_string(),
                 );
             }
-            match wire.read(conn, &mut buf) {
+            match wire.read(conn, &mut buf[..]) {
                 Ok(got) => {
                     if got.status.is_some() {
                         *status = got.status;
