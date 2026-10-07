@@ -366,3 +366,20 @@ fn no_granted_need_mints_nothing() {
     assert_eq!(due, MIN_SLEEP_SECS * S);
     assert_eq!(m.tick(1, None), (due, None));
 }
+
+/// THE MINT ENDPOINTS ARE `loopback-allowed` (BUSBAR-1.6.0.md l.611, the egress-class table: "auth
+/// mint endpoints (`token_url`, `token_uri`)", ARCHITECT 2026-10-04 parity ruling: https, or
+/// loopback plaintext, exactly as 1.5.5 validated them, the destination guard still applying).
+/// Every token need the Statement declares states that class. RED on busbar-auth-oauth dev 98fb861,
+/// whose merge 4f6e4e0 declared them `operator-infrastructure`.
+#[test]
+fn every_mint_need_is_declared_loopback_allowed() {
+    use busbar_contract::abi::host::conn::connector::EGRESS_LOOPBACK_ALLOWED;
+    assert_eq!(crate::NEEDS.len(), 2, "token_url and token_uri");
+    for (i, n) in crate::NEEDS.iter().enumerate() {
+        assert_eq!(
+            n.egress_class, EGRESS_LOOPBACK_ALLOWED,
+            "need {i}: an auth mint endpoint is loopback-allowed"
+        );
+    }
+}
