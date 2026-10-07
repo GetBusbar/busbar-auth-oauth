@@ -11,7 +11,7 @@ fn pem_to_pkcs8_der_strips_armor_and_decodes() {
     // The function only strips the PEM armor and base64-decodes the body — it does not require a
     // real key, so a known base64 payload round-trips to its bytes.
     let pem = "-----BEGIN PRIVATE KEY-----\nSGVsbG8sIFBLQ1M4\n-----END PRIVATE KEY-----\n";
-    assert_eq!(pem_to_pkcs8_der(pem).unwrap(), b"Hello, PKCS8");
+    assert_eq!(pem_to_pkcs8_der(pem).unwrap().as_slice(), b"Hello, PKCS8");
 }
 
 #[test]
@@ -32,8 +32,11 @@ fn b64url_is_url_safe_and_unpadded() {
 #[test]
 fn read_credential_passes_inline_json_through() {
     let json = r#"{"client_email":"x@y.iam.gserviceaccount.com"}"#;
-    assert_eq!(read_credential(json).unwrap(), json);
-    assert_eq!(read_credential("  {\"a\":1}").unwrap(), "  {\"a\":1}");
+    assert_eq!(read_credential(json).unwrap().as_str(), json);
+    assert_eq!(
+        read_credential("  {\"a\":1}").unwrap().as_str(),
+        "  {\"a\":1}"
+    );
 }
 
 /// THE SIGNING KEY MUST NOT REACH THE ERROR TEXT.
