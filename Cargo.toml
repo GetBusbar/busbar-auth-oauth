@@ -10,8 +10,8 @@
 # `.busbar-ref`; no sibling-checkout path dependency ships in any manifest.
 #
 # THIRD-PARTY VERSIONS ARE THE FLEET'S, NOT THIS REPO'S. The table below is busbar's own root
-# `[workspace.dependencies]` (third-party rows) at busbar bb0c7f71d4fec2088554328706f3b813bb15345f, followed by the plugin-only rows
-# of busbar's `.github/fleet/deps.toml` at bb0c7f71d4fec2088554328706f3b813bb15345f. A member takes a crate with
+# `[workspace.dependencies]` (third-party rows) at busbar 2d14d0b3619b361fa9d539e8f8ce022c15690c66, followed by the plugin-only rows
+# of busbar's `.github/fleet/deps.toml` at 2d14d0b3619b361fa9d539e8f8ce022c15690c66. A member takes a crate with
 # `{ workspace = true }` (adding features if it needs them); a crate in neither table is a new
 # `deps.toml` row in busbar first. CI holds this repo's Cargo.lock to busbar's lock at the pin.
 [workspace]
@@ -29,9 +29,9 @@ publish = false
 repository = "https://github.com/GetBusbar/busbar-auth-oauth"
 
 [workspace.dependencies]
-busbar-contract = { git = "https://github.com/GetBusbar/busbar", rev = "bb0c7f71d4fec2088554328706f3b813bb15345f" }
-busbar-plugin-loader = { git = "https://github.com/GetBusbar/busbar", rev = "bb0c7f71d4fec2088554328706f3b813bb15345f" }
-# busbar's root [workspace.dependencies], third-party rows, at bb0c7f71d4fec2088554328706f3b813bb15345f
+busbar-contract = { git = "https://github.com/GetBusbar/busbar", rev = "2d14d0b3619b361fa9d539e8f8ce022c15690c66" }
+busbar-plugin-loader = { git = "https://github.com/GetBusbar/busbar", rev = "2d14d0b3619b361fa9d539e8f8ce022c15690c66" }
+# busbar's root [workspace.dependencies], third-party rows, at 2d14d0b3619b361fa9d539e8f8ce022c15690c66
 a2a-lf = "0.3.0"
 a2a-pb = "0.2.0"
 arc-swap = "1"
@@ -55,7 +55,6 @@ http-body = "1"
 http-body-util = "0.1"
 httpdate = "1.0"
 hyper = { version = "1", default-features = false, features = ["server", "client", "http1", "http2"] }
-hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "http2", "ring", "webpki-tokio"] }
 hyper-util = { version = "0.1", default-features = false, features = ["client-legacy", "http1", "http2", "server-auto", "server-graceful", "service", "tokio"] }
 idna_adapter = "=1.1.0"
 indexmap = { version = "2", features = ["serde"] }
@@ -108,7 +107,7 @@ url = "2"
 webpki = { package = "rustls-webpki", version = "0.103", default-features = false, features = ["std", "ring"] }
 webpki-roots = "1"
 zeroize = "1"
-# busbar .github/fleet/deps.toml [plugin-deps], at bb0c7f71d4fec2088554328706f3b813bb15345f
+# busbar .github/fleet/deps.toml [plugin-deps], at 2d14d0b3619b361fa9d539e8f8ce022c15690c66
 ldap3 = { version = "0.12", default-features = false, features = ["sync"] }
 mysql = { version = "26", default-features = false, features = ["minimal"] }
 postgres = "0.19"

@@ -142,6 +142,105 @@
           ]
         ],
         "refusal": "Refused"
+      },
+      {
+        "style": "oauth-token-exchange",
+        "mint": "on_demand",
+        "credential": "conformance-subject-token",
+        "settings": {
+          "token_url": "https://sts.conformance.invalid/token",
+          "resource": "https://api.conformance.invalid/"
+        },
+        "head": {
+          "method": "POST",
+          "authority": "runtime.signer.example",
+          "target": "/model/m/converse",
+          "timestamp": 1440938160,
+          "fields": [
+            [
+              "content-type",
+              "application/json"
+            ]
+          ],
+          "body": "{}",
+          "extensions": {
+            "scope": "read:things"
+          }
+        },
+        "second_scope": "read:things write:things",
+        "expect_fields": [
+          [
+            "authorization",
+            "Bearer conformance-token-1"
+          ]
+        ],
+        "token_endpoint": [
+          {
+            "expect_request": {
+              "method": "POST",
+              "target": "https://sts.conformance.invalid/token",
+              "fields_subset": [
+                [
+                  "content-type",
+                  "application/x-www-form-urlencoded"
+                ]
+              ],
+              "body": "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Atoken-exchange&subject_token=conformance-subject-token&subject_token_type=urn%3Aietf%3Aparams%3Aoauth%3Atoken-type%3Aaccess_token&requested_token_type=urn%3Aietf%3Aparams%3Aoauth%3Atoken-type%3Aaccess_token&resource=https%3A%2F%2Fapi.conformance.invalid%2F&scope=read%3Athings"
+            },
+            "respond": {
+              "status": 200,
+              "body": "{\"access_token\": \"conformance-token-1\", \"expires_in\": 3600, \"token_type\": \"Bearer\", \"issued_token_type\": \"urn:ietf:params:oauth:token-type:access_token\"}"
+            }
+          },
+          {
+            "expect_request": {
+              "method": "POST",
+              "target": "https://sts.conformance.invalid/token",
+              "fields_subset": [
+                [
+                  "content-type",
+                  "application/x-www-form-urlencoded"
+                ]
+              ],
+              "body": "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Atoken-exchange&subject_token=conformance-subject-token&subject_token_type=urn%3Aietf%3Aparams%3Aoauth%3Atoken-type%3Aaccess_token&requested_token_type=urn%3Aietf%3Aparams%3Aoauth%3Atoken-type%3Aaccess_token&resource=https%3A%2F%2Fapi.conformance.invalid%2F&scope=read%3Athings+write%3Athings"
+            },
+            "respond": {
+              "status": 200,
+              "body": "{\"access_token\": \"conformance-token-2\", \"expires_in\": 3600, \"token_type\": \"Bearer\", \"issued_token_type\": \"urn:ietf:params:oauth:token-type:access_token\"}"
+            }
+          },
+          {
+            "expect_request": {
+              "method": "POST",
+              "target": "https://sts.conformance.invalid/token",
+              "fields_subset": [
+                [
+                  "content-type",
+                  "application/x-www-form-urlencoded"
+                ]
+              ],
+              "body": "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Atoken-exchange&subject_token=conformance-subject-token&subject_token_type=urn%3Aietf%3Aparams%3Aoauth%3Atoken-type%3Aaccess_token&requested_token_type=urn%3Aietf%3Aparams%3Aoauth%3Atoken-type%3Aaccess_token&resource=https%3A%2F%2Fapi.conformance.invalid%2F&scope=read%3Athings"
+            },
+            "respond": {
+              "status": 200,
+              "body": "{\"access_token\": \"conformance-token-3\", \"expires_in\": 7200, \"token_type\": \"Bearer\", \"issued_token_type\": \"urn:ietf:params:oauth:token-type:access_token\"}"
+            }
+          }
+        ],
+        "expires_in": 3600,
+        "second_scope_fields": [
+          [
+            "authorization",
+            "Bearer conformance-token-2"
+          ]
+        ],
+        "expired_fields": [
+          [
+            "authorization",
+            "Bearer conformance-token-3"
+          ]
+        ],
+        "refusal": "Failed"
       }
     ]
   }
