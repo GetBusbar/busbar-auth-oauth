@@ -28,7 +28,7 @@ permissions:
 
 jobs:
   repin:
-    uses: GetBusbar/busbar/.github/workflows/plugin-repin.yml@1d37d863a9d4094a9240afaae9f5a38bf308ac20
+    uses: GetBusbar/busbar/.github/workflows/plugin-repin.yml@41fd7c5f386fa098890c031721f19bfca903f225
     with:
       busbar_sha: ${{ github.event.client_payload.sha || inputs.busbar_sha }}
       busbar_version: ${{ github.event.client_payload.version || inputs.busbar_version }}
