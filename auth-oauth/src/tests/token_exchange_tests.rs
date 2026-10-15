@@ -174,11 +174,11 @@ fn the_exchange_request_is_the_previous_releases_form_with_the_stated_scope() {
         ]
     };
     assert_eq!(
-        form(req.body.expose_secret()),
+        form(req.body.reveal()),
         expected("fs_read_file fs_write_file")
     );
     let unscoped = Scoped::new(x, "").request().expect("a request");
-    assert_eq!(form(unscoped.body.expose_secret()), expected(""));
+    assert_eq!(form(unscoped.body.reveal()), expected(""));
     assert!(
         format!("{req:?}").find(SUBJECT).is_none(),
         "the subject token never prints"
