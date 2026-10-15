@@ -230,7 +230,7 @@ fn the_token_request_is_the_form_1_5_5_posted() {
     );
     let assertion = signer.assertion(1_700_000_000).unwrap();
     assert_eq!(
-        req.body.expose_secret(),
+        req.body.reveal(),
         &format!(
             "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion={assertion}"
         )

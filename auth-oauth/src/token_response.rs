@@ -6,23 +6,23 @@
 //! VERBATIM from the identity unit's `egress_auth/token_response.rs` in the kernel (KERNEL<>PLUGINS step
 //! 22); the minting that reads it moved with it, into [`crate::mint`].
 //!
-//! Beside it, the two secret-hygiene (#53) helpers the minters decode with: [`deserialize_redacted`]
-//! lands a secret field of a decoded document straight in `Redacted`, and [`json_err`] describes a
+//! Beside it, the two secret-hygiene (#53) helpers the minters decode with: [`deserialize_held`]
+//! lands a secret field of a decoded document straight in `Held`, and [`json_err`] describes a
 //! decode failure without the decoder's text, which can quote the secret it was decoding.
 
-use busbar_contract::redacted::Redacted;
+use crate::held::Held;
 
-/// Deserialize a secret string STRAIGHT into [`Redacted`], for a `#[serde(deserialize_with)]` field.
+/// Deserialize a secret string STRAIGHT into [`Held`], for a `#[serde(deserialize_with)]` field.
 ///
-/// `Redacted` deliberately implements neither `Serialize` nor `Deserialize` (its serde fence), so a
+/// `Held` deliberately implements neither `Serialize` nor `Deserialize` (its serde fence), so a
 /// secret-bearing field of a decoded document names this helper instead: the plaintext exists as a
 /// bare `String` only for the instant between the decoder and the wrapper. Narrowly the READ
 /// direction: nothing here can write a secret back out.
-pub fn deserialize_redacted<'de, D>(d: D) -> Result<Redacted<String>, D::Error>
+pub fn deserialize_held<'de, D>(d: D) -> Result<Held<String>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    <String as serde::Deserialize>::deserialize(d).map(Redacted::new)
+    <String as serde::Deserialize>::deserialize(d).map(Held::new)
 }
 
 /// The `map_err` for a `serde_json` decode whose INPUT may carry a secret: a service-account key or
