@@ -128,7 +128,7 @@ fn head(req: &TokenRequest, timeout_ms: u64) -> Result<(Vec<u8>, RequestPiece), 
 impl Wire for HostWire<'_> {
     fn open(&self, req: &TokenRequest, timeout_ms: u64) -> Result<ConnId, ConnError> {
         let (head, head_piece) = head(req, timeout_ms)?;
-        let body = req.body.expose_secret().as_bytes();
+        let body = req.body.reveal().as_bytes();
         let body_piece = RequestPiece {
             kind: REQUEST_BODY,
             ..RequestPiece::default()

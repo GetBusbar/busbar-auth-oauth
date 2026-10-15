@@ -29,11 +29,11 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use busbar_contract::conn::{ConnError, ConnId, PieceKind};
-use busbar_contract::redacted::Redacted;
 use zeroize::{Zeroize, Zeroizing};
 
+use crate::held::Held;
 use crate::token_response::{
-    default_expires_in, deserialize_expires_in, deserialize_redacted, json_err,
+    default_expires_in, deserialize_expires_in, deserialize_held, json_err,
 };
 use busbar_contract::header::{is_legal_header_value, token_value};
 
@@ -87,7 +87,7 @@ pub(crate) struct TokenRequest {
     /// The head fields, in order.
     pub fields: Vec<(&'static str, &'static str)>,
     /// The form body.
-    pub body: Redacted<String>,
+    pub body: Held<String>,
 }
 
 impl TokenRequest {
@@ -103,7 +103,7 @@ impl TokenRequest {
                 ("content-type", "application/x-www-form-urlencoded"),
                 ("accept", "*/*"),
             ],
-            body: Redacted::new(body),
+            body: Held::new(body),
         }
     }
 }
@@ -132,12 +132,12 @@ impl Minter {
 /// A minted access token and the wall-clock epoch second it expires at.
 pub(crate) struct CachedToken {
     /// The minted bearer, held redacted so it never leaks via `Debug`/logs and zeroizes on drop.
-    pub(crate) token: Redacted<String>,
+    pub(crate) token: Held<String>,
     pub(crate) expires_at: u64,
     /// The `Bearer <token>` value, pre-built ONCE here (at mint time) rather than on every request.
     /// `None` when `token` is empty (the pre-first-mint sentinel) or contains bytes invalid for an
     /// header value — both cases mean "emit no auth header".
-    header: Option<Redacted<String>>,
+    header: Option<Held<String>>,
 }
 
 impl std::fmt::Debug for CachedToken {
@@ -152,15 +152,15 @@ impl std::fmt::Debug for CachedToken {
 impl CachedToken {
     /// Construct a `CachedToken`, building its header once here. The second value is whether the
     /// token was omitted for bytes invalid in a header value (the caller reports it). The token
-    /// arrives already [`Redacted`] (the minters decode it straight into one); the header build
+    /// arrives already [`Held`] (the minters decode it straight into one); the header build
     /// below is its one exposure.
-    pub(crate) fn new(token: Redacted<String>, expires_at: u64) -> (Self, bool) {
-        let (header, invalid) = if token.expose_secret().is_empty() {
+    pub(crate) fn new(token: Held<String>, expires_at: u64) -> (Self, bool) {
+        let (header, invalid) = if token.reveal().is_empty() {
             (None, false)
         } else {
-            let mut v = token_value(token.expose_secret());
+            let mut v = token_value(token.reveal());
             if is_legal_header_value(&v) {
-                (Some(Redacted::new(v)), false)
+                (Some(Held::new(v)), false)
             } else {
                 v.zeroize();
                 (None, true)
@@ -178,7 +178,7 @@ impl CachedToken {
 
     /// The header value, when there is one to present.
     pub(crate) fn header(&self) -> Option<&str> {
-        self.header.as_ref().map(|h| h.expose_secret().as_str())
+        self.header.as_ref().map(|h| h.reveal().as_str())
     }
 }
 
@@ -210,11 +210,11 @@ pub(crate) fn next_refresh_secs(expires_at: u64, now: u64) -> u64 {
 }
 
 /// An OAuth token endpoint's success body (RFC 6749 section 5.1), as far as a minter reads it.
-/// Deserialize-only, and `access_token` is decoded straight into [`Redacted`] (secret-hygiene #53).
+/// Deserialize-only, and `access_token` is decoded straight into [`Held`] (secret-hygiene #53).
 #[derive(serde::Deserialize)]
 struct TokenResponse {
-    #[serde(deserialize_with = "deserialize_redacted")]
-    access_token: Redacted<String>,
+    #[serde(deserialize_with = "deserialize_held")]
+    access_token: Held<String>,
     #[serde(
         default = "default_expires_in",
         deserialize_with = "deserialize_expires_in"
@@ -377,7 +377,7 @@ impl Minted {
 
     /// Ready once the first mint has populated a non-empty token (the `ready` fact).
     pub(crate) fn is_ready(&self) -> bool {
-        !self.current().token.expose_secret().is_empty()
+        !self.current().token.reveal().is_empty()
     }
 
     /// Present the cached token for a request at wall-clock `now` (epoch seconds), through `f`
@@ -396,7 +396,7 @@ impl Minted {
             }
             return f(Read::Wait);
         }
-        if tok.token.expose_secret().is_empty() {
+        if tok.token.reveal().is_empty() {
             return f(Read::Wait);
         }
         if now >= tok.expires_at && self.refresh_failed.load(Ordering::Acquire) {
@@ -519,7 +519,7 @@ impl Minted {
             // an empty token collides with the pre-first-mint sentinel, so `ready` would stay false
             // forever AND the per-request call would emit no auth header — a permanent wedge with no
             // self-healing. Retry at MIN_SLEEP instead, exactly like a mint error.
-            Ok((fresh, _)) if fresh.token.expose_secret().is_empty() => {
+            Ok((fresh, _)) if fresh.token.reveal().is_empty() => {
                 self.refresh_failed.store(true, Ordering::Release);
                 let due = if self.on_demand {
                     u64::MAX

@@ -668,14 +668,21 @@ mod mint_door {
         }
     }
 
-    /// The authorization one `fields` answer presents, if any.
-    fn presented(answer: &Fields) -> Option<String> {
+    /// Whether one `fields` answer presents exactly `expected` as its authorization: its first
+    /// `authorization` field's value, compared with `expected`. The value is the contract's sealed
+    /// secret (busbar #1021, Part 2 #54), which a plugin's test holds no seal to read, so it is
+    /// compared through the type's own constant-time equality rather than read out. The comparison
+    /// never names the type, so it holds against the contract before and after the seal.
+    fn presents(answer: &Fields, expected: &str) -> bool {
+        fn same<T: PartialEq>(value: &T, expected: T) -> bool {
+            *value == expected
+        }
         match answer {
-            Fields::Ready(fields) => fields.iter().find_map(|f| {
-                (f.name == b"authorization")
-                    .then(|| String::from_utf8_lossy(f.value.expose_secret()).into_owned())
-            }),
-            _ => None,
+            Fields::Ready(fields) => fields
+                .iter()
+                .find(|f| f.name == b"authorization")
+                .is_some_and(|f| same(&f.value, expected.as_bytes().to_vec().into())),
+            _ => false,
         }
     }
 
@@ -746,19 +753,17 @@ mod mint_door {
         )
         .await
         .expect("the first mint lands");
-        assert_eq!(
-            presented(&first).as_deref(),
-            Some("Bearer oracle-minted-1"),
+        assert!(
+            presents(&first, "Bearer oracle-minted-1"),
             "the first upstream request carries the first token: {first:?}"
         );
-        assert_eq!(
-            presented(
+        assert!(
+            presents(
                 &instance
                     .fields_now(handle, &request)
-                    .expect("ready on the spot")
-            )
-            .as_deref(),
-            Some("Bearer oracle-minted-1"),
+                    .expect("ready on the spot"),
+                "Bearer oracle-minted-1"
+            ),
             "the cached bearer answers in place, one call"
         );
 
@@ -767,7 +772,7 @@ mod mint_door {
         let refreshed = tokio::time::timeout(Duration::from_secs(10), async {
             loop {
                 if let Some(answer) = instance.fields_now(handle, &request) {
-                    if presented(&answer).as_deref() == Some("Bearer oracle-minted-2") {
+                    if presents(&answer, "Bearer oracle-minted-2") {
                         return answer;
                     }
                 }
@@ -776,9 +781,9 @@ mod mint_door {
         })
         .await
         .expect("the refresh lands");
-        assert_eq!(
-            presented(&refreshed).as_deref(),
-            Some("Bearer oracle-minted-2")
+        assert!(
+            presents(&refreshed, "Bearer oracle-minted-2"),
+            "the refreshed bearer is presented: {refreshed:?}"
         );
 
         // THE TOKEN REQUESTS, as 1.5.5 POSTed them: the mint, then the refresh, byte for byte.
