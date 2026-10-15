@@ -25,9 +25,9 @@ use super::TokenRequest;
 #[derive(Debug)]
 pub(crate) struct ClientCreds {
     client_id: String,
-    /// The confidential-client secret, held [`busbar_contract::redacted::Redacted`] so it never leaks via `Debug`
+    /// The confidential-client secret, held [`crate::held::Held`] so it never leaks via `Debug`
     /// (this struct derives it) and zeroizes on drop. Exposed only into the token-endpoint POST body.
-    client_secret: busbar_contract::redacted::Redacted<String>,
+    client_secret: crate::held::Held<String>,
     token_url: String,
     scope: String,
 }
@@ -39,7 +39,7 @@ pub(crate) fn build(credential: &str, token_url: &str, scope: &str) -> Result<Cl
     let (client_id, client_secret) = split_credential(credential)?;
     Ok(ClientCreds {
         client_id: client_id.to_string(),
-        client_secret: busbar_contract::redacted::Redacted::new(client_secret.to_string()),
+        client_secret: crate::held::Held::new(client_secret.to_string()),
         token_url: token_url.to_string(),
         scope: scope.to_string(),
     })
@@ -74,7 +74,7 @@ impl ClientCreds {
         let form = serde_urlencoded::to_string([
             ("grant_type", "client_credentials"),
             ("client_id", self.client_id.as_str()),
-            ("client_secret", self.client_secret.expose_secret().as_str()),
+            ("client_secret", self.client_secret.reveal().as_str()),
             ("scope", self.scope.as_str()),
         ])
         .map_err(|e| format!("token request form could not be encoded: {e}"))?;

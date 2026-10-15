@@ -8,7 +8,7 @@
 
 use super::*;
 
-/// The resolved `client_secret` NEVER appears in this struct's `Debug` (it is held `Redacted`).
+/// The resolved `client_secret` NEVER appears in this struct's `Debug` (it is held in a `Held`).
 #[test]
 fn client_secret_is_redacted_in_debug() {
     let creds = build("id:super-secret-value", "https://t", "s").unwrap();
@@ -51,7 +51,7 @@ fn build_accepts_a_secret_containing_a_colon() {
     // Only the FIRST colon splits id:secret, so a secret with colons is preserved.
     let c = build("client-abc:secret:with:colons", "https://t", "s").unwrap();
     assert_eq!(
-        c.request().unwrap().body.expose_secret(),
+        c.request().unwrap().body.reveal(),
         "grant_type=client_credentials&client_id=client-abc&client_secret=secret%3Awith%3Acolons&scope=s"
     );
 }
@@ -79,7 +79,7 @@ fn the_token_request_is_the_form_1_5_5_posted() {
         ]
     );
     assert_eq!(
-        req.body.expose_secret(),
+        req.body.reveal(),
         "grant_type=client_credentials&client_id=my+id&client_secret=s3cr%26t%3D&scope=https%3A%2F%2Fcognitiveservices.azure.com%2F.default"
     );
 }

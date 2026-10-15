@@ -61,7 +61,7 @@ impl Wire for Scripted {
                 .iter()
                 .map(|(k, v)| (k.to_string(), v.to_string()))
                 .collect(),
-            req.body.expose_secret().clone(),
+            req.body.reveal().clone(),
         ));
         let next = self
             .scripts
