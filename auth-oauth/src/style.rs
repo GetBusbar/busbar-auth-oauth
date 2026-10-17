@@ -12,7 +12,7 @@
 //!
 //! | style | settings |
 //! |---|---|
-//! | `jwt-bearer` | `{scope?, subject?, max_response_bytes?}` |
+//! | `jwt-bearer` | `{token_uri?, scope?, subject?, max_response_bytes?}` (`token_uri`: the host's judged copy of the service account's endpoint) |
 //! | `oauth-client-credentials` | `{token_url, scope, max_response_bytes?}` |
 //! | `oauth-token-exchange` | `{token_url, resource, subject_token_type?, max_response_bytes?}` |
 //!
@@ -60,23 +60,25 @@ pub struct ExchangeBinding {
 impl ExchangeBinding {
     /// The cache key of this binding's cell for `scope`: SHA-256 over the binding's own key and the
     /// scope, so two scopes never share a token and two bindings never share a scope's.
-    pub fn scope_key(&self, scope: &str) -> [u8; 32] {
+    pub fn scope_key(&self, scope: &[u8]) -> [u8; 32] {
         use sha2::{Digest, Sha256};
         let mut h = Sha256::new();
         h.update(self.key);
         h.update([0]);
-        h.update(scope.as_bytes());
+        h.update(scope);
         h.finalize().into()
     }
 
-    /// The cell for `scope` in `cache` (made, unminted, when absent).
-    pub fn cell(&self, scope: &str, cache: &dyn TokenCache) -> ([u8; 32], Arc<Minted>) {
-        let key = self.scope_key(scope);
-        let minter = Minter::TokenExchange(mint::token_exchange::Scoped::new(
-            Arc::clone(&self.exchange),
-            scope,
-        ));
-        (key, cache.cell(key, minter, self.max_response_bytes))
+    /// What a new cell for `scope` mints with, and its response cap: built only when the cache
+    /// holds no cell for the scope yet.
+    pub(crate) fn minter(&self, scope: &[u8]) -> (Minter, usize) {
+        (
+            Minter::TokenExchange(mint::token_exchange::Scoped::new(
+                Arc::clone(&self.exchange),
+                &String::from_utf8_lossy(scope),
+            )),
+            self.max_response_bytes,
+        )
     }
 }
 
