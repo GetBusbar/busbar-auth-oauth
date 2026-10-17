@@ -229,6 +229,9 @@ impl Oauth {
     /// lands; REFUSED for a passthrough or a handle this generation does not hold; FAILED when the
     /// call's exchange failed.
     ///
+    /// NO LOST WAKE: a call that would wait parks its ticket BEFORE it reads the token, and reads
+    /// again once parked. A mint stores its token before it wakes the parked tickets, so the call
+    /// either is parked in time to be woken, or reads the token the mint stored.
     pub(crate) fn answer(
         &self,
         ask: &Ask<'_>,
@@ -256,18 +259,18 @@ impl Oauth {
         }
         let scope = ask.scope.unwrap_or_default();
         let key = x.scope_key(scope);
-        let (minter, max) = x.minter(scope);
-        let cell = style::TokenCache::cell(self, key, minter, max);
-        // Parked BEFORE the read arms the exchange: an exchange that lands at once still finds it.
-        if !ticket.is_none() && !cell.usable(now) {
-            self.park_exchange(key, ticket);
-        }
+        // The lookup and the park are one critical section with the cache (instance.rs).
+        let cell = self.exchange_cell(key, || x.minter(scope), ticket, |c| c.usable(now));
         cell.read(now, |r| match r {
             Read::Header(h) => {
+                self.unpark_exchange(key, ticket);
                 present(h);
                 Poll::Ready(FieldsAnswer::Ready)
             }
-            Read::Nothing => Poll::Ready(FieldsAnswer::Ready),
+            Read::Nothing => {
+                self.unpark_exchange(key, ticket);
+                Poll::Ready(FieldsAnswer::Ready)
+            }
             Read::Wait => {
                 self.mint_soon(host);
                 Poll::Pending
@@ -293,6 +296,10 @@ impl Oauth {
             return Poll::Pending;
         }
         self.park(ticket);
+        if let Some(a) = m.read(now, |r| ready_answer(r, &mut *present)) {
+            self.unpark_mint(ticket);
+            return Poll::Ready(a);
+        }
         self.mint_soon(host);
         Poll::Pending
     }
@@ -300,7 +307,7 @@ impl Oauth {
     /// THE `ready` FACT of `handle`: whether `fields` would present a credential now.
     pub(crate) fn ready(&self, handle: u64) -> bool {
         match self.bound(handle) {
-            Some(style::Binding::Minted(cell)) => cell.is_ready(),
+            Some(style::Binding::Minted(cell)) => cell.presents(mint::now_epoch()),
             // A token exchange is ready whenever asked: each request's exchange is its own.
             Some(style::Binding::Exchange(_)) => true,
             None => false,

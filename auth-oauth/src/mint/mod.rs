@@ -375,9 +375,21 @@ impl Minted {
             .clone()
     }
 
-    /// Ready once the first mint has populated a non-empty token (the `ready` fact).
+    /// Whether the first mint has populated a non-empty token.
     pub(crate) fn is_ready(&self) -> bool {
         !self.current().token.reveal().is_empty()
+    }
+
+    /// THE `ready` FACT at wall-clock `now` (epoch seconds), by the rule [`Minted::read`] applies:
+    /// a call would present a credential now. Not before the first mint, not for a token that
+    /// yields no header (bytes invalid in a header value), and not once the token has expired and
+    /// its refresh failed (contract `abi/auth/outbound.rs`: "`0` = not yet (before the first mint,
+    /// or expired with a failed refresh)").
+    pub(crate) fn presents(&self, now: u64) -> bool {
+        if self.on_demand {
+            return self.usable(now);
+        }
+        self.read(now, |r| matches!(r, Read::Header(_)))
     }
 
     /// Present the cached token for a request at wall-clock `now` (epoch seconds), through `f`
