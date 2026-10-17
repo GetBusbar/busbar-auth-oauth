@@ -54,7 +54,7 @@ pub struct Oauth {
     cache: Mutex<HashMap<[u8; 32], Arc<Minted>>>,
     waiters: Mutex<Vec<Ticket>>,
     /// The tickets waiting on each on-demand cell's exchange (a token-exchange scope), by its cache
-    /// key: woken when it lands, or failed when it fails.
+    /// key: woken when it lands, or failed when it fails. Taken after `cache` wherever both are.
     exchange_waiters: Mutex<HashMap<[u8; 32], Vec<Ticket>>>,
     /// The tickets whose exchange failed: their resumed call answers FAILED (the attempt fails, as
     /// the previous release failed the call whose exchange the authorization server refused).
@@ -125,12 +125,39 @@ impl Oauth {
             .map(|(_, b)| b.clone())
     }
 
-    /// Park `ticket` until the exchange of the on-demand cell `key` lands (or fails).
-    pub(crate) fn park_exchange(&self, key: [u8; 32], ticket: Ticket) {
-        let mut w = lock(&self.exchange_waiters);
-        let waiting = w.entry(key).or_default();
-        if !waiting.contains(&ticket) {
-            waiting.push(ticket);
+    /// THE CELL OF AN ON-DEMAND SCOPE, looked up (or made) and, for a call on `ticket` that will
+    /// wait, that ticket parked on it, in ONE critical section with the cache: a tick that settles
+    /// the cell either ran before (and the call finds or makes the cell anew) or after (and finds
+    /// the ticket waiting, so it keeps the cell). `usable` says whether the call would present the
+    /// cell's token now; a ticket that would wait is parked BEFORE the token is read, so an
+    /// exchange that lands meanwhile still finds it.
+    pub(crate) fn exchange_cell(
+        &self,
+        key: [u8; 32],
+        make: impl FnOnce() -> (Minter, usize),
+        ticket: Ticket,
+        usable: impl FnOnce(&Minted) -> bool,
+    ) -> Arc<Minted> {
+        let mut cache = lock(&self.cache);
+        let cell = Arc::clone(cache.entry(key).or_insert_with(|| {
+            let (minter, max) = make();
+            Arc::new(Minted::new(minter, max))
+        }));
+        if !ticket.is_none() && !usable(&cell) {
+            let mut w = lock(&self.exchange_waiters);
+            let waiting = w.entry(key).or_default();
+            if !waiting.contains(&ticket) {
+                waiting.push(ticket);
+            }
+        }
+        drop(cache);
+        cell
+    }
+
+    /// Forget `ticket` as waiting on the on-demand cell `key` (its call answered after all).
+    pub(crate) fn unpark_exchange(&self, key: [u8; 32], ticket: Ticket) {
+        if let Some(waiting) = lock(&self.exchange_waiters).get_mut(&key) {
+            waiting.retain(|t| *t != ticket);
         }
     }
 
@@ -157,6 +184,11 @@ impl Oauth {
         if !w.contains(&ticket) {
             w.push(ticket);
         }
+    }
+
+    /// Forget `ticket` as waiting on a mint (its call answered after all).
+    pub(crate) fn unpark_mint(&self, ticket: Ticket) {
+        lock(&self.waiters).retain(|t| *t != ticket);
     }
 
     /// `cancel`: forget `ticket`.
@@ -269,6 +301,8 @@ impl Oauth {
             }
         }
         if minted {
+            // The token is stored before this drain: a call that parks after the drain reads it
+            // (it parks before it reads), and one that parked before is woken here.
             let woken: Vec<Ticket> = std::mem::take(&mut *lock(&self.waiters));
             if let Some(h) = host {
                 for t in woken {
@@ -282,7 +316,8 @@ impl Oauth {
     /// AN ON-DEMAND CELL'S TICK, settled: a landed exchange wakes the tickets waiting on it; a
     /// failed one fails them (each is woken, and its resumed call answers FAILED), naming why in
     /// the instance's log; a cell no request waits on, with nothing in flight and no token it would
-    /// present, is dropped from the cache (its scope's next request makes it again).
+    /// present, is dropped from the cache (its scope's next request makes it again) — judged under
+    /// the cache's lock, so a call looking the cell up and parking on it is never split from it.
     fn settle_exchange(
         &self,
         key: [u8; 32],
@@ -325,11 +360,12 @@ impl Oauth {
                 }
             }
         }
+        let mut cache = lock(&self.cache);
         let waited = lock(&self.exchange_waiters)
             .get(&key)
             .is_some_and(|w| !w.is_empty());
         if !waited && cell.idle() && !cell.usable(crate::mint::now_epoch()) {
-            lock(&self.cache).remove(&key);
+            cache.remove(&key);
         }
     }
 }
