@@ -73,19 +73,19 @@ impl Scoped {
         }
     }
 
-    /// The token request (RFC 8693 section 2.1): the form, encoded through `serde_urlencoded`,
+    /// The token request (RFC 8693 section 2.1): the form byte for byte as `serde_urlencoded`
+    /// wrote it, built once and wiped on drop ([`super::form`]: it carries the subject token),
     /// POSTed to `token_url` over the need that names it.
     pub(crate) fn request(&self) -> Result<TokenRequest, String> {
         let x = &self.exchange;
-        let form = serde_urlencoded::to_string([
+        let form = super::form(&[
             ("grant_type", GRANT_TYPE),
             ("subject_token", x.subject_token.reveal().as_str()),
             ("subject_token_type", x.subject_token_type.as_str()),
             ("requested_token_type", ACCESS_TOKEN_TYPE),
             ("resource", x.resource.as_str()),
             ("scope", self.scope.as_str()),
-        ])
-        .map_err(|e| format!("the RFC 8693 exchange form could not be encoded: {e}"))?;
+        ]);
         Ok(TokenRequest::form(
             super::need::TOKEN_URL,
             x.token_url.clone(),

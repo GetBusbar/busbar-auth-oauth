@@ -17,16 +17,9 @@ description = "The OAuth self-minting auth styles (jwt-bearer, oauth-client-cred
 # one exported symbol.
 crate-type = ["rlib"]
 
-[features]
-# DECLARED SO THE SOURCE COMPILES VERBATIM (src/lib.rs gates its `export_door!` on it). Nothing in
-# this repo enables it: the dropped-in artifact is the sibling `busbar-auth-oauth-plugin` cdylib, which
-# exports this crate's door unconditionally. Enabling it here as well would export the one
-# `busbar_plugin_door` symbol twice.
-dropped-in = []
-
 # DEPENDENCY POLICY. A plugin's closure is `busbar-contract` plus the third-party crates it needs to
 # do its job (owner ruling 2026-09-28, PLUGIN LIBRARIES): the RFC 7523 RS256 signature (`ring`,
-# `base64`), the token request form (`serde_urlencoded`) and response (`serde`, `serde_json`), the
+# `base64`), the token response (`serde`, `serde_json`), the
 # status line a mint failure names (the `http` crate), and the cache key hash (`sha2`). No kernel
 # crate, no plane, no sibling auth-kind plugin.
 # Every version is the workspace table's (busbar's at the pin).
@@ -37,8 +30,12 @@ http = { workspace = true }
 ring = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-serde_urlencoded = { workspace = true }
 # Key material and token bodies are wiped on drop (BUSBAR-1.6.0.md THE DESIGN §6: "auth material is
 # zeroised").
 zeroize = { workspace = true }
 sha2 = { workspace = true }
+
+[dev-dependencies]
+# The token request forms are written by the crate's own encoder (`mint::form`, sized once and wiped
+# on drop); the tests read them back, and hold the encoder to `serde_urlencoded`'s bytes.
+serde_urlencoded = { workspace = true }
