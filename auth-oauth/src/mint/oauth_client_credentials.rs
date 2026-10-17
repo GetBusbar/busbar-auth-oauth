@@ -68,16 +68,16 @@ pub(crate) fn validate_credential(credential: &str) -> Result<(), String> {
 }
 
 impl ClientCreds {
-    /// The token request (RFC 6749 §4.4): the form encodes through `serde_urlencoded` (the exact call
-    /// reqwest's `.form()` was), POSTed to `token_url`.
+    /// The token request (RFC 6749 §4.4): the form byte for byte as reqwest's `.form()`
+    /// (`serde_urlencoded`) wrote it, built once and wiped on drop ([`super::form`]: it carries the
+    /// client secret), POSTed to `token_url`.
     pub(crate) fn request(&self) -> Result<TokenRequest, String> {
-        let form = serde_urlencoded::to_string([
+        let form = super::form(&[
             ("grant_type", "client_credentials"),
             ("client_id", self.client_id.as_str()),
             ("client_secret", self.client_secret.reveal().as_str()),
             ("scope", self.scope.as_str()),
-        ])
-        .map_err(|e| format!("token request form could not be encoded: {e}"))?;
+        ]);
         Ok(TokenRequest::form(
             super::need::TOKEN_URL,
             self.token_url.clone(),

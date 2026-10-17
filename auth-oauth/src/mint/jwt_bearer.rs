@@ -73,6 +73,11 @@ pub(crate) fn build(
 /// the PKCS#8 RSA key. Run by [`build`], which the config `--validate` dry-run
 /// reaches through `open_outbound` (it never dials), so both apply IDENTICAL checks with identical
 /// error messages — they can never diverge.
+///
+/// The JSON decoder never decodes the private key: a PEM in JSON always carries `\n` escapes, and a
+/// decoder unescapes a string into a scratch buffer of its own that it frees unwiped. The decode
+/// skips the key's value (skipping copies nothing) and [`private_key`] unescapes it straight into a
+/// buffer sized once and wiped on drop (THE DESIGN §6: "auth material is zeroised").
 fn parse_service_account(
     credential: &str,
 ) -> Result<(ServiceAccount, ring::signature::RsaKeyPair), String> {
@@ -82,18 +87,131 @@ fn parse_service_account(
     let sa: ServiceAccount = serde_json::from_str(&sa_json).map_err(
         crate::token_response::json_err("service-account JSON is invalid"),
     )?;
-    let der = pem_to_pkcs8_der(sa.private_key.reveal())?;
+    let key = private_key(&sa_json)?;
+    let der = pem_to_pkcs8_der(&key)?;
     let key_pair = ring::signature::RsaKeyPair::from_pkcs8(&der)
         .map_err(|e| format!("service-account private_key is not a valid PKCS#8 RSA key: {e}"))?;
     Ok((sa, key_pair))
 }
 
+/// THE SERVICE ACCOUNT'S `private_key`, unescaped out of `json` (a document the decoder has
+/// already judged well-formed, with a string `private_key` member) into ONE buffer sized to the
+/// escaped length (unescaping only shortens) and wiped on drop.
+///
+/// # Errors
+/// The document's `private_key` is not a string (the decode has already refused a missing one).
+pub(crate) fn private_key(json: &str) -> Result<Zeroizing<String>, String> {
+    const NOT_TEXT: &str = "service-account JSON is invalid: a field is missing or has the wrong \
+                            type (the decoder's text is withheld)";
+    let raw = top_level_string(json.as_bytes(), b"private_key").ok_or(NOT_TEXT)?;
+    unescape(raw).ok_or_else(|| NOT_TEXT.to_string())
+}
+
+/// The escaped bytes (between the quotes) of the top-level object member `name` of the
+/// well-formed JSON document `json`, when that member is a string.
+fn top_level_string<'a>(json: &'a [u8], name: &[u8]) -> Option<&'a [u8]> {
+    let mut i = 0;
+    let mut depth = 0_usize;
+    // At depth 1, whether the next string is a member name (after `{` or `,`).
+    let mut expect_name = false;
+    let mut want_value = false;
+    while i < json.len() {
+        match json[i] {
+            b'"' => {
+                let start = i + 1;
+                let mut j = start;
+                while j < json.len() && json[j] != b'"' {
+                    j += if json[j] == b'\\' { 2 } else { 1 };
+                }
+                let s = json.get(start..j)?;
+                if depth == 1 && want_value {
+                    return Some(s);
+                }
+                want_value = depth == 1 && expect_name && s == name;
+                expect_name = false;
+                i = j + 1;
+                continue;
+            }
+            b'{' => {
+                depth += 1;
+                expect_name = depth == 1;
+                want_value = false;
+            }
+            b'[' => {
+                depth += 1;
+                want_value = false;
+            }
+            b'}' | b']' => depth = depth.saturating_sub(1),
+            b',' => {
+                expect_name = depth == 1;
+                want_value = false;
+            }
+            b':' => {}
+            b if b.is_ascii_whitespace() => {}
+            // A value that is no string ends a pending match.
+            _ => want_value = false,
+        }
+        i += 1;
+    }
+    None
+}
+
+/// JSON string escapes resolved (RFC 8259 section 7), into a buffer sized once to the escaped
+/// length; `None` for an escape the decoder would have refused.
+fn unescape(raw: &[u8]) -> Option<Zeroizing<String>> {
+    let mut out = Zeroizing::new(String::with_capacity(raw.len()));
+    let mut i = 0;
+    let hex4 = |at: usize| -> Option<u32> {
+        let h = raw.get(at..at + 4)?;
+        u32::from_str_radix(std::str::from_utf8(h).ok()?, 16).ok()
+    };
+    while i < raw.len() {
+        if raw[i] != b'\\' {
+            // Copy the run of plain bytes up to the next escape (UTF-8 as the decoder judged it).
+            let end = raw[i..]
+                .iter()
+                .position(|b| *b == b'\\')
+                .map_or(raw.len(), |p| i + p);
+            out.push_str(std::str::from_utf8(&raw[i..end]).ok()?);
+            i = end;
+            continue;
+        }
+        let c = match *raw.get(i + 1)? {
+            b'"' => '"',
+            b'\\' => '\\',
+            b'/' => '/',
+            b'b' => '\u{8}',
+            b'f' => '\u{c}',
+            b'n' => '\n',
+            b'r' => '\r',
+            b't' => '\t',
+            b'u' => {
+                let hi = hex4(i + 2)?;
+                if (0xD800..0xDC00).contains(&hi) && raw.get(i + 6..i + 8) == Some(&b"\\u"[..]) {
+                    let lo = hex4(i + 8)?;
+                    i += 6;
+                    char::from_u32(0x10000 + ((hi - 0xD800) << 10) + (lo.checked_sub(0xDC00)?))?
+                } else {
+                    char::from_u32(hi)?
+                }
+            }
+            _ => return None,
+        };
+        i += if raw[i + 1] == b'u' { 6 } else { 2 };
+        out.push(c);
+    }
+    Some(out)
+}
+
 impl Signer {
     /// Sign a JWT-bearer assertion for `now` (epoch seconds): `header.claims.signature`, RS256 over
-    /// the url-safe unpadded base64 of the fixed header and the claim set (RFC 7523).
-    pub(crate) fn assertion(&self, now: u64) -> Result<String, String> {
+    /// the url-safe unpadded base64 of the fixed header and the claim set (RFC 7523). The assertion
+    /// is accepted by the token endpoint for an hour: it is built in ONE buffer sized to its exact
+    /// length first and wiped on drop, as is the signature it carries.
+    pub(crate) fn assertion(&self, now: u64) -> Result<Zeroizing<String>, String> {
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
         let exp = now + 3600; // 1h assertion; the returned token's own TTL governs refresh
-        let header = b64url(br#"{"alg":"RS256","typ":"JWT"}"#);
+        const HEADER: &[u8] = br#"{"alg":"RS256","typ":"JWT"}"#;
         let claims_json = jwt_claims_json(
             &self.issuer,
             &self.scope,
@@ -102,30 +220,35 @@ impl Signer {
             exp,
             self.subject.as_deref(),
         )?;
-        let claims = b64url(claims_json.as_bytes());
-        let signing_input = format!("{header}.{claims}");
-
-        let mut sig = vec![0u8; self.key_pair.public().modulus_len()];
+        let mut sig = Zeroizing::new(vec![0u8; self.key_pair.public().modulus_len()]);
+        let b64_len = |n: usize| base64::encoded_len(n, false).unwrap_or(0);
+        let len = b64_len(HEADER.len()) + 1 + b64_len(claims_json.len()) + 1 + b64_len(sig.len());
+        let mut out = Zeroizing::new(String::with_capacity(len));
+        B64.encode_string(HEADER, &mut out);
+        out.push('.');
+        B64.encode_string(claims_json.as_bytes(), &mut out);
         self.key_pair
             .sign(
                 &ring::signature::RSA_PKCS1_SHA256,
                 &self.rng,
-                signing_input.as_bytes(),
+                out.as_bytes(),
                 &mut sig,
             )
             .map_err(|_| "RS256 signing failed".to_string())?;
-        Ok(format!("{signing_input}.{}", b64url(&sig)))
+        out.push('.');
+        B64.encode_string(&*sig, &mut out);
+        debug_assert_eq!(out.len(), len, "the assertion is sized once");
+        Ok(out)
     }
 
-    /// The token request for `now`: the assertion, form-encoded through `serde_urlencoded` (the exact
-    /// call reqwest's `.form()` was), POSTed to the SA's `token_uri` (RFC 7523).
+    /// The token request for `now`: the assertion, form-encoded byte for byte as reqwest's `.form()`
+    /// (`serde_urlencoded`) wrote it ([`super::form`]), POSTed to the SA's `token_uri` (RFC 7523).
     pub(crate) fn request(&self, now: u64) -> Result<TokenRequest, String> {
         let assertion = self.assertion(now)?;
-        let form = serde_urlencoded::to_string([
+        let form = super::form(&[
             ("grant_type", "urn:ietf:params:oauth:grant-type:jwt-bearer"),
             ("assertion", assertion.as_str()),
-        ])
-        .map_err(|e| format!("token request form could not be encoded: {e}"))?;
+        ]);
         Ok(TokenRequest::form(
             super::need::TOKEN_URI,
             self.token_uri.clone(),
@@ -277,16 +400,13 @@ fn pem_to_pkcs8_der(pem: &str) -> Result<Zeroizing<Vec<u8>>, String> {
         })
 }
 
-fn b64url(bytes: &[u8]) -> String {
-    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
-}
-
 #[derive(serde::Deserialize)]
 struct ServiceAccount {
     client_email: String,
-    /// The RSA signing key, decoded straight into `Held`; exposed only to the PEM parse.
-    #[serde(deserialize_with = "crate::token_response::deserialize_held")]
-    private_key: crate::held::Held<String>,
+    /// The RSA signing key: required, and skipped by the decoder (skipping copies nothing);
+    /// [`private_key`] reads it.
+    #[allow(dead_code)]
+    private_key: serde::de::IgnoredAny,
     #[serde(default = "default_token_uri")]
     token_uri: String,
 }
