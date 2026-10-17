@@ -649,7 +649,7 @@ fn conn_cause(e: ConnError) -> &'static str {
         ConnError::Refused => "refused",
         ConnError::Fault => "fault",
         ConnError::Unarmed => "not armed",
-        ConnError::CredentialUnavailable => "credential unavailable",
+        ConnError::CredentialUnavailable => "the request's credential is unavailable",
     }
 }
 
