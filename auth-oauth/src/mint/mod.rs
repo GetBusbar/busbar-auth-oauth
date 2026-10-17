@@ -12,8 +12,8 @@
 //! refresh schedule ([`next_refresh_secs`]) and every failure text are verbatim. What changed is the
 //! DRIVER, as BUSBAR-1.6.0.md THE DESIGN, §6.5 requires: the old background tokio task becomes a state machine
 //! advanced on `tick` ([`Minted::tick`]), and the old engine client becomes the plugin's own need
-//! ([`Wire`], the host's connection table). Nothing here blocks: a read with nothing ready answers
-//! pending and the next `tick` reads again.
+//! ([`Wire`], the host's connection table). Nothing here blocks: an exchange whose reply is not
+//! ready yet is read again by the next `drive` its wake brings, or the next `tick`.
 //!
 //! THE EXPIRED-TOKEN RULE (BUSBAR-1.6.0.md THE DESIGN, §6.5, Q-EXPIRED): when the cached token has expired AND its
 //! refresh has failed, the per-request call answers not-ready ([`Read::Wait`]) and the ticket is
@@ -46,9 +46,8 @@ pub(crate) const MIN_SLEEP_SECS: u64 = 30;
 /// The whole-mint deadline — send plus capped body read under ONE absolute instant, the
 /// client-level 30s total the retired reqwest builder carried.
 pub(crate) const MINT_DEADLINE_SECS: u64 = 30;
-/// The cap on a token response body when the kernel states none: 1.5.5's
-/// `limits.upstream_error_body_max_bytes` default (256 KiB). The kernel passes the operator's value
-/// in the binding's settings (`max_response_bytes`).
+/// The cap on a token response body when the binding's settings state none (`max_response_bytes`):
+/// 1.5.5's `limits.upstream_error_body_max_bytes` default (256 KiB).
 pub(crate) const DEFAULT_MAX_RESPONSE_BYTES: usize = 256 * 1024;
 /// One read of a token response, in bytes.
 const READ_BUF_BYTES: usize = 16 * 1024;
@@ -95,7 +94,7 @@ impl TokenRequest {
     /// order: the form's `content-type`, then reqwest's client-default `accept: */*`, which the
     /// request carries itself (the http door writes no field the caller did not: transport
     /// neutrality, SEAM-4i).
-    pub(crate) fn form(need: u32, target: String, body: String) -> Self {
+    pub(crate) fn form(need: u32, target: String, body: Held<String>) -> Self {
         Self {
             need,
             target,
@@ -103,9 +102,60 @@ impl TokenRequest {
                 ("content-type", "application/x-www-form-urlencoded"),
                 ("accept", "*/*"),
             ],
-            body: Held::new(body),
+            body,
         }
     }
+}
+
+/// Whether `b` is written as itself in an `application/x-www-form-urlencoded` value (the WHATWG
+/// byte serializer `serde_urlencoded` writes with: ASCII alphanumerics and `*-._`).
+const fn form_kept(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || matches!(b, b'*' | b'-' | b'.' | b'_')
+}
+
+/// How many bytes `v` takes form-encoded.
+fn form_len(v: &str) -> usize {
+    v.bytes()
+        .map(|b| if form_kept(b) || b == b' ' { 1 } else { 3 })
+        .sum()
+}
+
+/// THE TOKEN REQUEST FORM: `pairs` as `name=value&...`, byte for byte what
+/// `serde_urlencoded::to_string` wrote for them (space as `+`, every byte but ASCII alphanumerics
+/// and `*-._` as an upper-case `%XX`), built in ONE buffer sized to the exact length first, so no
+/// growth frees a partial copy of the credential the form carries; held wiped on drop (THE DESIGN
+/// §6: "auth material is zeroised").
+pub(crate) fn form(pairs: &[(&str, &str)]) -> Held<String> {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let len = pairs
+        .iter()
+        .map(|(n, v)| form_len(n) + 1 + form_len(v))
+        .sum::<usize>()
+        + pairs.len().saturating_sub(1);
+    let mut out = String::with_capacity(len);
+    for (i, (name, value)) in pairs.iter().enumerate() {
+        if i > 0 {
+            out.push('&');
+        }
+        for (j, part) in [name, value].into_iter().enumerate() {
+            if j == 1 {
+                out.push('=');
+            }
+            for b in part.bytes() {
+                if form_kept(b) {
+                    out.push(char::from(b));
+                } else if b == b' ' {
+                    out.push('+');
+                } else {
+                    out.push('%');
+                    out.push(char::from(HEX[usize::from(b >> 4)]));
+                    out.push(char::from(HEX[usize::from(b & 0x0f)]));
+                }
+            }
+        }
+    }
+    debug_assert_eq!(out.len(), len, "the form is sized once");
+    Held::new(out)
 }
 
 /// A style that mints: how it builds its token request.
@@ -375,9 +425,21 @@ impl Minted {
             .clone()
     }
 
-    /// Ready once the first mint has populated a non-empty token (the `ready` fact).
+    /// Whether the first mint has populated a non-empty token.
     pub(crate) fn is_ready(&self) -> bool {
         !self.current().token.reveal().is_empty()
+    }
+
+    /// THE `ready` FACT at wall-clock `now` (epoch seconds), by the rule [`Minted::read`] applies:
+    /// a call would present a credential now. Not before the first mint, not for a token that
+    /// yields no header (bytes invalid in a header value), and not once the token has expired and
+    /// its refresh failed (contract `abi/auth/outbound.rs`: "`0` = not yet (before the first mint,
+    /// or expired with a failed refresh)").
+    pub(crate) fn presents(&self, now: u64) -> bool {
+        if self.on_demand {
+            return self.usable(now);
+        }
+        self.read(now, |r| matches!(r, Read::Header(_)))
     }
 
     /// Present the cached token for a request at wall-clock `now` (epoch seconds), through `f`

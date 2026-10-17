@@ -7,22 +7,19 @@
 //! states reaching that request, a cached token per scope (two scopes never share one), a failed
 //! exchange failing exactly the calls that waited on it, and the binding's refusals.
 
-use std::ffi::c_void;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
-use busbar_contract::abi::auth::{FieldSpan, FieldsIn, FieldsOut, EXT_SCOPE, MODE_OWN};
-use busbar_contract::abi::mechanism::call::{Blob, Outcome, BLOB_OCTETS};
-use busbar_contract::abi::mechanism::extensions;
-use busbar_contract::abi::mechanism::ticket::{HostCtx, Ticket};
-use busbar_contract::abi::sdk::door::Slot;
+use busbar_contract::abi::mechanism::call::Outcome;
+use busbar_contract::abi::mechanism::ticket::Ticket;
+use busbar_contract::abi::sdk::auth_outbound::Diags;
 use busbar_contract::conn::{ConnError, ConnId};
 
 use super::*;
-use crate::abi::Waker;
-use crate::instance::{EnvStore, Oauth};
+use crate::instance::Oauth;
 use crate::mint::tests::{Scripted, Step};
 use crate::mint::{Got, Wire};
 use crate::style;
+use crate::test_support::{self, TestHost};
 
 /// The scripted need, shared so the test reads what was sent.
 struct Shared(Arc<Scripted>);
@@ -39,20 +36,6 @@ impl Wire for Shared {
     }
 }
 
-/// The tickets this module's instances woke (this module's own: the tests in it share no ticket).
-static WOKEN: Mutex<Vec<Ticket>> = Mutex::new(Vec::new());
-
-extern "C" fn wake(_: HostCtx, t: Ticket) {
-    WOKEN.lock().unwrap().push(t);
-}
-
-fn woken(of: &[Ticket]) -> Vec<Ticket> {
-    let mut all = WOKEN.lock().unwrap();
-    let mine: Vec<Ticket> = all.iter().copied().filter(|t| of.contains(t)).collect();
-    all.retain(|t| !of.contains(t));
-    mine
-}
-
 const SETTINGS: &str =
     r#"{"token_url":"https://as.example/token","resource":"https://tools.example/rpc"}"#;
 const SUBJECT: &str = "busbar-own-subject-token";
@@ -65,11 +48,7 @@ fn ticket(slot: u32) -> Ticket {
 }
 
 fn instance(wire: &Arc<Scripted>) -> Oauth {
-    Oauth::with_wire(
-        1,
-        Some(Waker::test(wake)),
-        Some(Box::new(Shared(wire.clone()))),
-    )
+    Oauth::with_wire(1, Some(Box::new(Shared(wire.clone()))))
 }
 
 fn open(o: &Oauth) -> u64 {
@@ -83,46 +62,15 @@ fn open(o: &Oauth) -> u64 {
     o.keep_binding(b)
 }
 
-/// One `fields` call through the slot body, its extensions blob stating `scope` (none: absent).
-fn fields(o: &Oauth, handle: u64, ticket: Ticket, scope: Option<&str>) -> (Outcome, String) {
-    let ext = scope.map(|s| extensions::encode(&[(EXT_SCOPE, s.as_bytes())]));
-    let mut buf = [0_u8; 512];
-    let span = busbar_contract::abi::mechanism::call::Span { offset: 0, len: 0 };
-    let mut spans = [FieldSpan {
-        name: span,
-        value: span,
-        flags: 0,
-        _reserved: 0,
-    }; 4];
-    let mut i: FieldsIn = crate::abi::zeroed_in();
-    i.head.ticket = ticket;
-    i.head.deadline_ns = 99;
-    if let Some(e) = &ext {
-        i.head.extensions = Blob {
-            ptr: e.as_ptr(),
-            len: e.len(),
-            fmt: BLOB_OCTETS,
-            flags: 0,
-        };
-    }
-    i.handle = handle;
-    i.mode = MODE_OWN;
-    (i.field_buf, i.field_buf_cap) = (buf.as_mut_ptr(), buf.len());
-    (i.fields, i.fields_cap) = (spans.as_mut_ptr(), 4);
-    let mut out: FieldsOut = crate::abi::zeroed_out();
-    let inst = std::ptr::from_ref(o).cast_mut().cast::<c_void>();
-    let outcome = crate::Fields::call(inst, &i, &mut out);
-    let written = (0..out.fields_len as usize)
-        .map(|k| {
-            let at = |sp: busbar_contract::abi::mechanism::call::Span| {
-                String::from_utf8_lossy(&buf[sp.offset as usize..(sp.offset + sp.len) as usize])
-                    .into_owned()
-            };
-            format!("{}: {}", at(spans[k].name), at(spans[k].value))
-        })
-        .collect::<Vec<_>>()
-        .join(" ; ");
-    (outcome, written)
+/// One `fields` call, its extensions stating `scope` (none: absent), as the kit's door answers it.
+fn fields(
+    o: &Oauth,
+    host: &TestHost,
+    handle: u64,
+    ticket: Ticket,
+    scope: Option<&str>,
+) -> (Outcome, String) {
+    test_support::fields(o, host, handle, ticket, scope)
 }
 
 /// The form a sent body decodes to, in order.
@@ -191,47 +139,47 @@ fn the_exchange_request_is_the_previous_releases_form_with_the_stated_scope() {
 /// scope's next call is answered from its cache with no exchange at all.
 #[test]
 fn each_scope_is_its_own_exchange_and_its_own_cached_token() {
+    let host = TestHost::new();
     let w = Arc::new(Scripted::default());
     let o = instance(&w);
     let h = open(&o);
     let (a, b) = (ticket(101), ticket(102));
     assert_eq!(
-        fields(&o, h, Ticket::NONE, Some("fs_read_file")).0,
+        fields(&o, &host, h, Ticket::NONE, Some("fs_read_file")).0,
         Outcome::Refused,
         "ticket-less, nothing usable: REFUSED (the host submits it on a ticket)"
     );
-    assert_eq!(fields(&o, h, a, Some("fs_read_file")).0, Outcome::Pending);
-    w.ok(r#"{"access_token":"tok-read","token_type":"Bearer","expires_in":3600}"#);
-    let mut env = EnvStore::default();
-    o.tick(1_000, Ticket::NONE, &mut env);
     assert_eq!(
-        woken(&[a, b]),
-        vec![a],
-        "the landed exchange wakes its call"
+        fields(&o, &host, h, a, Some("fs_read_file")).0,
+        Outcome::Pending
     );
+    w.ok(r#"{"access_token":"tok-read","token_type":"Bearer","expires_in":3600}"#);
+    let mut diags = Diags::default();
+    o.tick(1_000, Ticket::NONE, Some(&host.host), &mut diags);
+    assert_eq!(host.take(), vec![a], "the landed exchange wakes its call");
     assert_eq!(
-        fields(&o, h, a, Some("fs_read_file")),
+        fields(&o, &host, h, a, Some("fs_read_file")),
         (Outcome::Ready, "authorization: Bearer tok-read".to_string())
     );
 
     assert_eq!(
-        fields(&o, h, b, Some("fs_read_file fs_write_file")).0,
+        fields(&o, &host, h, b, Some("fs_read_file fs_write_file")).0,
         Outcome::Pending,
         "another scope never shares the first's token"
     );
     w.ok(r#"{"access_token":"tok-both","expires_in":3600}"#);
-    o.tick(2_000, Ticket::NONE, &mut env);
-    assert_eq!(woken(&[a, b]), vec![b]);
+    o.tick(2_000, Ticket::NONE, Some(&host.host), &mut diags);
+    assert_eq!(host.take(), vec![b]);
     assert_eq!(
-        fields(&o, h, b, Some("fs_read_file fs_write_file")).1,
+        fields(&o, &host, h, b, Some("fs_read_file fs_write_file")).1,
         "authorization: Bearer tok-both"
     );
     // The first scope again, on the spot: its cached token, no exchange.
     assert_eq!(
-        fields(&o, h, Ticket::NONE, Some("fs_read_file")).1,
+        fields(&o, &host, h, Ticket::NONE, Some("fs_read_file")).1,
         "authorization: Bearer tok-read"
     );
-    o.tick(3_000, Ticket::NONE, &mut env);
+    o.tick(3_000, Ticket::NONE, Some(&host.host), &mut diags);
     let sent = w.sent.lock().unwrap();
     let scopes: Vec<String> = sent
         .iter()
@@ -252,36 +200,37 @@ fn each_scope_is_its_own_exchange_and_its_own_cached_token() {
 /// the failure.
 #[test]
 fn a_refused_exchange_fails_the_calls_that_waited_and_the_next_call_asks_again() {
+    let host = TestHost::new();
     let w = Arc::new(Scripted::default());
     let o = instance(&w);
     let h = open(&o);
     let (first, second, later) = (ticket(201), ticket(202), ticket(203));
-    assert_eq!(fields(&o, h, first, Some("s")).0, Outcome::Pending);
-    assert_eq!(fields(&o, h, second, Some("s")).0, Outcome::Pending);
+    assert_eq!(fields(&o, &host, h, first, Some("s")).0, Outcome::Pending);
+    assert_eq!(fields(&o, &host, h, second, Some("s")).0, Outcome::Pending);
     w.push(vec![
         Step::Head(401),
         Step::Body(b"{\"error\":\"invalid_grant\"}".to_vec(), true),
     ]);
-    let mut env = EnvStore::default();
-    o.tick(1_000, Ticket::NONE, &mut env);
-    let mut both = woken(&[first, second, later]);
+    let mut diags = Diags::default();
+    o.tick(1_000, Ticket::NONE, Some(&host.host), &mut diags);
+    let mut both = host.take();
     both.sort_by_key(|t| t.slot);
     assert_eq!(both, vec![first, second]);
-    assert_eq!(fields(&o, h, first, Some("s")).0, Outcome::Failed);
-    assert_eq!(fields(&o, h, second, Some("s")).0, Outcome::Failed);
+    assert_eq!(fields(&o, &host, h, first, Some("s")).0, Outcome::Failed);
+    assert_eq!(fields(&o, &host, h, second, Some("s")).0, Outcome::Failed);
     assert!(
-        env.diags()
+        diags
             .iter()
-            .any(|d| d.id_idx == crate::instance::diag::OAUTH_MINT_FAILED),
+            .any(|(id, _, _)| id == crate::instance::diag::OAUTH_MINT_FAILED),
         "the failure is logged"
     );
     // The next call is not failed by the last one: it arms a fresh exchange.
-    assert_eq!(fields(&o, h, later, Some("s")).0, Outcome::Pending);
+    assert_eq!(fields(&o, &host, h, later, Some("s")).0, Outcome::Pending);
     w.ok(r#"{"access_token":"tok-s","expires_in":3600}"#);
-    o.tick(2_000, Ticket::NONE, &mut env);
-    assert_eq!(woken(&[first, second, later]), vec![later]);
+    o.tick(2_000, Ticket::NONE, Some(&host.host), &mut diags);
+    assert_eq!(host.take(), vec![later]);
     assert_eq!(
-        fields(&o, h, later, Some("s")).1,
+        fields(&o, &host, h, later, Some("s")).1,
         "authorization: Bearer tok-s"
     );
     assert_eq!(w.sent.lock().unwrap().len(), 2);
@@ -291,7 +240,7 @@ fn a_refused_exchange_fails_the_calls_that_waited_and_the_next_call_asks_again()
 /// `token_url` and the RFC 8707 `resource` are required; every finding is one `settings:` line.
 #[test]
 fn the_binding_refuses_without_its_subject_token_token_url_or_resource() {
-    let o = Oauth::with_wire(1, None, None);
+    let o = Oauth::with_wire(1, None);
     let lines = |cred: Option<&str>, settings: &str| -> Vec<String> {
         match style::open(
             style::OAUTH_TOKEN_EXCHANGE,

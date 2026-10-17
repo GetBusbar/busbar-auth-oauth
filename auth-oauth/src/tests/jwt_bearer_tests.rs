@@ -26,7 +26,11 @@ fn pem_to_pkcs8_der_rejects_empty_and_garbage() {
 #[test]
 fn b64url_is_url_safe_and_unpadded() {
     // 0xFB 0xFF encodes to "+/8=" in standard base64; url-safe-no-pad must yield "-_8".
-    assert_eq!(b64url(&[0xFB, 0xFF]), "-_8");
+    use base64::Engine as _;
+    assert_eq!(
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([0xFB, 0xFF]),
+        "-_8"
+    );
 }
 
 #[test]
@@ -209,7 +213,7 @@ pub(crate) fn test_signer(token_uri: &str, subject: Option<&str>) -> Signer {
 fn the_rfc_7523_assertion_is_byte_identical_to_1_5_5() {
     let signer = test_signer("https://oauth2.googleapis.com/token", None);
     assert_eq!(
-        signer.assertion(1_700_000_000).unwrap(),
+        signer.assertion(1_700_000_000).unwrap().as_str(),
         include_str!("fixtures/jwt_assertion_1_5_5.txt").trim_end()
     );
 }
@@ -232,7 +236,8 @@ fn the_token_request_is_the_form_1_5_5_posted() {
     assert_eq!(
         req.body.reveal(),
         &format!(
-            "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion={assertion}"
+            "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion={}",
+            assertion.as_str()
         )
     );
 }
@@ -331,4 +336,52 @@ fn the_service_account_and_its_key_are_held_wiped_on_drop() {
     )
     .expect("decodes");
     assert!(held_as(&der).contains("Zeroizing"), "{}", held_as(&der));
+}
+
+/// THE PRIVATE KEY IS UNESCAPED BY THE PLUGIN, NEVER BY THE JSON DECODER (THE DESIGN §6: "auth
+/// material is zeroised"): a PEM in JSON always carries `\n` escapes, and the decoder unescapes a
+/// string into a scratch buffer it frees unwiped, so the decode skips the key and `private_key`
+/// reads the top-level member into one buffer, sized once and wiped on drop. Every JSON escape
+/// resolves as the decoder resolves it; a nested `private_key` is not the account's.
+#[test]
+fn the_private_key_is_read_into_one_wiped_buffer_with_every_escape_resolved() {
+    let pem =
+        "-----BEGIN PRIVATE KEY-----\nAB\"C\\/D\t\u{e9}\u{1F600}\n-----END PRIVATE KEY-----\n";
+    let json = serde_json::json!({
+        "type": "service_account",
+        "client_email": "svc@proj.iam.gserviceaccount.com",
+        "private_key": pem,
+        "token_uri": "https://oauth2.googleapis.com/token",
+    })
+    .to_string();
+    let key: zeroize::Zeroizing<String> = private_key(&json).expect("the key");
+    assert_eq!(key.as_str(), pem);
+    assert!(
+        key.capacity() <= json.len(),
+        "sized once to the escaped length"
+    );
+    let nested = r#"{"x":{"private_key":"no"},"l":["private_key",{"private_key":"no"}],"private_key":"yes\n","n":1}"#;
+    assert_eq!(private_key(nested).expect("the key").as_str(), "yes\n");
+    assert_eq!(
+        private_key(r#"{"private_key":"A😀\/\b\f\r"}"#)
+            .expect("the key")
+            .as_str(),
+        "A\u{1F600}/\u{8}\u{c}\r"
+    );
+    assert!(private_key(r#"{"private_key":1}"#).is_err());
+    // The service account still builds from the key it reads this way.
+    let _ = test_signer("https://oauth2.googleapis.com/token", None);
+}
+
+/// THE SIGNED ASSERTION IS HELD WIPED (THE DESIGN §6): the token endpoint accepts it for an hour,
+/// so the plugin holds it in a buffer sized once and wiped on drop — byte-identical to 1.5.5's.
+#[test]
+fn the_assertion_is_held_in_a_wiped_buffer_sized_once() {
+    let signer = test_signer("https://oauth2.googleapis.com/token", None);
+    let assertion: zeroize::Zeroizing<String> = signer.assertion(1_700_000_000).unwrap();
+    assert_eq!(
+        assertion.as_str(),
+        include_str!("fixtures/jwt_assertion_1_5_5.txt").trim_end()
+    );
+    assert_eq!(assertion.capacity(), assertion.len(), "sized once");
 }

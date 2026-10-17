@@ -1,19 +1,19 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
-//! ONE INSTANCE: the handles (generation data), the token cache (outlives handles), the waiting
-//! tickets, and the per-op envelope storage the host copies after each control-lane call.
+//! ONE INSTANCE: the handles (generation data), the token cache (outlives handles) and the
+//! waiting tickets. The door is the SDK's safe outbound-auth kit (`lib.rs`), which keeps each
+//! answer's envelope itself.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock};
 use std::time::Instant;
 
-use busbar_contract::abi::mechanism::call::{AbiStr, Diag};
 use busbar_contract::abi::mechanism::ticket::Ticket;
+use busbar_contract::abi::sdk::auth_outbound::Diags;
 use busbar_contract::abi::sdk::conn::Host;
 
-use crate::abi::{abi, Waker};
 use crate::mint::host_wire::HostWire;
 use crate::mint::{Minted, Minter, Report, Wire, MIN_SLEEP_SECS};
 use crate::style::Binding;
@@ -30,61 +30,17 @@ pub(crate) mod diag {
 
 const WARN: u8 = 1;
 
-/// One op's envelope storage: the diagnostics and the texts they point into, kept until the next
-/// call of the same op (the host copies them before it makes any other call on that thread).
-#[derive(Default)]
-pub(crate) struct EnvStore {
-    texts: Vec<String>,
-    diags: Vec<Diag>,
-    /// The error text of the last FAILED/REFUSED answer.
-    pub(crate) error: String,
-}
-
-impl EnvStore {
-    /// Start a call: drop what the previous call left.
-    pub(crate) fn clear(&mut self) {
-        self.diags.clear();
-        self.texts.clear();
-        self.error.clear();
-    }
-
-    /// Add one diagnostic.
-    pub(crate) fn push(&mut self, id: u32, severity: u8, text: String) {
-        self.texts.push(text);
-        let t = self.texts.last().map_or(
-            AbiStr {
-                ptr: std::ptr::null(),
-                len: 0,
-            },
-            |t| abi(t),
-        );
-        self.diags.push(Diag {
-            id_idx: id,
-            severity,
-            _reserved: [0; 3],
-            text: t,
-        });
-    }
-
-    /// The diagnostics, as the envelope carries them.
-    pub(crate) fn diags(&self) -> &[Diag] {
-        &self.diags
-    }
-}
-
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// One plugin instance.
-pub(crate) struct Oauth {
-    waker: Option<Waker>,
-    /// A test's need double; production reaches its need through [`Oauth::host`].
+/// One plugin instance: the SDK kit's [`OutboundPlugin`](busbar_contract::abi::sdk::auth_outbound::OutboundPlugin).
+pub struct Oauth {
+    /// A test's need double; production reaches its need through the host tables each `tick` and
+    /// `drive` is handed.
     wire: Option<Box<dyn Wire>>,
-    /// The host's connector tables `open` was handed (`None`: no need was granted).
-    host: Option<Host>,
     /// The instance's driver ticket, as its first `tick` names it: a binding opened, or a request
-    /// waiting on a token nothing has minted yet, wakes it so a `drive` starts the mint at once.
+    /// waiting on a token, wakes it so a `drive` starts the mint at once.
     driver: Mutex<Ticket>,
     /// The handle count of the driver ticket's cycle ([`HostWire`]): reset at each `tick`, carried
     /// on through each `drive`.
@@ -98,17 +54,11 @@ pub(crate) struct Oauth {
     cache: Mutex<HashMap<[u8; 32], Arc<Minted>>>,
     waiters: Mutex<Vec<Ticket>>,
     /// The tickets waiting on each on-demand cell's exchange (a token-exchange scope), by its cache
-    /// key: woken when it lands, or failed when it fails.
+    /// key: woken when it lands, or failed when it fails. Taken after `cache` wherever both are.
     exchange_waiters: Mutex<HashMap<[u8; 32], Vec<Ticket>>>,
     /// The tickets whose exchange failed: their resumed call answers FAILED (the attempt fails, as
     /// the previous release failed the call whose exchange the authorization server refused).
     exchange_failed: Mutex<Vec<Ticket>>,
-    /// `open_outbound`'s envelope and error.
-    pub(crate) open_env: Mutex<EnvStore>,
-    /// `tick`'s envelope.
-    pub(crate) tick_env: Mutex<EnvStore>,
-    /// `drive`'s envelope.
-    pub(crate) drive_env: Mutex<EnvStore>,
 }
 
 impl crate::style::TokenCache for Oauth {
@@ -121,24 +71,17 @@ impl crate::style::TokenCache for Oauth {
 }
 
 impl Oauth {
-    /// An instance at `generation` over the host's wake and its connector tables (`host`; `None`:
-    /// no need was granted, and a minted style reports that no connection was).
-    pub(crate) fn new(generation: u64, waker: Option<Waker>, host: Option<Host>) -> Self {
-        let mut o = Self::with_wire(generation, waker, None);
-        o.host = host;
-        o
+    /// An instance at `generation`; its need is the host's, reached through the tables each
+    /// `tick` and `drive` is handed (none: no need was granted, and a minted style reports that
+    /// no connection was).
+    pub(crate) fn new(generation: u64) -> Self {
+        Self::with_wire(generation, None)
     }
 
     /// An instance over any [`Wire`] (the unit tests' double).
-    pub(crate) fn with_wire(
-        generation: u64,
-        waker: Option<Waker>,
-        wire: Option<Box<dyn Wire>>,
-    ) -> Self {
+    pub(crate) fn with_wire(generation: u64, wire: Option<Box<dyn Wire>>) -> Self {
         Self {
-            waker,
             wire,
-            host: None,
             driver: Mutex::new(Ticket::NONE),
             issued: AtomicU32::new(0),
             clock: Mutex::new(None),
@@ -149,9 +92,6 @@ impl Oauth {
             waiters: Mutex::new(Vec::new()),
             exchange_waiters: Mutex::new(HashMap::new()),
             exchange_failed: Mutex::new(Vec::new()),
-            open_env: Mutex::default(),
-            tick_env: Mutex::default(),
-            drive_env: Mutex::default(),
         }
     }
 
@@ -185,12 +125,39 @@ impl Oauth {
             .map(|(_, b)| b.clone())
     }
 
-    /// Park `ticket` until the exchange of the on-demand cell `key` lands (or fails).
-    pub(crate) fn park_exchange(&self, key: [u8; 32], ticket: Ticket) {
-        let mut w = lock(&self.exchange_waiters);
-        let waiting = w.entry(key).or_default();
-        if !waiting.contains(&ticket) {
-            waiting.push(ticket);
+    /// THE CELL OF AN ON-DEMAND SCOPE, looked up (or made) and, for a call on `ticket` that will
+    /// wait, that ticket parked on it, in ONE critical section with the cache: a tick that settles
+    /// the cell either ran before (and the call finds or makes the cell anew) or after (and finds
+    /// the ticket waiting, so it keeps the cell). `usable` says whether the call would present the
+    /// cell's token now; a ticket that would wait is parked BEFORE the token is read, so an
+    /// exchange that lands meanwhile still finds it.
+    pub(crate) fn exchange_cell(
+        &self,
+        key: [u8; 32],
+        make: impl FnOnce() -> (Minter, usize),
+        ticket: Ticket,
+        usable: impl FnOnce(&Minted) -> bool,
+    ) -> Arc<Minted> {
+        let mut cache = lock(&self.cache);
+        let cell = Arc::clone(cache.entry(key).or_insert_with(|| {
+            let (minter, max) = make();
+            Arc::new(Minted::new(minter, max))
+        }));
+        if !ticket.is_none() && !usable(&cell) {
+            let mut w = lock(&self.exchange_waiters);
+            let waiting = w.entry(key).or_default();
+            if !waiting.contains(&ticket) {
+                waiting.push(ticket);
+            }
+        }
+        drop(cache);
+        cell
+    }
+
+    /// Forget `ticket` as waiting on the on-demand cell `key` (its call answered after all).
+    pub(crate) fn unpark_exchange(&self, key: [u8; 32], ticket: Ticket) {
+        if let Some(waiting) = lock(&self.exchange_waiters).get_mut(&key) {
+            waiting.retain(|t| *t != ticket);
         }
     }
 
@@ -219,6 +186,11 @@ impl Oauth {
         }
     }
 
+    /// Forget `ticket` as waiting on a mint (its call answered after all).
+    pub(crate) fn unpark_mint(&self, ticket: Ticket) {
+        lock(&self.waiters).retain(|t| *t != ticket);
+    }
+
     /// `cancel`: forget `ticket`.
     pub(crate) fn unpark(&self, ticket: Ticket) {
         lock(&self.waiters).retain(|t| *t != ticket);
@@ -228,26 +200,32 @@ impl Oauth {
         lock(&self.exchange_failed).retain(|t| *t != ticket);
     }
 
-    /// A mint is wanted now (a binding opened; a request waits on a token nothing has minted):
-    /// wake the driver ticket, so a `drive` starts it without waiting for the next `tick`. Before
-    /// the first `tick` nothing is woken: that tick, made at once, starts it.
-    pub(crate) fn mint_soon(&self) {
+    /// A mint is wanted now (a binding opened; a request waits on a token): wake the driver
+    /// ticket, so a `drive` starts it without waiting for the next `tick`. Before the first `tick`
+    /// nothing is woken: that tick, made at once, starts it.
+    pub(crate) fn mint_soon(&self, host: Option<&Host>) {
         let driver = *lock(&self.driver);
-        if let (Some(w), false) = (&self.waker, driver.is_none()) {
-            w.wake(driver);
+        if let (Some(h), false) = (host, driver.is_none()) {
+            h.wake(driver);
         }
     }
 
     /// `tick` at tick-clock `now_ns` on the driver ticket `ticket`: a new cycle (its handle count
     /// starts again), the refresh ahead of expiry, the wakes. Answers the next tick; an instance
     /// with no binding yet still asks for one ([`MIN_SLEEP_SECS`] on), never ending its schedule.
-    pub(crate) fn tick(&self, now_ns: u64, ticket: Ticket, env: &mut EnvStore) -> u64 {
+    pub(crate) fn tick(
+        &self,
+        now_ns: u64,
+        ticket: Ticket,
+        host: Option<&Host>,
+        diags: &mut Diags,
+    ) -> u64 {
         if !ticket.is_none() {
             *lock(&self.driver) = ticket;
         }
         *lock(&self.clock) = Some((now_ns, Instant::now()));
         self.issued.store(0, Ordering::Release);
-        self.advance(now_ns, ticket, env)
+        self.advance(now_ns, ticket, host, diags)
             .unwrap_or(now_ns.saturating_add(MIN_SLEEP_SECS * crate::mint::NS))
     }
 
@@ -256,20 +234,30 @@ impl Oauth {
     /// when the earliest cell is next due, the instant the `drive` asks to be resumed at (a mint
     /// landed between ticks schedules its own refresh: the tick schedule was set before it), or
     /// `None` (no cell, or no `tick` yet).
-    pub(crate) fn drive(&self, ticket: Ticket, env: &mut EnvStore) -> Option<u64> {
+    pub(crate) fn drive(
+        &self,
+        ticket: Ticket,
+        host: Option<&Host>,
+        diags: &mut Diags,
+    ) -> Option<u64> {
         let (at, read) = (*lock(&self.clock))?;
         let elapsed = u64::try_from(read.elapsed().as_nanos()).unwrap_or(u64::MAX);
-        self.advance(at.saturating_add(elapsed), ticket, env)
+        self.advance(at.saturating_add(elapsed), ticket, host, diags)
     }
 
     /// Advance every token cell at `now_ns`, over the need on `ticket`: when the next tick is
     /// wanted (`None`: no cell).
-    fn advance(&self, now_ns: u64, ticket: Ticket, env: &mut EnvStore) -> Option<u64> {
-        let host = self
-            .host
-            .as_ref()
+    fn advance(
+        &self,
+        now_ns: u64,
+        ticket: Ticket,
+        host: Option<&Host>,
+        diags: &mut Diags,
+    ) -> Option<u64> {
+        let host_wire = host
+            .filter(|h| h.lends_connector())
             .map(|h| HostWire::new(h, ticket, &self.issued));
-        let wire: Option<&dyn Wire> = match (&self.wire, &host) {
+        let wire: Option<&dyn Wire> = match (&self.wire, &host_wire) {
             (Some(w), _) => Some(w.as_ref()),
             (None, Some(h)) => Some(h),
             (None, None) => None,
@@ -284,29 +272,27 @@ impl Oauth {
             let (due, report) = cell.tick(now_ns, wire);
             next = next.min(due);
             if cell.on_demand() {
-                self.settle_exchange(key, &cell, report, env);
+                self.settle_exchange(key, &cell, report, host, diags);
                 continue;
             }
             match report {
                 Some(Report::Minted) => minted = true,
                 Some(Report::TokenInvalidBytes) => {
                     minted = true;
-                    env.push(
+                    diags.push(
                         diag::OAUTH_TOKEN_INVALID_BYTES,
                         WARN,
                         "minted an OAuth token with bytes invalid for an HTTP header value; \
-                         omitting the auth header — upstream will reject with 401"
-                            .to_string(),
+                         omitting the auth header — upstream will reject with 401",
                     );
                 }
-                Some(Report::EmptyToken) => env.push(
+                Some(Report::EmptyToken) => diags.push(
                     diag::OAUTH_EMPTY_TOKEN,
                     WARN,
                     "OAuth token endpoint returned a 200 with an empty access_token; treating as a \
-                     mint failure and will retry"
-                        .to_string(),
+                     mint failure and will retry",
                 ),
-                Some(Report::MintFailed(e)) => env.push(
+                Some(Report::MintFailed(e)) => diags.push(
                     diag::OAUTH_MINT_FAILED,
                     WARN,
                     format!("OAuth token mint failed; will retry error={e}"),
@@ -315,10 +301,12 @@ impl Oauth {
             }
         }
         if minted {
+            // The token is stored before this drain: a call that parks after the drain reads it
+            // (it parks before it reads), and one that parked before is woken here.
             let woken: Vec<Ticket> = std::mem::take(&mut *lock(&self.waiters));
-            if let Some(w) = &self.waker {
+            if let Some(h) = host {
                 for t in woken {
-                    w.wake(t);
+                    h.wake(t);
                 }
             }
         }
@@ -328,29 +316,30 @@ impl Oauth {
     /// AN ON-DEMAND CELL'S TICK, settled: a landed exchange wakes the tickets waiting on it; a
     /// failed one fails them (each is woken, and its resumed call answers FAILED), naming why in
     /// the instance's log; a cell no request waits on, with nothing in flight and no token it would
-    /// present, is dropped from the cache (its scope's next request makes it again).
+    /// present, is dropped from the cache (its scope's next request makes it again) — judged under
+    /// the cache's lock, so a call looking the cell up and parking on it is never split from it.
     fn settle_exchange(
         &self,
         key: [u8; 32],
         cell: &Minted,
         report: Option<Report>,
-        env: &mut EnvStore,
+        host: Option<&Host>,
+        diags: &mut Diags,
     ) {
         let failure = match report {
             None => None,
             Some(Report::Minted | Report::TokenInvalidBytes) => Some(false),
             Some(Report::EmptyToken) => {
-                env.push(
+                diags.push(
                     diag::OAUTH_EMPTY_TOKEN,
                     WARN,
                     "the RFC 8693 exchange returned 200 with no usable `access_token`; the call is \
-                     refused rather than made unauthenticated"
-                        .to_string(),
+                     refused rather than made unauthenticated",
                 );
                 Some(true)
             }
             Some(Report::MintFailed(e)) => {
-                env.push(
+                diags.push(
                     diag::OAUTH_MINT_FAILED,
                     WARN,
                     format!("the RFC 8693 exchange failed; the call is refused error={e}"),
@@ -365,17 +354,18 @@ impl Oauth {
             if failed {
                 lock(&self.exchange_failed).extend(woken.iter().copied());
             }
-            if let Some(w) = &self.waker {
+            if let Some(h) = host {
                 for t in woken {
-                    w.wake(t);
+                    h.wake(t);
                 }
             }
         }
+        let mut cache = lock(&self.cache);
         let waited = lock(&self.exchange_waiters)
             .get(&key)
             .is_some_and(|w| !w.is_empty());
         if !waited && cell.idle() && !cell.usable(crate::mint::now_epoch()) {
-            lock(&self.cache).remove(&key);
+            cache.remove(&key);
         }
     }
 }
