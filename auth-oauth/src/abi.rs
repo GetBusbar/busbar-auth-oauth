@@ -86,9 +86,7 @@ impl Waker {
     pub(crate) fn test(wake: WakeFn) -> Self {
         Self {
             wake,
-            ctx: HostCtx {
-                ptr: std::ptr::null_mut(),
-            },
+            ctx: HostCtx::NONE,
         }
     }
 
