@@ -201,3 +201,155 @@ fn jwt_bearer_mints_on_tick() {
         "authorization: Bearer ya29.tok"
     );
 }
+
+const CC_SETTINGS: &str = r#"{"token_url":"https://login.example.com/tenant/oauth2/v2.0/token","scope":"https://cognitiveservices.azure.com/.default"}"#;
+
+/// A client-credentials binding whose token has expired and whose refresh failed: `tok-1`,
+/// expiring at once, then a 503.
+fn expired_and_failed(w: &Arc<Scripted>, host: &TestHost) -> (Oauth, u64) {
+    let o = instance(w);
+    let h = open(
+        &o,
+        style::OAUTH_CLIENT_CREDENTIALS,
+        "client-abc:s3cr&t",
+        CC_SETTINGS,
+    );
+    let mut diags = Diags::default();
+    w.ok(r#"{"access_token":"tok-1","expires_in":0}"#);
+    let due = o.tick(1_000, Ticket::NONE, Some(&host.host), &mut diags);
+    w.push(vec![Step::Head(503), Step::Body(b"down".to_vec(), true)]);
+    o.tick(due, Ticket::NONE, Some(&host.host), &mut diags);
+    (o, h)
+}
+
+/// THE `ready` FACT FOLLOWS THE READ (contract `abi/auth/outbound.rs`, `OutboundReadyOut::ready`:
+/// "`1` = `fields` would answer with a credential now; `0` = not yet (before the first mint, or
+/// expired with a failed refresh)"): a token that has expired and whose refresh failed is not
+/// ready, though a token is held; nor is a minted token that yields no header.
+#[test]
+fn outbound_ready_is_false_for_an_expired_token_whose_refresh_failed() {
+    let host = TestHost::new();
+    let w = Arc::new(Scripted::default());
+    let (o, h) = expired_and_failed(&w, &host);
+    assert_eq!(
+        fields(&o, &host, h, Ticket::NONE).0,
+        Outcome::Refused,
+        "positive control: the read does not present the expired token"
+    );
+    assert!(
+        !o.ready(h),
+        "expired with a failed refresh: `fields` would not answer with a credential"
+    );
+
+    let w = Arc::new(Scripted::default());
+    let o = instance(&w);
+    let h = open(
+        &o,
+        style::OAUTH_CLIENT_CREDENTIALS,
+        "client-abc:s3cr&t",
+        CC_SETTINGS,
+    );
+    w.ok("{\"access_token\":\"tok\\u0001bad\",\"expires_in\":3600}");
+    o.tick(1_000, Ticket::NONE, Some(&host.host), &mut Diags::default());
+    assert_eq!(
+        fields(&o, &host, h, Ticket::NONE),
+        (Outcome::Ready, String::new()),
+        "positive control: a token with bytes invalid in a header is presented as no header"
+    );
+    assert!(
+        !o.ready(h),
+        "a token that yields no header presents no credential"
+    );
+}
+
+/// NO LOST WAKE (THE DESIGN §6 item 5: the wait ends when a mint lands): a call that reads no
+/// usable token while a mint lands, the mint's drain of the waiting tickets running before the call
+/// has parked, still answers with the landed token instead of parking where nothing will wake it.
+/// The test holds the instance's waiter list so the call stops at its park, lands the mint in that
+/// window (the drain finds no one waiting), then lets the call go on.
+#[test]
+fn a_mint_landing_between_the_read_and_the_park_is_not_a_lost_wake() {
+    let host = TestHost::new();
+    let w = Arc::new(Scripted::default());
+    let (o, h) = expired_and_failed(&w, &host);
+    let Some(Binding::Minted(cell)) = o.bound(h) else {
+        panic!("a minted binding")
+    };
+    let call = Ticket {
+        slot: 7,
+        generation: 1,
+    };
+    let answered = std::thread::scope(|s| {
+        let held = o.waiters.lock().unwrap();
+        let caller = s.spawn(|| fields(&o, &host, h, call));
+        // The call reads the expired token and stops at its park.
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        // THE MINT LANDS: its token is stored, and its drain finds no one parked.
+        w.ok(r#"{"access_token":"tok-2","expires_in":3600}"#);
+        let wire = Shared(Arc::clone(&w));
+        let (_, report) = cell.tick(u64::MAX / 2, Some(&wire as &dyn Wire));
+        assert_eq!(report, Some(Report::Minted), "the mint landed");
+        assert!(held.is_empty(), "the drain finds no one parked yet");
+        drop(held);
+        caller.join().unwrap()
+    });
+    assert_eq!(
+        answered,
+        (Outcome::Ready, "authorization: Bearer tok-2".to_string()),
+        "the call presents the landed token rather than park unwoken (woken: {:?})",
+        host.take()
+    );
+}
+
+/// NO LOST WAKE ON THE EXCHANGE PATH: a call that looks its scope's cell up while a tick settles
+/// that cell (idle, unusable, waited on by no one, so dropped from the cache) parks on a cell the
+/// tick still visits. The test holds the waiter list so the call stops between its lookup and its
+/// park, and drops the cell from the cache in that window exactly as the settling tick would when
+/// the cache lets it; the call's exchange then lands and wakes it.
+#[test]
+fn a_cell_settled_between_the_lookup_and_the_park_is_not_a_lost_wake() {
+    let host = TestHost::new();
+    let w = Arc::new(Scripted::default());
+    let o = instance(&w);
+    let h = o.keep_binding(
+        style::open(
+            style::OAUTH_TOKEN_EXCHANGE,
+            Some(b"busbar-own-subject-token".as_slice()),
+            Some(br#"{"token_url":"https://as.example/token","resource":"https://tools.example/rpc"}"#.as_slice()),
+            &o,
+        )
+        .unwrap_or_else(|_| panic!("the binding opens")),
+    );
+    let Some(Binding::Exchange(x)) = o.bound(h) else {
+        panic!("an exchange binding")
+    };
+    let key = x.scope_key(b"s");
+    let call = Ticket {
+        slot: 301,
+        generation: 1,
+    };
+    let first = std::thread::scope(|s| {
+        let held = o.exchange_waiters.lock().unwrap();
+        let caller = s.spawn(|| test_support::fields(&o, &host, h, call, Some("s")));
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        // THE SETTLING TICK, where the cache lets it: the cell is idle, holds no usable token and
+        // no one waits on it yet, so it is dropped.
+        if let Ok(mut cache) = o.cache.try_lock() {
+            cache.remove(&key);
+        }
+        drop(held);
+        caller.join().unwrap()
+    });
+    assert_eq!(first.0, Outcome::Pending, "the call waits for its exchange");
+    w.ok(r#"{"access_token":"tok-s","expires_in":3600}"#);
+    o.tick(1_000, Ticket::NONE, Some(&host.host), &mut Diags::default());
+    assert_eq!(
+        host.take(),
+        vec![call],
+        "the exchange the call armed lands and wakes it"
+    );
+    assert_eq!(
+        test_support::fields(&o, &host, h, call, Some("s")).1,
+        "authorization: Bearer tok-s"
+    );
+}
