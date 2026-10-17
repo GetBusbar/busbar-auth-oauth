@@ -384,3 +384,25 @@ fn every_mint_need_is_declared_operator_infrastructure() {
         );
     }
 }
+
+/// THE TOKEN REQUEST FORM IS BUILT ONCE AND HELD WIPED (THE DESIGN §6: "auth material is
+/// zeroised"): it carries the client secret, the subject token or the signed assertion, so it is
+/// written into one buffer sized to its exact length (no growth frees a partial copy) and held in
+/// a [`Held`] — byte for byte what `serde_urlencoded` (reqwest's `.form()`) wrote, for every byte.
+#[test]
+fn the_form_is_serde_urlencoded_byte_for_byte_and_built_once() {
+    let mut every: String = (0_u8..=0x7f).map(char::from).collect();
+    every.push_str("\u{e9}\u{1F600} +&=%");
+    let pairs = [
+        ("grant_type", "client_credentials"),
+        ("client_secret", every.as_str()),
+        ("scope", "https://cognitiveservices.azure.com/.default a b"),
+        ("empty", ""),
+    ];
+    let held: Held<String> = form(&pairs);
+    assert_eq!(
+        held.reveal(),
+        &serde_urlencoded::to_string(pairs).expect("a form")
+    );
+    assert_eq!(held.reveal().capacity(), held.reveal().len(), "sized once");
+}
