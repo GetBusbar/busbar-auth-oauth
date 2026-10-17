@@ -26,7 +26,11 @@ fn pem_to_pkcs8_der_rejects_empty_and_garbage() {
 #[test]
 fn b64url_is_url_safe_and_unpadded() {
     // 0xFB 0xFF encodes to "+/8=" in standard base64; url-safe-no-pad must yield "-_8".
-    assert_eq!(b64url(&[0xFB, 0xFF]), "-_8");
+    use base64::Engine as _;
+    assert_eq!(
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([0xFB, 0xFF]),
+        "-_8"
+    );
 }
 
 #[test]
@@ -209,7 +213,7 @@ pub(crate) fn test_signer(token_uri: &str, subject: Option<&str>) -> Signer {
 fn the_rfc_7523_assertion_is_byte_identical_to_1_5_5() {
     let signer = test_signer("https://oauth2.googleapis.com/token", None);
     assert_eq!(
-        signer.assertion(1_700_000_000).unwrap(),
+        signer.assertion(1_700_000_000).unwrap().as_str(),
         include_str!("fixtures/jwt_assertion_1_5_5.txt").trim_end()
     );
 }
@@ -232,7 +236,8 @@ fn the_token_request_is_the_form_1_5_5_posted() {
     assert_eq!(
         req.body.reveal(),
         &format!(
-            "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion={assertion}"
+            "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion={}",
+            assertion.as_str()
         )
     );
 }
