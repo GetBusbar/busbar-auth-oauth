@@ -105,7 +105,10 @@ pub fn anchors() -> &'static str {
 /// # Panics
 /// The anchors do not parse, a transport door does not load or open, or the view does not compose.
 #[must_use]
-pub fn host(wake: Arc<dyn Fn(u64) + Send + Sync>, anchors: Option<&str>) -> Arc<dyn DeclaredConns> {
+pub fn host(
+    wake: busbar_contract::conn::ConnWake,
+    anchors: Option<&str>,
+) -> Arc<dyn DeclaredConns> {
     // The reactor a socket a plugin opens from a dispatcher worker registers on, as the root
     // installs it (`root::connector::io_reactor`): the connector's own I/O thread.
     busbar_core_connector::io::install_process_reactor(io_reactor());
