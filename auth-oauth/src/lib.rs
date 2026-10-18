@@ -244,11 +244,8 @@ impl Oauth {
         let Some(bound) = self.bound(ask.handle) else {
             return Poll::Ready(FieldsAnswer::Refused);
         };
-        let now = if ask.timestamp == 0 {
-            mint::now_epoch()
-        } else {
-            ask.timestamp
-        };
+        self.saw_wall(ask.timestamp);
+        let now = self.wall_secs();
         let x = match bound {
             style::Binding::Minted(m) => return self.minted(&m, ask.ticket, now, host, present),
             style::Binding::Exchange(x) => x,
@@ -307,7 +304,7 @@ impl Oauth {
     /// THE `ready` FACT of `handle`: whether `fields` would present a credential now.
     pub(crate) fn ready(&self, handle: u64) -> bool {
         match self.bound(handle) {
-            Some(style::Binding::Minted(cell)) => cell.presents(mint::now_epoch()),
+            Some(style::Binding::Minted(cell)) => cell.presents(self.wall_secs()),
             // A token exchange is ready whenever asked: each request's exchange is its own.
             Some(style::Binding::Exchange(_)) => true,
             None => false,

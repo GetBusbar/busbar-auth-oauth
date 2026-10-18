@@ -31,6 +31,9 @@ impl Wire for Shared {
     fn open(&self, req: &TokenRequest, timeout_ms: u64) -> Result<ConnId, ConnError> {
         self.0.open(req, timeout_ms)
     }
+    fn clock(&self) -> Option<mint::HostClock> {
+        self.0.clock()
+    }
     fn read(&self, conn: ConnId, buf: &mut [u8]) -> Result<mint::Got, ConnError> {
         self.0.read(conn, buf)
     }
@@ -344,7 +347,7 @@ fn a_mint_landing_between_the_read_and_the_park_is_not_a_lost_wake() {
         // THE MINT LANDS: its token is stored, and its drain finds no one parked.
         w.ok(r#"{"access_token":"tok-2","expires_in":3600}"#);
         let wire = Shared(Arc::clone(&w));
-        let (_, report) = cell.tick(u64::MAX / 2, Some(&wire as &dyn Wire));
+        let (_, report) = cell.tick(u64::MAX / 2, mint::now_epoch(), Some(&wire as &dyn Wire));
         assert_eq!(report, Some(Report::Minted), "the mint landed");
         assert!(held.is_empty(), "the drain finds no one parked yet");
         drop(held);

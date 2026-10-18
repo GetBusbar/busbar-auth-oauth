@@ -28,6 +28,9 @@ impl Wire for Shared {
     fn open(&self, req: &TokenRequest, timeout_ms: u64) -> Result<ConnId, ConnError> {
         self.0.open(req, timeout_ms)
     }
+    fn clock(&self) -> Option<crate::mint::HostClock> {
+        self.0.clock()
+    }
     fn read(&self, conn: ConnId, buf: &mut [u8]) -> Result<Got, ConnError> {
         self.0.read(conn, buf)
     }
