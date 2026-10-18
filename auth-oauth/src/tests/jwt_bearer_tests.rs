@@ -91,6 +91,30 @@ fn read_credential_never_echoes_the_key_material_it_could_not_read() {
     );
 }
 
+/// THE PLUGIN OPENS NO FILE (Q128 oauth M4, ruling (a)). A key-file credential is the host's to
+/// resolve at config time, so what reaches the plugin is the service-account JSON itself. A path
+/// that names a READABLE file holding valid JSON is still refused: had the plugin opened it, this
+/// would have answered the file's JSON. The refusal names neither the path nor its contents.
+#[test]
+fn read_credential_refuses_a_path_without_opening_it() {
+    let dir = std::env::temp_dir().join(format!("oauth-m4-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("sa-m4-c81f.json");
+    std::fs::write(&path, r#"{"client_email":"x@y.iam.gserviceaccount.com"}"#).expect("write");
+    let named = path.to_str().expect("utf-8 temp path");
+
+    let e = read_credential(named).expect_err("a path is not service-account JSON");
+    assert!(
+        !e.contains("sa-m4-c81f"),
+        "the path is never echoed, got: {e}"
+    );
+    assert!(
+        !e.contains("client_email"),
+        "the file is never read, got: {e}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A service-account JSON that does not parse is refused before any key is read.
 #[test]
 fn build_rejects_malformed_json() {
