@@ -169,13 +169,22 @@ impl Oauth {
         failed.len() != before
     }
 
-    /// `retire`: drop the handles opened at `generation`, then every token cell no handle holds.
+    /// `retire`: drop the handles opened at `generation`, then every token cell no handle holds AND
+    /// nothing still needs. An on-demand exchange cell is held by no handle, so one with an exchange
+    /// in flight (its connection open) or a ticket waiting on it stays: the cache outlives a handle
+    /// (contract `abi/auth`), and a waiting ticket is woken when its exchange settles, never lost.
+    /// Its tick drops it from the cache once it is idle and unwaited.
     pub(crate) fn retire(&self, generation: u64) {
         self.handles
             .write()
             .unwrap_or_else(PoisonError::into_inner)
             .retain(|_, (g, _)| *g != generation);
-        lock(&self.cache).retain(|_, c| Arc::strong_count(c) > 1);
+        // The cache's lock first, then the waiters', as `exchange_cell` takes them.
+        let mut cache = lock(&self.cache);
+        let waiting = lock(&self.exchange_waiters);
+        cache.retain(|key, c| {
+            Arc::strong_count(c) > 1 || !c.idle() || waiting.get(key).is_some_and(|w| !w.is_empty())
+        });
     }
 
     /// Park `ticket` until a mint lands.
