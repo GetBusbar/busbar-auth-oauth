@@ -22,7 +22,7 @@
 
 use super::TokenRequest;
 use base64::Engine as _;
-use zeroize::{Zeroize, Zeroizing};
+use zeroize::Zeroizing;
 
 /// Default OAuth scope when the provider does not override it — the Vertex/GCP common case.
 const DEFAULT_SCOPE: &str = "https://www.googleapis.com/auth/cloud-platform";
@@ -69,7 +69,7 @@ pub(crate) fn build(
     })
 }
 
-/// Parse + fully validate a `jwt-bearer` credential: read the SA JSON (inline or `@file`) and parse
+/// Parse + fully validate a `jwt-bearer` credential: read the SA JSON (inline; the host resolves a key file) and parse
 /// the PKCS#8 RSA key. Run by [`build`], which the config `--validate` dry-run
 /// reaches through `open_outbound` (it never dials), so both apply IDENTICAL checks with identical
 /// error messages — they can never diverge.
@@ -293,45 +293,28 @@ fn jwt_claims_json(
     serde_json::to_string(&claims).map_err(|e| format!("serializing JWT claims failed: {e}"))
 }
 
-/// SA-JSON credential material: inline JSON (`{...}`) or a filesystem path to a key file.
+/// SA-JSON credential material: the service-account JSON itself, never a path.
 ///
-/// The failure message deliberately does NOT render `credential`. On this branch the argument is a
-/// PATH only by assumption — the sole thing that distinguishes the two forms is a leading `{`, so an
-/// operator who pasted the key body, or a secret ref that resolved to key material rather than to a
-/// filename, lands here holding the SIGNING KEY. This error is not a swallowed one: it reaches the
-/// `--validate` report (`config_validate`'s `errors` list, which the CLI prints and the admin
-/// dry-run returns) and the boot/apply panic in a plane's runtime build, so interpolating the
-/// argument published an RSA private key to a terminal, a CI log and a crash report in one step.
-/// Callers already name the lane and the secret's configured source, so what this layer owes is the
-/// io failure and nothing else.
+/// THE PLUGIN OPENS NO FILE (Q128 oauth M4, ruling (a)): a key-file credential is resolved by the
+/// host at config time, so a credential that is not inline JSON is refused here unread. The
+/// refusal deliberately does NOT render `credential`: the only thing that tells JSON from anything
+/// else is a leading `{`, so an operator who pasted the key body, or a secret ref that resolved to
+/// key material, lands here holding the SIGNING KEY. This error reaches the `--validate` report and
+/// the boot/apply panic in a plane's runtime build, so interpolating the argument would publish an
+/// RSA private key to a terminal, a CI log and a crash report in one step. Callers already name the
+/// lane and the secret's configured source.
 ///
-/// The JSON (it holds the private key) is read into a buffer sized once and wiped on drop, so no
-/// copy of it is left behind (THE DESIGN §6: "auth material is zeroised").
+/// The JSON (it holds the private key) is held in a buffer wiped on drop, so no copy of it is left
+/// behind (THE DESIGN §6: "auth material is zeroised").
 fn read_credential(credential: &str) -> Result<Zeroizing<String>, String> {
-    let trimmed = credential.trim_start();
-    if trimmed.starts_with('{') {
+    if credential.trim_start().starts_with('{') {
         return Ok(Zeroizing::new(credential.to_string()));
     }
-    let cause = |e: std::io::Error| {
-        format!("could not read service-account key file named by this lane's credential: {e}")
-    };
-    let mut file = std::fs::File::open(credential).map_err(cause)?;
-    let size = file
-        .metadata()
-        .map_or(0, |m| usize::try_from(m.len()).unwrap_or(0));
-    let mut bytes = Zeroizing::new(Vec::with_capacity(size.saturating_add(1)));
-    std::io::Read::read_to_end(&mut file, &mut bytes).map_err(cause)?;
-    match String::from_utf8(std::mem::take(&mut *bytes)) {
-        Ok(text) => Ok(Zeroizing::new(text)),
-        Err(e) => {
-            let mut raw = e.into_bytes();
-            raw.zeroize();
-            Err(cause(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "stream did not contain valid UTF-8",
-            )))
-        }
-    }
+    Err(
+        "service-account JSON is invalid: the credential is not inline JSON (a key file is \
+         read by the host at config time; this plugin opens no file)"
+            .to_string(),
+    )
 }
 
 /// Strip the PEM armor from a PKCS#8 private key and base64-decode the body to DER.

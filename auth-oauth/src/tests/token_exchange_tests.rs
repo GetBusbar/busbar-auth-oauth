@@ -28,6 +28,9 @@ impl Wire for Shared {
     fn open(&self, req: &TokenRequest, timeout_ms: u64) -> Result<ConnId, ConnError> {
         self.0.open(req, timeout_ms)
     }
+    fn clock(&self) -> Option<crate::mint::HostClock> {
+        self.0.clock()
+    }
     fn read(&self, conn: ConnId, buf: &mut [u8]) -> Result<Got, ConnError> {
         self.0.read(conn, buf)
     }
@@ -274,5 +277,32 @@ fn the_binding_refuses_without_its_subject_token_token_url_or_resource() {
         lines(Some(SUBJECT), r#"{"token_url":"https://as.example/token"}"#).len(),
         1,
         "no resource"
+    );
+}
+
+/// A RETIRE KEEPS AN EXCHANGE SOMEONE WAITS ON (contract `abi/auth`: the token cache outlives a
+/// handle; THE DESIGN A.4.7, zero lost wakes). The generation that opened the binding retires while
+/// a call is parked on its scope's exchange: the cell stays, the exchange lands on the next tick and
+/// wakes that call. RED before the fix: `retire` dropped every cell no handle held, an on-demand
+/// cell is held by none, so the waiter was never woken.
+#[test]
+fn a_retire_keeps_the_exchange_a_parked_call_waits_on() {
+    let host = TestHost::new();
+    let w = Arc::new(Scripted::default());
+    let o = instance(&w);
+    let h = open(&o);
+    let a = ticket(301);
+    assert_eq!(
+        fields(&o, &host, h, a, Some("fs_read_file")).0,
+        Outcome::Pending
+    );
+    o.retire(1);
+    w.ok(r#"{"access_token":"tok-kept","token_type":"Bearer","expires_in":3600}"#);
+    let mut diags = Diags::default();
+    o.tick(1_000, Ticket::NONE, Some(&host.host), &mut diags);
+    assert_eq!(
+        host.take(),
+        vec![a],
+        "the retired generation's parked call is woken when its exchange lands"
     );
 }

@@ -70,7 +70,7 @@
             "Bearer conformance-token-2"
           ]
         ],
-        "refusal": "Refused"
+        "refusal": "Ready"
       },
       {
         "style": "jwt-bearer",
@@ -141,7 +141,7 @@
             "Bearer conformance-token-2"
           ]
         ],
-        "refusal": "Refused"
+        "refusal": "Ready"
       },
       {
         "style": "oauth-token-exchange",

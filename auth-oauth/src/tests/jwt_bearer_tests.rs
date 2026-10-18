@@ -47,8 +47,8 @@ fn read_credential_passes_inline_json_through() {
 ///
 /// The ONLY thing that tells the two credential forms apart is a leading `{`, so an operator who
 /// pasted the service-account key body — or a secret ref (`env:`/`file:`) that resolved to key
-/// material rather than to a filename — reaches the `fs::read_to_string` arm with the whole signing
-/// key in hand. That error is not swallowed: it reaches `--validate`'s printed report (via
+/// material rather than to a filename — reaches the non-JSON refusal with the whole signing key in
+/// hand. That error is not swallowed: it reaches `--validate`'s printed report (via
 /// `config_validate`'s `errors` list) and the boot/apply `panic!` in a plane's runtime build,
 /// so interpolating the argument published an RSA private key to a terminal, a CI log and a crash
 /// report.
@@ -71,13 +71,13 @@ fn read_credential_never_echoes_the_key_material_it_could_not_read() {
         !e.contains("BEGIN PRIVATE KEY"),
         "not even the armor — it names the argument as key material, got: {e}"
     );
-    // What the operator IS owed still arrives: which read failed, and why. The lane and the
+    // What the operator IS owed still arrives: why the credential was refused. The lane and the
     // secret's configured source are named by the caller (`config_validate` prints
     // "provider '<name>' jwt-bearer credential (from <source>) is invalid: <this>"), so this layer
-    // owes the io failure and nothing else.
+    // owes the refusal and nothing else.
     assert!(
-        e.contains("could not read service-account key file"),
-        "the io failure must still be reported, got: {e}"
+        e.starts_with("service-account JSON is invalid: the credential is not inline JSON"),
+        "the refusal must still be reported, got: {e}"
     );
 
     // AND THROUGH THE ENTRY POINT THAT ACTUALLY RUNS ON THE `--validate` PATH, so the assertion is
@@ -89,6 +89,30 @@ fn read_credential_never_echoes_the_key_material_it_could_not_read() {
         !e.contains("not-a-real-key-b4d7e2"),
         "the --validate report must not carry the key either, got: {e}"
     );
+}
+
+/// THE PLUGIN OPENS NO FILE (Q128 oauth M4, ruling (a)). A key-file credential is the host's to
+/// resolve at config time, so what reaches the plugin is the service-account JSON itself. A path
+/// that names a READABLE file holding valid JSON is still refused: had the plugin opened it, this
+/// would have answered the file's JSON. The refusal names neither the path nor its contents.
+#[test]
+fn read_credential_refuses_a_path_without_opening_it() {
+    let dir = std::env::temp_dir().join(format!("oauth-m4-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("sa-m4-c81f.json");
+    std::fs::write(&path, r#"{"client_email":"x@y.iam.gserviceaccount.com"}"#).expect("write");
+    let named = path.to_str().expect("utf-8 temp path");
+
+    let e = read_credential(named).expect_err("a path is not service-account JSON");
+    assert!(
+        !e.contains("sa-m4-c81f"),
+        "the path is never echoed, got: {e}"
+    );
+    assert!(
+        !e.contains("client_email"),
+        "the file is never read, got: {e}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// A service-account JSON that does not parse is refused before any key is read.
