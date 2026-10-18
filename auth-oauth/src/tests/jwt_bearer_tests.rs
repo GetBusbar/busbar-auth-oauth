@@ -47,8 +47,8 @@ fn read_credential_passes_inline_json_through() {
 ///
 /// The ONLY thing that tells the two credential forms apart is a leading `{`, so an operator who
 /// pasted the service-account key body — or a secret ref (`env:`/`file:`) that resolved to key
-/// material rather than to a filename — reaches the `fs::read_to_string` arm with the whole signing
-/// key in hand. That error is not swallowed: it reaches `--validate`'s printed report (via
+/// material rather than to a filename — reaches the non-JSON refusal with the whole signing key in
+/// hand. That error is not swallowed: it reaches `--validate`'s printed report (via
 /// `config_validate`'s `errors` list) and the boot/apply `panic!` in a plane's runtime build,
 /// so interpolating the argument published an RSA private key to a terminal, a CI log and a crash
 /// report.
@@ -71,13 +71,13 @@ fn read_credential_never_echoes_the_key_material_it_could_not_read() {
         !e.contains("BEGIN PRIVATE KEY"),
         "not even the armor — it names the argument as key material, got: {e}"
     );
-    // What the operator IS owed still arrives: which read failed, and why. The lane and the
+    // What the operator IS owed still arrives: why the credential was refused. The lane and the
     // secret's configured source are named by the caller (`config_validate` prints
     // "provider '<name>' jwt-bearer credential (from <source>) is invalid: <this>"), so this layer
-    // owes the io failure and nothing else.
+    // owes the refusal and nothing else.
     assert!(
-        e.contains("could not read service-account key file"),
-        "the io failure must still be reported, got: {e}"
+        e.starts_with("service-account JSON is invalid: the credential is not inline JSON"),
+        "the refusal must still be reported, got: {e}"
     );
 
     // AND THROUGH THE ENTRY POINT THAT ACTUALLY RUNS ON THE `--validate` PATH, so the assertion is
