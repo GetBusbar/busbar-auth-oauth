@@ -8,7 +8,6 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock};
-use std::time::Instant;
 
 use busbar_contract::abi::mechanism::ticket::Ticket;
 use busbar_contract::abi::sdk::auth_outbound::Diags;
@@ -45,9 +44,13 @@ pub struct Oauth {
     /// The handle count of the driver ticket's cycle ([`HostWire`]): reset at each `tick`, carried
     /// on through each `drive`.
     issued: AtomicU32,
-    /// The last `tick`'s clock (`TickIn::now_ns`) and when it was read: a `drive` reads the tick
-    /// clock from it.
-    clock: Mutex<Option<(u64, Instant)>>,
+    /// The last `tick`'s clock (`TickIn::now_ns`) and the host's monotonic clock as it read then:
+    /// a `drive` reads the tick clock from them (THE DESIGN §1: "one clock"; the plugin reads none
+    /// of its own).
+    clock: Mutex<Option<(u64, Option<u64>)>>,
+    /// The host's wall clock (epoch seconds) as it last read (`clock.now` at a `tick` or `drive`,
+    /// or a call's own timestamp); `0` before the first reading.
+    wall: AtomicU64,
     generation: AtomicU64,
     next_handle: AtomicU64,
     handles: RwLock<HashMap<u64, (u64, Binding)>>,
@@ -85,6 +88,7 @@ impl Oauth {
             driver: Mutex::new(Ticket::NONE),
             issued: AtomicU32::new(0),
             clock: Mutex::new(None),
+            wall: AtomicU64::new(0),
             generation: AtomicU64::new(generation),
             next_handle: AtomicU64::new(1),
             handles: RwLock::new(HashMap::new()),
@@ -232,9 +236,8 @@ impl Oauth {
         if !ticket.is_none() {
             *lock(&self.driver) = ticket;
         }
-        *lock(&self.clock) = Some((now_ns, Instant::now()));
         self.issued.store(0, Ordering::Release);
-        self.advance(now_ns, ticket, host, diags)
+        self.advance(Some(now_ns), ticket, host, diags)
             .unwrap_or(now_ns.saturating_add(MIN_SLEEP_SECS * crate::mint::NS))
     }
 
@@ -249,16 +252,27 @@ impl Oauth {
         host: Option<&Host>,
         diags: &mut Diags,
     ) -> Option<u64> {
-        let (at, read) = (*lock(&self.clock))?;
-        let elapsed = u64::try_from(read.elapsed().as_nanos()).unwrap_or(u64::MAX);
-        self.advance(at.saturating_add(elapsed), ticket, host, diags)
+        self.advance(None, ticket, host, diags)
     }
 
-    /// Advance every token cell at `now_ns`, over the need on `ticket`: when the next tick is
-    /// wanted (`None`: no cell).
+    /// The host's wall clock (epoch seconds) as it last read; `0` before the first reading.
+    pub(crate) fn wall_secs(&self) -> u64 {
+        self.wall.load(Ordering::Acquire)
+    }
+
+    /// A call's own timestamp (the host's wall clock, epoch seconds) is the newest reading.
+    pub(crate) fn saw_wall(&self, secs: u64) {
+        if secs != 0 {
+            self.wall.store(secs, Ordering::Release);
+        }
+    }
+
+    /// Advance every token cell over the need on `ticket`, at the tick's `at` (a `tick`) or, on a
+    /// `drive`, at the last tick's clock moved on by the host's monotonic time since it: when the
+    /// next tick is wanted (`None`: no cell, or a `drive` before any `tick`).
     fn advance(
         &self,
-        now_ns: u64,
+        at: Option<u64>,
         ticket: Ticket,
         host: Option<&Host>,
         diags: &mut Diags,
@@ -271,6 +285,24 @@ impl Oauth {
             (None, Some(h)) => Some(h),
             (None, None) => None,
         };
+        let reading = wire.and_then(|w| w.clock());
+        if let Some(r) = reading {
+            self.saw_wall(r.wall_secs);
+        }
+        let now_ns = match at {
+            Some(now_ns) => {
+                *lock(&self.clock) = Some((now_ns, reading.map(|r| r.mono_ns)));
+                now_ns
+            }
+            None => {
+                let (at, mono_at) = (*lock(&self.clock))?;
+                match (mono_at, reading) {
+                    (Some(then), Some(r)) => at.saturating_add(r.mono_ns.saturating_sub(then)),
+                    _ => at,
+                }
+            }
+        };
+        let wall = self.wall_secs();
         let cells: Vec<([u8; 32], Arc<Minted>)> = lock(&self.cache)
             .iter()
             .map(|(k, c)| (*k, Arc::clone(c)))
@@ -278,7 +310,7 @@ impl Oauth {
         let mut next = u64::MAX;
         let mut minted = false;
         for (key, cell) in cells {
-            let (due, report) = cell.tick(now_ns, wire);
+            let (due, report) = cell.tick(now_ns, wall, wire);
             next = next.min(due);
             if cell.on_demand() {
                 self.settle_exchange(key, &cell, report, host, diags);
@@ -373,7 +405,7 @@ impl Oauth {
         let waited = lock(&self.exchange_waiters)
             .get(&key)
             .is_some_and(|w| !w.is_empty());
-        if !waited && cell.idle() && !cell.usable(crate::mint::now_epoch()) {
+        if !waited && cell.idle() && !cell.usable(self.wall_secs()) {
             cache.remove(&key);
         }
     }

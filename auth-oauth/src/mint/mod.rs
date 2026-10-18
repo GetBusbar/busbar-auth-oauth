@@ -26,7 +26,6 @@ pub(crate) mod token_exchange;
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use busbar_contract::conn::{ConnError, ConnId, PieceKind};
 use zeroize::{Zeroize, Zeroizing};
@@ -57,11 +56,12 @@ pub(crate) const IN_FLIGHT_POLL_NS: u64 = 5_000_000;
 /// Nanoseconds in a second, on the tick clock.
 pub(crate) const NS: u64 = 1_000_000_000;
 
-/// Wall-clock seconds since the epoch (1970-01-01 UTC) — the clock a token's `expires_in` and a JWT's `iat` are
-/// read against, as in 1.5.5.
+/// The unit tests' wall clock (epoch seconds): their doubles stand in for the host's `clock.now`.
+/// The plugin itself reads no clock (THE DESIGN §1: "one clock"); see [`HostClock`].
+#[cfg(test)]
 pub(crate) fn now_epoch() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
 }
@@ -487,9 +487,15 @@ impl Minted {
         }
     }
 
-    /// Advance the exchange at tick-clock `now_ns`: start one when due, read what arrived, finish it.
-    /// Answers when the cell next wants a tick, and what happened.
-    pub(crate) fn tick(&self, now_ns: u64, wire: Option<&dyn Wire>) -> (u64, Option<Report>) {
+    /// Advance the exchange at tick-clock `now_ns` and the host's wall clock `wall` (epoch seconds):
+    /// start one when due, read what arrived, finish it. Answers when the cell next wants a tick,
+    /// and what happened.
+    pub(crate) fn tick(
+        &self,
+        now_ns: u64,
+        wall: u64,
+        wire: Option<&dyn Wire>,
+    ) -> (u64, Option<Report>) {
         let mut ex = self
             .exchange
             .lock()
@@ -510,7 +516,7 @@ impl Minted {
                         .to_string(),
                 );
             };
-            let req = match self.minter.request(now_epoch()) {
+            let req = match self.minter.request(wall) {
                 Ok(r) => r,
                 Err(e) => return self.failed(&mut ex, now_ns, e),
             };
@@ -592,8 +598,7 @@ impl Minted {
             }
         };
         wire.close(conn);
-        match finished.and_then(|(status, body)| parse_response(status as u16, &body, now_epoch()))
-        {
+        match finished.and_then(|(status, body)| parse_response(status as u16, &body, wall)) {
             // A 200 with an EMPTY access_token must be treated as a (retryable) failure, not stored:
             // an empty token collides with the pre-first-mint sentinel, so `ready` would stay false
             // forever AND the per-request call would emit no auth header — a permanent wedge with no
@@ -609,7 +614,7 @@ impl Minted {
                 (due, Some(Report::EmptyToken))
             }
             Ok((fresh, invalid)) => {
-                let now = now_epoch();
+                let now = wall;
                 let ahead = next_refresh_secs(fresh.expires_at, now);
                 // An on-demand token is presented until a scheduled style would refresh it, and no
                 // exchange is due until a request finds it past that.
