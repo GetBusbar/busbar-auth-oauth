@@ -360,10 +360,10 @@ pub(crate) enum Report {
 pub(crate) enum Read<'a> {
     /// Present this header value (`Bearer <token>`).
     Header(&'a str),
-    /// No header (an un-encodable token): the upstream answers 401.
+    /// No header (before the first mint, or an un-encodable token): the upstream answers 401.
     Nothing,
-    /// Not ready: nothing has minted yet (THE DESIGN §11: Ready | Pending, PENDING until the first
-    /// mint lands), or the token has expired and its refresh failed.
+    /// Not ready: the token has expired and its refresh failed (Q-EXPIRED), or an on-demand
+    /// exchange is due.
     Wait,
 }
 
@@ -458,8 +458,10 @@ impl Minted {
             }
             return f(Read::Wait);
         }
+        // BEFORE THE FIRST MINT a scheduled cell presents nothing: READY with no fields, so the
+        // upstream answers 401, as 1.5.5 did (THE DESIGN §11.11; contract `abi/auth` `fields`).
         if tok.token.reveal().is_empty() {
-            return f(Read::Wait);
+            return f(Read::Nothing);
         }
         if now >= tok.expires_at && self.refresh_failed.load(Ordering::Acquire) {
             return f(Read::Wait);
