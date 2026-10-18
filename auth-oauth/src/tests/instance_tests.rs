@@ -205,6 +205,60 @@ fn jwt_bearer_mints_on_tick() {
     );
 }
 
+/// The scripted need on a host whose clock reads `wall_secs` (and a monotonic `mono_ns`).
+struct Pinned(Arc<Scripted>, u64);
+
+impl Wire for Pinned {
+    fn open(&self, req: &TokenRequest, timeout_ms: u64) -> Result<ConnId, ConnError> {
+        self.0.open(req, timeout_ms)
+    }
+    fn read(&self, conn: ConnId, buf: &mut [u8]) -> Result<mint::Got, ConnError> {
+        self.0.read(conn, buf)
+    }
+    fn close(&self, conn: ConnId) {
+        self.0.close(conn);
+    }
+    fn clock(&self) -> Option<mint::HostClock> {
+        Some(mint::HostClock {
+            wall_secs: self.1,
+            mono_ns: 0,
+        })
+    }
+}
+
+/// ONE CLOCK (THE DESIGN §1: "one clock, which also drives every plugin's `tick`"; §11.12
+/// `clock.now`; Q128 auth-oauth LOW). The assertion's `iat` is the HOST's wall time, not a clock
+/// the plugin reads for itself: a host pinned at 1_700_000_000 signs an assertion issued then.
+/// RED before the fix: the plugin read `SystemTime::now()`.
+#[test]
+fn jwt_bearer_signs_at_the_hosts_wall_clock() {
+    use base64::Engine as _;
+    const HOST_WALL: u64 = 1_700_000_000;
+    let host = TestHost::new();
+    let w = Arc::new(Scripted::default());
+    let o = Oauth::with_wire(1, Some(Box::new(Pinned(w.clone(), HOST_WALL))));
+    let sa = serde_json::json!({
+        "client_email": "svc@proj.iam.gserviceaccount.com",
+        "private_key": include_str!("fixtures/test_sa_key.pem"),
+        "token_uri": "https://oauth2.googleapis.com/token",
+    })
+    .to_string();
+    let _ = open(&o, style::JWT_BEARER, &sa, "{}");
+    w.ok(r#"{"access_token":"ya29.tok","expires_in":3599}"#);
+    o.tick(1, Ticket::NONE, Some(&host.host), &mut Diags::default());
+    let body = w.sent.lock().unwrap()[0].2.clone();
+    let assertion = body.split("assertion=").nth(1).expect("an assertion");
+    let claims = assertion.split('.').nth(1).expect("a claims part");
+    let claims: serde_json::Value = serde_json::from_slice(
+        &base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(claims)
+            .expect("base64url claims"),
+    )
+    .expect("JSON claims");
+    assert_eq!(claims["iat"], HOST_WALL, "{claims}");
+    assert_eq!(claims["exp"], HOST_WALL + 3600, "{claims}");
+}
+
 const CC_SETTINGS: &str = r#"{"token_url":"https://login.example.com/tenant/oauth2/v2.0/token","scope":"https://cognitiveservices.azure.com/.default"}"#;
 
 /// A client-credentials binding whose token has expired and whose refresh failed: `tok-1`,

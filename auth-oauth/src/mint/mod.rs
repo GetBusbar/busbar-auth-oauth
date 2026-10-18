@@ -325,6 +325,21 @@ pub(crate) trait Wire: Send + Sync {
     fn read(&self, conn: ConnId, buf: &mut [u8]) -> Result<Got, ConnError>;
     /// Close the connection.
     fn close(&self, conn: ConnId);
+    /// THE HOST'S CLOCK (`clock.now`: THE DESIGN §1 "one clock, which also drives every plugin's
+    /// `tick`"; §11.12), one reading; `None` when the host could not answer it.
+    fn clock(&self) -> Option<HostClock> {
+        None
+    }
+}
+
+/// One reading of the host's clock: the wall clock a token's `expires_in` and a JWT's `iat` are
+/// read against, and the monotonic clock a `drive` measures the time since its `tick` on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct HostClock {
+    /// Wall time, whole seconds since the epoch (1970-01-01 UTC).
+    pub wall_secs: u64,
+    /// Monotonic time, nanoseconds since an origin fixed for the process's life.
+    pub mono_ns: u64,
 }
 
 /// Where one binding's exchange stands.
