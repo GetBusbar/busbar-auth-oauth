@@ -54,6 +54,13 @@ impl Scripted {
 }
 
 impl Wire for Scripted {
+    fn clock(&self) -> Option<HostClock> {
+        Some(HostClock {
+            wall_secs: now_epoch(),
+            mono_ns: 0,
+        })
+    }
+
     fn open(&self, req: &TokenRequest, _: u64) -> Result<ConnId, ConnError> {
         self.sent.lock().unwrap().push((
             req.target.clone(),
@@ -200,10 +207,10 @@ fn the_first_tick_mints_and_the_request_path_presents_it() {
     assert!(!m.is_ready());
     assert_eq!(
         m.read(now_epoch(), |r| format!("{r:?}")),
-        "Wait",
-        "nothing minted yet: not ready"
+        "Nothing",
+        "nothing minted yet: READY with no fields (the upstream answers 401, as in 1.5.5)"
     );
-    let (due, report) = m.tick(1_000, Some(&w));
+    let (due, report) = m.tick(1_000, now_epoch(), Some(&w));
     assert_eq!(report, Some(Report::Minted));
     assert!(m.is_ready());
     assert_eq!(
@@ -231,8 +238,8 @@ fn a_pending_read_is_finished_on_a_later_tick() {
         Step::Done,
     ]);
     let m = Minted::new(client_credentials(), DEFAULT_MAX_RESPONSE_BYTES);
-    assert_eq!(m.tick(0, Some(&w)), (IN_FLIGHT_POLL_NS, None));
-    let (_, report) = m.tick(IN_FLIGHT_POLL_NS, Some(&w));
+    assert_eq!(m.tick(0, now_epoch(), Some(&w)), (IN_FLIGHT_POLL_NS, None));
+    let (_, report) = m.tick(IN_FLIGHT_POLL_NS, now_epoch(), Some(&w));
     assert_eq!(report, Some(Report::Minted));
 }
 
@@ -250,7 +257,7 @@ fn a_response_body_over_the_cap_is_refused() {
     steps.push(Step::Done);
     w.push(steps);
     let m = Minted::new(client_credentials(), DEFAULT_MAX_RESPONSE_BYTES);
-    let (_, report) = m.tick(0, Some(&w));
+    let (_, report) = m.tick(0, now_epoch(), Some(&w));
     assert_eq!(
         report,
         Some(Report::MintFailed(
@@ -268,7 +275,7 @@ fn a_dropped_or_refused_exchange_is_a_failure() {
     let w = Scripted::default();
     w.push(vec![Step::Head(200), Step::Fail(ConnError::Closed)]);
     let m = Minted::new(client_credentials(), DEFAULT_MAX_RESPONSE_BYTES);
-    let (due, report) = m.tick(0, Some(&w));
+    let (due, report) = m.tick(0, now_epoch(), Some(&w));
     assert_eq!(
         report,
         Some(Report::MintFailed(
@@ -279,7 +286,7 @@ fn a_dropped_or_refused_exchange_is_a_failure() {
     );
     assert_eq!(due, MIN_SLEEP_SECS * S, "a failure retries at MIN_SLEEP");
     w.refuse(ConnError::Refused);
-    let (_, report) = m.tick(due, Some(&w));
+    let (_, report) = m.tick(due, now_epoch(), Some(&w));
     assert_eq!(
         report,
         Some(Report::MintFailed(
@@ -294,8 +301,8 @@ fn an_exchange_past_the_mint_deadline_is_abandoned() {
     let w = Scripted::default();
     w.push(vec![Step::Pending, Step::Pending]);
     let m = Minted::new(client_credentials(), DEFAULT_MAX_RESPONSE_BYTES);
-    m.tick(0, Some(&w));
-    let (_, report) = m.tick(MINT_DEADLINE_SECS * S, Some(&w));
+    m.tick(0, now_epoch(), Some(&w));
+    let (_, report) = m.tick(MINT_DEADLINE_SECS * S, now_epoch(), Some(&w));
     assert_eq!(
         report,
         Some(Report::MintFailed(
@@ -314,7 +321,7 @@ fn an_empty_token_is_a_failure_not_a_token() {
     w.ok(r#"{"access_token":""}"#);
     let m = Minted::new(client_credentials(), DEFAULT_MAX_RESPONSE_BYTES);
     assert_eq!(
-        m.tick(0, Some(&w)),
+        m.tick(0, now_epoch(), Some(&w)),
         (MIN_SLEEP_SECS * S, Some(Report::EmptyToken))
     );
     assert!(!m.is_ready());
@@ -328,7 +335,7 @@ fn an_expired_token_whose_refresh_failed_answers_wait_until_a_mint_lands() {
     let w = Scripted::default();
     w.ok(r#"{"access_token":"old","expires_in":60}"#);
     let m = Minted::new(client_credentials(), DEFAULT_MAX_RESPONSE_BYTES);
-    let (due, _) = m.tick(0, Some(&w));
+    let (due, _) = m.tick(0, now_epoch(), Some(&w));
     let later = now_epoch() + 3600;
     assert_eq!(
         m.read(later, |r| format!("{r:?}")),
@@ -336,7 +343,7 @@ fn an_expired_token_whose_refresh_failed_answers_wait_until_a_mint_lands() {
         "expired, refresh not failed: the current token"
     );
     w.push(vec![Step::Head(500), Step::Body(b"down".to_vec(), true)]);
-    let (due, report) = m.tick(due, Some(&w));
+    let (due, report) = m.tick(due, now_epoch(), Some(&w));
     assert_eq!(
         report,
         Some(Report::MintFailed(
@@ -350,7 +357,7 @@ fn an_expired_token_whose_refresh_failed_answers_wait_until_a_mint_lands() {
         "not yet expired: served even while refreshes fail"
     );
     w.ok(r#"{"access_token":"new","expires_in":3600}"#);
-    assert_eq!(m.tick(due, Some(&w)).1, Some(Report::Minted));
+    assert_eq!(m.tick(due, now_epoch(), Some(&w)).1, Some(Report::Minted));
     assert_eq!(
         m.read(later, |r| format!("{r:?}")),
         "Header(\"Bearer new\")"
@@ -361,10 +368,10 @@ fn an_expired_token_whose_refresh_failed_answers_wait_until_a_mint_lands() {
 #[test]
 fn no_granted_need_mints_nothing() {
     let m = Minted::new(client_credentials(), DEFAULT_MAX_RESPONSE_BYTES);
-    let (due, report) = m.tick(0, None);
+    let (due, report) = m.tick(0, now_epoch(), None);
     assert!(matches!(report, Some(Report::MintFailed(_))));
     assert_eq!(due, MIN_SLEEP_SECS * S);
-    assert_eq!(m.tick(1, None), (due, None));
+    assert_eq!(m.tick(1, now_epoch(), None), (due, None));
 }
 
 /// THE MINT ENDPOINTS ARE `operator-infrastructure` (ARCHITECT D1 2026-10-05, MINT CLASS (B),

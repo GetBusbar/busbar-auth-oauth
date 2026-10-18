@@ -92,8 +92,7 @@ fn jwt_bearer_refuses_in_the_accepted_words() {
     assert_eq!(l.len(), 1);
     assert!(
         l[0].starts_with(
-            "credential: could not read service-account key file named by this lane's \
-             credential: "
+            "credential: service-account JSON is invalid: the credential is not inline JSON"
         ),
         "{l:?}"
     );

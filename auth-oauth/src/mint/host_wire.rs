@@ -26,7 +26,7 @@ use busbar_contract::abi::sdk::conn::{ConnFailure, Connector, Host};
 use busbar_contract::abi::transport::{fields, FrameSpan};
 use busbar_contract::conn::{ConnError, ConnId, PieceKind};
 
-use super::{Got, TokenRequest, Wire};
+use super::{Got, HostClock, TokenRequest, Wire};
 
 /// The connector for one entry of the driver ticket's cycle.
 pub(crate) struct HostWire<'a> {
@@ -196,5 +196,15 @@ impl Wire for HostWire<'_> {
 
     fn close(&self, conn: ConnId) {
         let _ = self.with(|c| c.close(conn.0));
+    }
+
+    fn clock(&self) -> Option<HostClock> {
+        match self.with(|c| c.clock_now()) {
+            Poll::Ready(Ok(r)) => Some(HostClock {
+                wall_secs: r.wall_ns / 1_000_000_000,
+                mono_ns: r.mono_ns,
+            }),
+            _ => None,
+        }
     }
 }

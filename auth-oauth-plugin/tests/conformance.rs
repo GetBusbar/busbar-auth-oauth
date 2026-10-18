@@ -370,7 +370,8 @@ const EXPECTED: &[&str] = &[
      plugin",
     "open_outbound kerberos Failed settings: outbound auth style `kerberos` is not served by this \
      plugin",
-    "fields Refused ",
+    // Before the first mint: READY with no fields (the upstream answers 401, as in 1.5.5).
+    "fields Ready  ",
     "fields Refused ",
     "fields Refused ",
     "ready Ready 0",
@@ -381,7 +382,7 @@ const EXPECTED: &[&str] = &[
     "open_outbound oauth-client-credentials Ready ",
     "retire 1 Ready",
     "after retire fields Refused ",
-    "gen 2 fields Refused ",
+    "gen 2 fields Ready  ",
     "close Ready",
 ];
 
@@ -739,20 +740,25 @@ mod mint_door {
             .open_outbound("oauth-client-credentials", CREDENTIAL.as_bytes(), &settings)
             .expect("the binding opens");
 
-        // BEFORE THE FIRST MINT: not ready. On the spot the call is refused (the host submits it on a
-        // ticket); nothing is presented empty.
+        // BEFORE THE FIRST MINT: READY with no fields on the spot, so the upstream answers 401, as
+        // in 1.5.5 (THE DESIGN §11.11); `ready` stays 0.
         let request = FieldsRequest::default();
         assert!(
-            instance.fields_now(handle, &request).is_none(),
-            "nothing minted yet: no answer on the spot"
+            matches!(instance.fields_now(handle, &request), Some(Fields::Ready(f)) if f.is_empty()),
+            "nothing minted yet: READY with no fields"
         );
 
-        // THE TICK SCHEDULE: the first mint lands, and the waiting call presents it.
+        // THE TICK SCHEDULE: the first mint lands, and the next call presents it.
         tokio::spawn(Arc::clone(&instance).ticks());
-        let first = tokio::time::timeout(
-            Duration::from_secs(10),
-            instance.fields(handle, FieldsRequest::default(), 0),
-        )
+        let first = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let answer = instance.fields(handle, FieldsRequest::default(), 0).await;
+                if presents(&answer, "Bearer oracle-minted-1") {
+                    break answer;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
         .await
         .expect("the first mint lands");
         assert!(
