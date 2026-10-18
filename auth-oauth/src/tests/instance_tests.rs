@@ -77,19 +77,22 @@ fn oauth_client_credentials_mints_on_tick_and_honours_the_expired_token_rule() {
         "client-abc:s3cr&t",
         r#"{"token_url":"https://login.example.com/tenant/oauth2/v2.0/token","scope":"https://cognitiveservices.azure.com/.default"}"#,
     );
+    // BEFORE THE FIRST MINT: READY with zero fields, so the upstream answers 401, as 1.5.5 did
+    // (THE DESIGN §11.11; App. A B.3; contract `abi/auth` `fields`). RED before the fix: the call
+    // parked until the first mint landed.
     assert_eq!(
-        fields(&o, &host, h, Ticket::NONE).0,
-        Outcome::Refused,
-        "before the first mint: not ready; ticket-less, REFUSED (the host re-submits on a ticket)"
+        fields(&o, &host, h, Ticket::NONE),
+        (Outcome::Ready, String::new()),
+        "before the first mint, ticket-less: READY, no fields"
     );
     let first = Ticket {
         slot: 2,
         generation: 1,
     };
     assert_eq!(
-        fields(&o, &host, h, first).0,
-        Outcome::Pending,
-        "before the first mint: PENDING on a ticket until the first mint lands"
+        fields(&o, &host, h, first),
+        (Outcome::Ready, String::new()),
+        "before the first mint, on a ticket: READY, no fields, nothing parked"
     );
 
     // THE FIRST MINT, on the first tick: a token that expires at once, so the rule can run on the
@@ -122,8 +125,8 @@ fn oauth_client_credentials_mints_on_tick_and_honours_the_expired_token_rule() {
     capture("oauth-client-credentials.json", &w);
     assert_eq!(
         host.take(),
-        vec![first],
-        "the landed first mint wakes the waiting ticket"
+        Vec::<Ticket>::new(),
+        "nothing parked before the first mint, so the landed mint wakes nothing"
     );
     assert_eq!(fields(&o, &host, h, first).1, "authorization: Bearer tok-1");
     assert_eq!(
