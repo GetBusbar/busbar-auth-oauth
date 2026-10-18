@@ -200,8 +200,8 @@ fn the_first_tick_mints_and_the_request_path_presents_it() {
     assert!(!m.is_ready());
     assert_eq!(
         m.read(now_epoch(), |r| format!("{r:?}")),
-        "Wait",
-        "nothing minted yet: not ready"
+        "Nothing",
+        "nothing minted yet: READY with no fields (the upstream answers 401, as in 1.5.5)"
     );
     let (due, report) = m.tick(1_000, Some(&w));
     assert_eq!(report, Some(Report::Minted));
