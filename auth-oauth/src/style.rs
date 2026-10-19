@@ -58,6 +58,11 @@ pub struct ExchangeBinding {
 }
 
 impl ExchangeBinding {
+    /// Whether this binding's last settled exchange failed (its `ready` fact reads `0`).
+    pub(crate) fn failing(&self) -> bool {
+        self.exchange.failing()
+    }
+
     /// The cache key of this binding's cell for `scope`: SHA-256 over the binding's own key and the
     /// scope, so two scopes never share a token and two bindings never share a scope's.
     pub fn scope_key(&self, scope: &[u8]) -> [u8; 32] {
