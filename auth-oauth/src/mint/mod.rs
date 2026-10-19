@@ -662,17 +662,30 @@ impl Minted {
 
 /// The cause a connection refusal names — never the URL (it can carry query/secret material).
 fn conn_cause(e: ConnError) -> &'static str {
-    match e {
-        ConnError::Pending => "not ready",
-        ConnError::Timeout => "timed out",
-        ConnError::Closed => "connection closed",
-        ConnError::NotOwner => "connection not owned",
-        ConnError::UndeclaredNeed => "no need declared for the token endpoint",
-        ConnError::Refused => "refused",
-        ConnError::Fault => "fault",
-        ConnError::Unarmed => "not armed",
-        ConnError::CredentialUnavailable => "the request's credential is unavailable",
-    }
+    // Named cause by cause, not one exhaustive `match`: `ConnError` grows (the contract adds the
+    // auth outcomes and marks it non-exhaustive), and a cause this plugin does not name reads as a
+    // failed connection under either contract, so the busbar that pins this commit compiles it.
+    let named = [
+        (ConnError::Pending, "not ready"),
+        (ConnError::Timeout, "timed out"),
+        (ConnError::Closed, "connection closed"),
+        (ConnError::NotOwner, "connection not owned"),
+        (
+            ConnError::UndeclaredNeed,
+            "no need declared for the token endpoint",
+        ),
+        (ConnError::Refused, "refused"),
+        (ConnError::Fault, "fault"),
+        (ConnError::Unarmed, "not armed"),
+        (
+            ConnError::CredentialUnavailable,
+            "the request's credential is unavailable",
+        ),
+    ];
+    named
+        .into_iter()
+        .find_map(|(cause, why)| (cause == e).then_some(why))
+        .unwrap_or("connection failed")
 }
 
 #[cfg(test)]
