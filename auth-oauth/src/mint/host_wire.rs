@@ -98,6 +98,7 @@ const fn span(offset: usize, len: usize) -> FrameSpan {
     FrameSpan {
         offset: offset as u64,
         len: len as u64,
+        ..FrameSpan::ZERO
     }
 }
 
@@ -123,6 +124,7 @@ fn head(req: &TokenRequest, timeout_ms: u64) -> Result<(Vec<u8>, RequestPiece), 
         target: span(4, words.len()),
         fields: span(block_at, bytes.len() - block_at),
         timeout_ms,
+        ..RequestPiece::ZERO
     };
     Ok((bytes, piece))
 }
@@ -133,11 +135,11 @@ impl Wire for HostWire<'_> {
         let body = req.body.reveal().as_bytes();
         let body_piece = RequestPiece {
             kind: REQUEST_BODY,
-            ..RequestPiece::default()
+            ..RequestPiece::ZERO
         };
         let end_piece = RequestPiece {
             kind: REQUEST_END,
-            ..RequestPiece::default()
+            ..RequestPiece::ZERO
         };
         self.with(|c| {
             let stream = now(c.establish(req.need, Some(&req.target), ""))?;

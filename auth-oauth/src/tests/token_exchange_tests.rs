@@ -47,6 +47,7 @@ fn ticket(slot: u32) -> Ticket {
     Ticket {
         slot,
         generation: 1,
+        ..Ticket::ZERO
     }
 }
 

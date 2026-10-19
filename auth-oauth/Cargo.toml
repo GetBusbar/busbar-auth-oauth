@@ -11,6 +11,9 @@ description = "The OAuth self-minting auth styles (jwt-bearer, oauth-client-cred
 # MOVED from busbar (crates/busbar-auth-oauth at busbar bb0c7f71d4, history imported;
 # BUSBAR-1.6.0.md §9: every plugin lives in its own repo). The source is busbar's verbatim.
 
+[lints]
+workspace = true
+
 [lib]
 # rlib only: the LINKED door (`busbar_auth_oauth::door`, the `DoorFn` a compiled-in row holds) and the
 # tests. The DROPPED door is the sibling `busbar-auth-oauth-plugin` cdylib, the same door behind the

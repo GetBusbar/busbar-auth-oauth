@@ -91,6 +91,7 @@ fn oauth_client_credentials_mints_on_tick_and_honours_the_expired_token_rule() {
     let first = Ticket {
         slot: 2,
         generation: 1,
+        ..Ticket::ZERO
     };
     assert_eq!(
         fields(&o, &host, h, first),
@@ -149,6 +150,7 @@ fn oauth_client_credentials_mints_on_tick_and_honours_the_expired_token_rule() {
     let ticket = Ticket {
         slot: 3,
         generation: 1,
+        ..Ticket::ZERO
     };
     let (outcome, _) = fields(&o, &host, h, ticket);
     assert_eq!(
@@ -338,6 +340,7 @@ fn a_mint_landing_between_the_read_and_the_park_is_not_a_lost_wake() {
     let call = Ticket {
         slot: 7,
         generation: 1,
+        ..Ticket::ZERO
     };
     let answered = std::thread::scope(|s| {
         let held = o.waiters.lock().unwrap();
@@ -387,6 +390,7 @@ fn a_cell_settled_between_the_lookup_and_the_park_is_not_a_lost_wake() {
     let call = Ticket {
         slot: 301,
         generation: 1,
+        ..Ticket::ZERO
     };
     let first = std::thread::scope(|s| {
         let held = o.exchange_waiters.lock().unwrap();

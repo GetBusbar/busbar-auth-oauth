@@ -107,6 +107,7 @@ const TAIL: &AuthTail = &outbound_tail(0, STYLES);
 const NO_STR: AbiStr = AbiStr {
     ptr: ptr::null(),
     len: 0,
+    ..AbiStr::ZERO
 };
 
 /// One token endpoint's need: outbound, `operator-infrastructure`, over the http transport, its target the
@@ -124,6 +125,7 @@ const fn token_need(target_from: &'static str) -> Need {
             len: 0,
             fmt: BLOB_ABSENT,
             flags: 0,
+            ..Blob::ZERO
         },
         keep_response_headers: ptr::null(),
         keep_response_headers_len: 0,
@@ -132,6 +134,7 @@ const fn token_need(target_from: &'static str) -> Need {
         _reserved: 0,
         deny_response_headers: ptr::null(),
         deny_response_headers_len: 0,
+        ..Need::ZERO
     }
 }
 

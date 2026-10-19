@@ -8,6 +8,9 @@ license.workspace = true
 publish.workspace = true
 description = "First-party signed kind:auth plugin cdylib: the oauth auth module, packaged as a droppable busbar plugin. Drop the signed tarball into plugins/."
 
+[lints]
+workspace = true
+
 [lib]
 # cdylib: the DROPPED-IN door (a signed tarball in `plugins/`), exporting `busbar_plugin_door`.
 # rlib: what `cargo test` links, and what makes `cargo test` emit the cdylib the conformance test
