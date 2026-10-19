@@ -413,3 +413,156 @@ fn a_cell_settled_between_the_lookup_and_the_park_is_not_a_lost_wake() {
         "authorization: Bearer tok-s"
     );
 }
+
+/// The scripted need on a host whose clock the test sets: wall seconds from `wall`.
+struct HostClocked(Arc<Scripted>, Arc<AtomicU64>);
+
+impl Wire for HostClocked {
+    fn open(&self, req: &TokenRequest, timeout_ms: u64) -> Result<ConnId, ConnError> {
+        self.0.open(req, timeout_ms)
+    }
+    fn read(&self, conn: ConnId, buf: &mut [u8]) -> Result<mint::Got, ConnError> {
+        self.0.read(conn, buf)
+    }
+    fn close(&self, conn: ConnId) {
+        self.0.close(conn);
+    }
+    fn clock(&self) -> Option<mint::HostClock> {
+        Some(mint::HostClock {
+            wall_secs: self.1.load(Ordering::Acquire),
+            mono_ns: 0,
+        })
+    }
+}
+
+/// One `fields` call stamped with the host's wall time `timestamp` (THE DESIGN abi/auth: "read once
+/// by the host for this call"), on `ticket`, its scope `scope`.
+fn fields_at(
+    o: &Oauth,
+    host: &TestHost,
+    handle: u64,
+    ticket: Ticket,
+    scope: Option<&str>,
+    timestamp: u64,
+) -> (Outcome, String) {
+    let mut written = Vec::new();
+    let ask = crate::Ask {
+        handle,
+        own: true,
+        scope: scope.map(str::as_bytes),
+        ticket,
+        timestamp,
+    };
+    let answer = o.answer(&ask, Some(&host.host), &mut |h| {
+        written.push(format!("authorization: {h}"));
+    });
+    match answer {
+        std::task::Poll::Ready(busbar_contract::abi::sdk::auth_outbound::FieldsAnswer::Ready) => {
+            (Outcome::Ready, written.join(" ; "))
+        }
+        std::task::Poll::Pending => (Outcome::Pending, String::new()),
+        std::task::Poll::Ready(_) => (Outcome::Refused, String::new()),
+    }
+}
+
+/// ONE CLOCK, FOR EXPIRY AND CACHING (THE DESIGN §1 l.159: "one clock, which also drives every
+/// plugin's tick"; §11.12: the clock family is "wall and monotonic time from the kernel's one
+/// clock"; Q128 auth-oauth LOW, finding 3). A token's expiry and an on-demand token's cache life are
+/// judged on the HOST's wall time, never the process's: the host's clock here sits at 2001, decades
+/// behind the process clock, so a token minted on it is FRESH on the host's time though the process
+/// clock calls it long expired; and a host clock moved far into the future sees the same cached
+/// token as expired, though the process clock calls it fresh. The refresh timing is 1.5.5's,
+/// relative to the clock the plugin is given.
+#[test]
+fn token_expiry_and_caching_are_judged_on_the_hosts_clock() {
+    const HOST_WALL: u64 = 1_000_000_000;
+    const FAR_FUTURE: u64 = 4_000_000_000;
+    let host = TestHost::new();
+    let w = Arc::new(Scripted::default());
+    let wall = Arc::new(AtomicU64::new(HOST_WALL));
+    let o = Oauth::with_wire(1, Some(Box::new(HostClocked(w.clone(), wall.clone()))));
+    let mut diags = Diags::default();
+
+    // A SCHEDULED STYLE: minted at the host's 2001, an hour to live, then its refresh fails.
+    let h = open(
+        &o,
+        style::OAUTH_CLIENT_CREDENTIALS,
+        "client-abc:s3cr&t",
+        CC_SETTINGS,
+    );
+    w.ok(r#"{"access_token":"tok-1","expires_in":3600}"#);
+    let due = o.tick(1_000, Ticket::NONE, Some(&host.host), &mut diags);
+    assert_eq!(
+        due,
+        1_000 + (3600 - 300) * NS,
+        "the refresh is 1.5.5's: the skew ahead of expiry, on the clock the plugin is given"
+    );
+    w.push(vec![Step::Head(503), Step::Body(b"down".to_vec(), true)]);
+    wall.store(HOST_WALL + 3300, Ordering::Release);
+    o.tick(due, Ticket::NONE, Some(&host.host), &mut diags);
+    let call = Ticket {
+        slot: 11,
+        generation: 1,
+    };
+    assert_eq!(
+        fields_at(&o, &host, h, call, None, HOST_WALL + 3310),
+        (Outcome::Ready, "authorization: Bearer tok-1".to_string()),
+        "on the host's clock the token has not expired yet (the process clock says it has)"
+    );
+    assert!(o.ready(h), "ready on the host's clock");
+    assert_eq!(
+        fields_at(&o, &host, h, call, None, FAR_FUTURE).0,
+        Outcome::Pending,
+        "a host clock far in the future sees the cached token as expired"
+    );
+    assert!(!o.ready(h), "not ready on the host's far-future clock");
+    o.unpark(call);
+
+    // AN ON-DEMAND STYLE: a token exchange's cached token is presented on the host's clock (its own
+    // instance, so the scheduled cell's retry above never takes the exchange's scripted reply).
+    let w = Arc::new(Scripted::default());
+    let wall = Arc::new(AtomicU64::new(HOST_WALL));
+    let o = Oauth::with_wire(1, Some(Box::new(HostClocked(w.clone(), wall))));
+    let x = style::open(
+        style::OAUTH_TOKEN_EXCHANGE,
+        Some(b"busbar-own-subject-token".as_slice()),
+        Some(
+            br#"{"token_url":"https://as.example/token","resource":"https://tools.example/rpc"}"#
+                .as_slice(),
+        ),
+        &o,
+    )
+    .unwrap_or_else(|_| panic!("the binding opens"));
+    let x = o.keep_binding(x);
+    let first = Ticket {
+        slot: 12,
+        generation: 1,
+    };
+    assert_eq!(
+        fields_at(&o, &host, x, first, Some("s"), HOST_WALL).0,
+        Outcome::Pending,
+        "no token for the scope yet: the call waits on its exchange"
+    );
+    w.ok(r#"{"access_token":"tok-x","expires_in":3600}"#);
+    o.tick(1_000, Ticket::NONE, Some(&host.host), &mut diags);
+    let sent = w.sent.lock().unwrap().len();
+    assert_eq!(
+        fields_at(&o, &host, x, first, Some("s"), HOST_WALL + 10),
+        (Outcome::Ready, "authorization: Bearer tok-x".to_string()),
+        "the cached exchange token is fresh on the host's clock (the process clock says stale)"
+    );
+    let later = Ticket {
+        slot: 13,
+        generation: 1,
+    };
+    assert_eq!(
+        fields_at(&o, &host, x, later, Some("s"), FAR_FUTURE).0,
+        Outcome::Pending,
+        "a host clock far in the future sees the cached exchange token as expired: a new exchange"
+    );
+    assert_eq!(
+        w.sent.lock().unwrap().len(),
+        sent,
+        "the cached token was served without a new exchange until the host's clock passed it"
+    );
+}
