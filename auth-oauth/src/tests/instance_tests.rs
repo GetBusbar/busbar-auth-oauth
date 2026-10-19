@@ -566,3 +566,50 @@ fn token_expiry_and_caching_are_judged_on_the_hosts_clock() {
         "the cached token was served without a new exchange until the host's clock passed it"
     );
 }
+
+/// A SCHEDULED CELL RETIRED MID-MINT IS DROPPED WHEN ITS MINT SETTLES (Q128 auth-oauth reader A,
+/// LOW; THE DESIGN §6 item 3: the cache outlives a handle only so a re-open can share it). The
+/// generation that opened a client-credentials binding retires while the cell's mint is in flight,
+/// so `retire` keeps it (not idle). Once that mint settles, no handle holds the cell and nothing
+/// waits on it: it is dropped, and no later tick mints for it again. RED: the orphan stayed in the
+/// cache and was refreshed against its token endpoint on every due tick, until some later retire.
+#[test]
+fn a_scheduled_cell_retired_mid_mint_is_dropped_when_the_mint_settles() {
+    let host = TestHost::new();
+    let w = Arc::new(Scripted::default());
+    let o = instance(&w);
+    let _h = open(
+        &o,
+        style::OAUTH_CLIENT_CREDENTIALS,
+        "client-abc:s3cr&t",
+        CC_SETTINGS,
+    );
+    w.push(vec![
+        Step::Pending,
+        Step::Head(200),
+        Step::Body(br#"{"access_token":"tok","expires_in":0}"#.to_vec(), true),
+    ]);
+    let mut diags = Diags::default();
+    o.tick(1_000, Ticket::NONE, Some(&host.host), &mut diags);
+    assert_eq!(w.sent.lock().unwrap().len(), 1, "the first mint is out");
+    o.retire(1);
+    assert_eq!(
+        lock(&o.cache).len(),
+        1,
+        "positive control: retire keeps the cell its mint is in flight on"
+    );
+    let due = o.tick(2_000, Ticket::NONE, Some(&host.host), &mut diags);
+    assert_eq!(
+        lock(&o.cache).len(),
+        0,
+        "the settled orphan is dropped: no handle holds it, nothing waits"
+    );
+    // An expiring token would be refreshed at once: nothing is minted for the dropped cell.
+    w.ok(r#"{"access_token":"tok-2","expires_in":3600}"#);
+    o.tick(due.max(3_000), Ticket::NONE, Some(&host.host), &mut diags);
+    assert_eq!(
+        w.sent.lock().unwrap().len(),
+        1,
+        "no mint for a dropped cell"
+    );
+}
