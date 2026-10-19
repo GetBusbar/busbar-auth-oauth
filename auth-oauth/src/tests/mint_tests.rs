@@ -6,6 +6,7 @@
 //! tests), and the tick-driven exchange with THE EXPIRED-TOKEN RULE.
 
 use super::*;
+use crate::held::Own;
 use std::collections::VecDeque;
 
 /// One scripted read.
@@ -68,7 +69,7 @@ impl Wire for Scripted {
                 .iter()
                 .map(|(k, v)| (k.to_string(), v.to_string()))
                 .collect(),
-            req.body.reveal().clone(),
+            req.body.expose_own(&Own::here()).clone(),
         ));
         let next = self
             .scripts
@@ -395,7 +396,7 @@ fn every_mint_need_is_declared_operator_infrastructure() {
 /// THE TOKEN REQUEST FORM IS BUILT ONCE AND HELD WIPED (THE DESIGN §6: "auth material is
 /// zeroised"): it carries the client secret, the subject token or the signed assertion, so it is
 /// written into one buffer sized to its exact length (no growth frees a partial copy) and held in
-/// a [`Held`] — byte for byte what `serde_urlencoded` (reqwest's `.form()`) wrote, for every byte.
+/// a `Secret<_, Own>` — byte for byte what `serde_urlencoded` (reqwest's `.form()`) wrote, for every byte.
 #[test]
 fn the_form_is_serde_urlencoded_byte_for_byte_and_built_once() {
     let mut every: String = (0_u8..=0x7f).map(char::from).collect();
@@ -406,10 +407,14 @@ fn the_form_is_serde_urlencoded_byte_for_byte_and_built_once() {
         ("scope", "https://cognitiveservices.azure.com/.default a b"),
         ("empty", ""),
     ];
-    let held: Held<String> = form(&pairs);
+    let held: Secret<String, Own> = form(&pairs);
     assert_eq!(
-        held.reveal(),
+        held.expose_own(&Own::here()),
         &serde_urlencoded::to_string(pairs).expect("a form")
     );
-    assert_eq!(held.reveal().capacity(), held.reveal().len(), "sized once");
+    assert_eq!(
+        held.expose_own(&Own::here()).capacity(),
+        held.expose_own(&Own::here()).len(),
+        "sized once"
+    );
 }

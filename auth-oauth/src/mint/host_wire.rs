@@ -14,6 +14,7 @@
 //! kept): the handle count is the instance's, reset at each tick and carried on through each
 //! drive, so no service is ever answered from another's kept result.
 
+use crate::held::Own;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::task::Poll;
 
@@ -130,7 +131,7 @@ fn head(req: &TokenRequest, timeout_ms: u64) -> Result<(Vec<u8>, RequestPiece), 
 impl Wire for HostWire<'_> {
     fn open(&self, req: &TokenRequest, timeout_ms: u64) -> Result<ConnId, ConnError> {
         let (head, head_piece) = head(req, timeout_ms)?;
-        let body = req.body.reveal().as_bytes();
+        let body = req.body.expose_own(&Own::here()).as_bytes();
         let body_piece = RequestPiece {
             kind: REQUEST_BODY,
             ..RequestPiece::default()
