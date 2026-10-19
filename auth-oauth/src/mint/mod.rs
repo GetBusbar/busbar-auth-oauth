@@ -171,7 +171,7 @@ pub(crate) enum Minter {
 }
 
 impl Minter {
-    fn request(&self, now: u64) -> Result<TokenRequest, String> {
+    pub(crate) fn request(&self, now: u64) -> Result<TokenRequest, String> {
         match self {
             Minter::JwtBearer(s) => s.request(now),
             Minter::ClientCredentials(c) => c.request(),

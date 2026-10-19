@@ -183,3 +183,42 @@ fn each_style_declares_its_rank_and_its_endpoint() {
         ]
     );
 }
+
+/// THE JWT MINT DIALS THE HOST-JUDGED ENDPOINT (Q128 auth-oauth reader B, LOW): the host reads the
+/// service account's `token_uri`, judges it as a destination, strips any `user:pass@` and hands
+/// the plugin that copy as the `token_uri` setting its need is pinned to. The mint POSTs THERE; the
+/// service account's own spelling stays only the assertion's `aud` (1.5.5's claim). With no setting
+/// (a host that hands none) the credential's endpoint is dialled, as before. RED: the mint dialled
+/// the credential's raw endpoint, userinfo and all, whatever the setting said.
+#[test]
+fn a_jwt_binding_dials_the_judged_token_uri_setting() {
+    #[derive(Default)]
+    struct Dialled(Mutex<Vec<String>>);
+    impl TokenCache for Dialled {
+        fn cell(&self, _key: [u8; 32], minter: Minter, max: usize) -> Arc<Minted> {
+            let target = minter
+                .request(1_700_000_000)
+                .map(|r| r.target)
+                .unwrap_or_default();
+            self.0.lock().unwrap().push(target);
+            Arc::new(Minted::new(minter, max))
+        }
+    }
+    let sa = serde_json::json!({
+        "client_email": "svc@proj.example.test",
+        "private_key": include_str!("fixtures/test_sa_key.pem"),
+        "token_uri": "https://user:pw@oauth2.example.test/token",
+    })
+    .to_string();
+    let dialled = Dialled::default();
+    let judged = br#"{"token_uri":"https://oauth2.example.test/token"}"#;
+    assert!(open_binding(JWT_BEARER, Some(sa.as_bytes()), Some(judged), &dialled).is_ok());
+    assert!(open_binding(JWT_BEARER, Some(sa.as_bytes()), Some(b"{}"), &dialled).is_ok());
+    assert_eq!(
+        *dialled.0.lock().unwrap(),
+        [
+            "https://oauth2.example.test/token",
+            "https://user:pw@oauth2.example.test/token",
+        ]
+    );
+}
