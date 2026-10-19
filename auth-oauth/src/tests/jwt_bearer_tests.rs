@@ -410,3 +410,47 @@ fn the_assertion_is_held_in_a_wiped_buffer_sized_once() {
     );
     assert_eq!(assertion.capacity(), assertion.len(), "sized once");
 }
+
+/// THE KEY FILE IS THE HOST'S TO READ (THE DESIGN §11.11 R4 l.1464-1469: only the host's bounded
+/// disk lane may block, for the secret kind's file source among others; §6 l.825-827: the kernel
+/// resolves secret material and delivers it to the bound auth; ruling 11; Q128 auth-oauth LOW,
+/// finding 4). 1.5.5 took a key-file PATH as the credential and read it itself
+/// (`egress_auth/jwt_bearer.rs::read_credential`). Here a path that names a READABLE, VALID
+/// service-account file is refused unread (had the plugin opened it, `build` would have succeeded),
+/// and the refusal names what to configure instead: the secret kind's file source, which delivers
+/// the file's JSON bytes. The same JSON handed over as the credential's bytes builds.
+#[test]
+fn a_key_file_path_is_refused_with_the_file_secret_form_and_its_json_bytes_build() {
+    let sa = serde_json::json!({
+        "client_email": "svc@proj.iam.gserviceaccount.com",
+        "private_key": TEST_PRIVATE_KEY_PEM,
+        "token_uri": "https://oauth2.googleapis.com/token",
+    })
+    .to_string();
+    let dir = std::env::temp_dir().join(format!("oauth-q128-keyfile-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("sa-q128-5e0a.json");
+    std::fs::write(&path, &sa).expect("write");
+    let named = path.to_str().expect("utf-8 temp path");
+
+    let e = build(named, None, None)
+        .err()
+        .expect("a key-file path is refused unread");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        e.starts_with("service-account JSON is invalid: the credential is not inline JSON"),
+        "the accepted refusal stands, got: {e}"
+    );
+    assert!(
+        e.contains("api_key: {file: <path>}"),
+        "the refusal names the secret form that delivers the key file's JSON, got: {e}"
+    );
+    assert!(
+        !e.contains("sa-q128-5e0a"),
+        "the path is never echoed, got: {e}"
+    );
+
+    let signer = build(&sa, None, None).unwrap_or_else(|e| panic!("the JSON bytes build: {e}"));
+    let req = signer.request(1_700_000_000).expect("a token request");
+    assert_eq!(req.target, "https://oauth2.googleapis.com/token");
+}
