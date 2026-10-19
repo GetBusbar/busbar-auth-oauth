@@ -408,7 +408,7 @@ impl Minted {
             on_demand: matches!(minter, Minter::TokenExchange(_)),
             minter,
             max_response_bytes,
-            token: RwLock::new(Arc::new(CachedToken::new(String::new().into(), 0).0)),
+            token: RwLock::new(Arc::new(CachedToken::new(Secret::held(String::new()), 0).0)),
             exchange: Mutex::new(Exchange::Idle { due_ns: 0 }),
             refresh_failed: AtomicBool::new(false),
             usable_until: AtomicU64::new(0),
