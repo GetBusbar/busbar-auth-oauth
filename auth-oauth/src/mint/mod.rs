@@ -354,8 +354,8 @@ enum Exchange {
         conn: ConnId,
         started_ns: u64,
         status: Option<u32>,
-        /// The response so far: it carries the access token, so it is sized once for the cap
-        /// (no growth leaves a copy) and wiped on drop.
+        /// The response so far: it carries the access token, so it grows only through
+        /// [`append_wiped`] (no growth leaves an unwiped copy) and is wiped on drop.
         body: Zeroizing<Vec<u8>>,
     },
 }
@@ -529,10 +529,9 @@ impl Minted {
                         conn,
                         started_ns: now_ns,
                         status: None,
-                        // The cap, plus one read past it (the read that trips the cap).
-                        body: Zeroizing::new(Vec::with_capacity(
-                            self.max_response_bytes.saturating_add(READ_BUF_BYTES),
-                        )),
+                        // Nothing reserved up front: the body grows to what arrives, bounded by
+                        // the cap ([`append_wiped`]).
+                        body: Zeroizing::new(Vec::new()),
                     }
                 }
                 Err(e) => {
@@ -572,7 +571,10 @@ impl Minted {
                         *status = got.status;
                     }
                     if got.kind == PieceKind::Body {
-                        body.extend_from_slice(&buf[..got.len]);
+                        if let Err(e) = append_wiped(body, &buf[..got.len], self.max_response_bytes)
+                        {
+                            break Err(e);
+                        }
                         if body.len() > self.max_response_bytes {
                             break Err(format!(
                                 "token endpoint response exceeded the {}-byte cap; refusing to \
@@ -615,6 +617,15 @@ impl Minted {
                 };
                 *ex = Exchange::Idle { due_ns: due };
                 (due, Some(Report::EmptyToken))
+            }
+            // AN ON-DEMAND TOKEN THAT CANNOT BE PRESENTED (bytes invalid in a header value) is a
+            // failed exchange, as an empty one is: it is not stored, and the calls that waited on
+            // it fail rather than go out unauthenticated (a scheduled style keeps 1.5.5's: no
+            // header, the upstream answers 401).
+            Ok((_, true)) if self.on_demand => {
+                self.refresh_failed.store(true, Ordering::Release);
+                *ex = Exchange::Idle { due_ns: u64::MAX };
+                (u64::MAX, Some(Report::TokenInvalidBytes))
             }
             Ok((fresh, invalid)) => {
                 let now = wall;
@@ -661,6 +672,32 @@ impl Minted {
         *ex = Exchange::Idle { due_ns: due };
         (due, Some(Report::MintFailed(e)))
     }
+}
+
+/// APPEND `bytes` to the token response `body`, growing it to what has arrived (never reserving
+/// the cap up front: a large cap costs nothing per mint) and at most one read past `cap` (the read
+/// that trips it). A growth moves the bytes into a new buffer with a fallible reservation and wipes
+/// the old one as it drops, so no unwiped copy of the access token is left behind.
+fn append_wiped(body: &mut Zeroizing<Vec<u8>>, bytes: &[u8], cap: usize) -> Result<(), String> {
+    let need = body.len().saturating_add(bytes.len());
+    if need > body.capacity() {
+        let want = need
+            .max(body.capacity().saturating_mul(2))
+            .max(READ_BUF_BYTES)
+            .min(cap.saturating_add(READ_BUF_BYTES))
+            .max(need);
+        let mut grown = Vec::new();
+        grown.try_reserve_exact(want).map_err(|_| {
+            "token endpoint response could not be buffered; refusing to parse a partial token \
+             response"
+                .to_string()
+        })?;
+        grown.extend_from_slice(body);
+        // The old buffer is wiped as it drops.
+        *body = Zeroizing::new(grown);
+    }
+    body.extend_from_slice(bytes);
+    Ok(())
 }
 
 /// The cause a connection refusal names — never the URL (it can carry query/secret material).
