@@ -5,6 +5,7 @@
 //! The `token_uri` https/metadata vetting tests stay with the kernel (ARCHITECT ruling Q2 (a)).
 
 use super::*;
+use crate::held::Own;
 
 #[test]
 fn pem_to_pkcs8_der_strips_armor_and_decodes() {
@@ -258,7 +259,7 @@ fn the_token_request_is_the_form_1_5_5_posted() {
     );
     let assertion = signer.assertion(1_700_000_000).unwrap();
     assert_eq!(
-        req.body.reveal(),
+        req.body.expose_own(&Own::here()),
         &format!(
             "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion={}",
             assertion.as_str()

@@ -7,22 +7,23 @@
 //! 22); the minting that reads it moved with it, into [`crate::mint`].
 //!
 //! Beside it, the two secret-hygiene (#53) helpers the minters decode with: [`deserialize_held`]
-//! lands a secret field of a decoded document straight in `Held`, and [`json_err`] describes a
+//! lands a secret field of a decoded document straight in `Secret<_, Own>`, and [`json_err`] describes a
 //! decode failure without the decoder's text, which can quote the secret it was decoding.
 
-use crate::held::Held;
+use crate::held::Own;
+use busbar_contract::Secret;
 
-/// Deserialize a secret string STRAIGHT into [`Held`], for a `#[serde(deserialize_with)]` field.
+/// Deserialize a secret string STRAIGHT into `Secret<_, Own>`, for a `#[serde(deserialize_with)]` field.
 ///
-/// `Held` deliberately implements neither `Serialize` nor `Deserialize` (its serde fence), so a
+/// `Secret<_, Own>` deliberately implements neither `Serialize` nor `Deserialize` (its serde fence), so a
 /// secret-bearing field of a decoded document names this helper instead: the plaintext exists as a
 /// bare `String` only for the instant between the decoder and the wrapper. Narrowly the READ
 /// direction: nothing here can write a secret back out.
-pub fn deserialize_held<'de, D>(d: D) -> Result<Held<String>, D::Error>
+pub fn deserialize_held<'de, D>(d: D) -> Result<Secret<String, Own>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    <String as serde::Deserialize>::deserialize(d).map(Held::new)
+    <String as serde::Deserialize>::deserialize(d).map(Secret::held)
 }
 
 /// The `map_err` for a `serde_json` decode whose INPUT may carry a secret: a service-account key or
