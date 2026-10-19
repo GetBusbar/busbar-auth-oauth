@@ -48,11 +48,12 @@ pub(crate) struct Signer {
 
 /// Build a `jwt-bearer` signer: PARSES the key material (failing loud on a malformed
 /// service-account JSON / PKCS#8 key, the common misconfig). It never touches the network: the first
-/// mint runs on `tick`. `credential` is the SA JSON — inline (starts with `{`) or a path to a key
-/// file. `scope_override` replaces the default `cloud-platform` scope when set. `subject` is the
-/// operator-configured RFC 7523 `sub` — `None` (the default) omits the claim entirely; `Some` emits
-/// it verbatim, for Google domain-wide-delegation impersonation or a third-party IdP that requires
-/// `sub`.
+/// mint runs on `tick`. `credential` is the SA JSON's bytes, never a path: a key file is read by
+/// the host's secret file source (`api_key: {file: <path>}`) and its JSON delivered here (THE
+/// DESIGN §11.11 R4, §6 trust boundary; ruling 11). `scope_override` replaces the default
+/// `cloud-platform` scope when set. `subject` is the operator-configured RFC 7523 `sub` — `None`
+/// (the default) omits the claim entirely; `Some` emits it verbatim, for Google
+/// domain-wide-delegation impersonation or a third-party IdP that requires `sub`.
 pub(crate) fn build(
     credential: &str,
     scope_override: Option<&str>,
@@ -296,7 +297,9 @@ fn jwt_claims_json(
 /// SA-JSON credential material: the service-account JSON itself, never a path.
 ///
 /// THE PLUGIN OPENS NO FILE (Q128 oauth M4, ruling (a)): a key-file credential is resolved by the
-/// host at config time, so a credential that is not inline JSON is refused here unread. The
+/// host at config time (the secret kind's file source, `api_key: {file: <path>}`; THE DESIGN
+/// §11.11 R4 l.1464-1469), so a credential that is not inline JSON is refused here unread, naming
+/// that form (1.5.5 took a path here and read it itself). The
 /// refusal deliberately does NOT render `credential`: the only thing that tells JSON from anything
 /// else is a leading `{`, so an operator who pasted the key body, or a secret ref that resolved to
 /// key material, lands here holding the SIGNING KEY. This error reaches the `--validate` report and
@@ -311,8 +314,9 @@ fn read_credential(credential: &str) -> Result<Zeroizing<String>, String> {
         return Ok(Zeroizing::new(credential.to_string()));
     }
     Err(
-        "service-account JSON is invalid: the credential is not inline JSON (a key file is \
-         read by the host at config time; this plugin opens no file)"
+        "service-account JSON is invalid: the credential is not inline JSON (this plugin opens \
+         no file: configure a key file as `api_key: {file: <path>}`, which the host reads at \
+         config time and delivers as the service-account JSON)"
             .to_string(),
     )
 }
