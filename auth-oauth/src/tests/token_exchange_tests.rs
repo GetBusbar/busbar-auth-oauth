@@ -307,3 +307,38 @@ fn a_retire_keeps_the_exchange_a_parked_call_waits_on() {
         "the retired generation's parked call is woken when its exchange lands"
     );
 }
+
+/// AN UN-ENCODABLE EXCHANGED TOKEN FAILS ITS CALLS, as an empty one does (Q128 auth-oauth LOW): a
+/// token with bytes invalid in a header value cannot be presented, and a call that waited on its
+/// exchange must not go out unauthenticated. Each waiting call answers FAILED, the log names the
+/// token, and the scope's next call arms a fresh exchange instead of being sent with no auth field.
+/// RED before the fix: the calls answered READY with no field.
+#[test]
+fn an_exchanged_token_with_invalid_header_bytes_fails_the_calls_that_waited() {
+    let host = TestHost::new();
+    let w = Arc::new(Scripted::default());
+    let o = instance(&w);
+    let h = open(&o);
+    let (first, later) = (ticket(211), ticket(212));
+    assert_eq!(fields(&o, &host, h, first, Some("s")).0, Outcome::Pending);
+    w.ok("{\"access_token\":\"tok\\u0001bad\",\"expires_in\":3600}");
+    let mut diags = Diags::default();
+    o.tick(1_000, Ticket::NONE, Some(&host.host), &mut diags);
+    assert_eq!(host.take(), vec![first]);
+    assert_eq!(
+        fields(&o, &host, h, first, Some("s")),
+        (Outcome::Failed, String::new()),
+        "the waiting call fails rather than going out with no auth"
+    );
+    assert!(
+        diags
+            .iter()
+            .any(|(id, _, _)| id == crate::instance::diag::OAUTH_TOKEN_INVALID_BYTES),
+        "the un-encodable token is logged"
+    );
+    assert_eq!(
+        fields(&o, &host, h, later, Some("s")).0,
+        Outcome::Pending,
+        "the next call arms a fresh exchange; the un-encodable token is not served"
+    );
+}
