@@ -30,11 +30,12 @@ use std::sync::{Arc, Mutex, RwLock};
 use busbar_contract::conn::{ConnError, ConnId, PieceKind};
 use zeroize::{Zeroize, Zeroizing};
 
-use crate::held::Held;
+use crate::held::Own;
 use crate::token_response::{
     default_expires_in, deserialize_expires_in, deserialize_held, json_err,
 };
 use busbar_contract::header::{is_legal_header_value, token_value};
+use busbar_contract::Secret;
 
 /// Refresh this many seconds BEFORE the token's stated expiry, so a request never races an expired
 /// token across the refresh boundary.
@@ -86,7 +87,7 @@ pub(crate) struct TokenRequest {
     /// The head fields, in order.
     pub fields: Vec<(&'static str, &'static str)>,
     /// The form body.
-    pub body: Held<String>,
+    pub body: Secret<String, Own>,
 }
 
 impl TokenRequest {
@@ -94,7 +95,7 @@ impl TokenRequest {
     /// order: the form's `content-type`, then reqwest's client-default `accept: */*`, which the
     /// request carries itself (the http door writes no field the caller did not: transport
     /// neutrality, SEAM-4i).
-    pub(crate) fn form(need: u32, target: String, body: Held<String>) -> Self {
+    pub(crate) fn form(need: u32, target: String, body: Secret<String, Own>) -> Self {
         Self {
             need,
             target,
@@ -125,7 +126,7 @@ fn form_len(v: &str) -> usize {
 /// and `*-._` as an upper-case `%XX`), built in ONE buffer sized to the exact length first, so no
 /// growth frees a partial copy of the credential the form carries; held wiped on drop (THE DESIGN
 /// §6: "auth material is zeroised").
-pub(crate) fn form(pairs: &[(&str, &str)]) -> Held<String> {
+pub(crate) fn form(pairs: &[(&str, &str)]) -> Secret<String, Own> {
     const HEX: &[u8; 16] = b"0123456789ABCDEF";
     let len = pairs
         .iter()
@@ -155,7 +156,7 @@ pub(crate) fn form(pairs: &[(&str, &str)]) -> Held<String> {
         }
     }
     debug_assert_eq!(out.len(), len, "the form is sized once");
-    Held::new(out)
+    Secret::held(out)
 }
 
 /// A style that mints: how it builds its token request.
@@ -182,12 +183,12 @@ impl Minter {
 /// A minted access token and the wall-clock epoch second it expires at.
 pub(crate) struct CachedToken {
     /// The minted bearer, held redacted so it never leaks via `Debug`/logs and zeroizes on drop.
-    pub(crate) token: Held<String>,
+    pub(crate) token: Secret<String, Own>,
     pub(crate) expires_at: u64,
     /// The `Bearer <token>` value, pre-built ONCE here (at mint time) rather than on every request.
     /// `None` when `token` is empty (the pre-first-mint sentinel) or contains bytes invalid for an
     /// header value — both cases mean "emit no auth header".
-    header: Option<Held<String>>,
+    header: Option<Secret<String, Own>>,
 }
 
 impl std::fmt::Debug for CachedToken {
@@ -202,15 +203,15 @@ impl std::fmt::Debug for CachedToken {
 impl CachedToken {
     /// Construct a `CachedToken`, building its header once here. The second value is whether the
     /// token was omitted for bytes invalid in a header value (the caller reports it). The token
-    /// arrives already [`Held`] (the minters decode it straight into one); the header build
+    /// arrives already `Secret<_, Own>` (the minters decode it straight into one); the header build
     /// below is its one exposure.
-    pub(crate) fn new(token: Held<String>, expires_at: u64) -> (Self, bool) {
-        let (header, invalid) = if token.reveal().is_empty() {
+    pub(crate) fn new(token: Secret<String, Own>, expires_at: u64) -> (Self, bool) {
+        let (header, invalid) = if token.expose_own(&Own::here()).is_empty() {
             (None, false)
         } else {
-            let mut v = token_value(token.reveal());
+            let mut v = token_value(token.expose_own(&Own::here()));
             if is_legal_header_value(&v) {
-                (Some(Held::new(v)), false)
+                (Some(Secret::held(v)), false)
             } else {
                 v.zeroize();
                 (None, true)
@@ -228,7 +229,9 @@ impl CachedToken {
 
     /// The header value, when there is one to present.
     pub(crate) fn header(&self) -> Option<&str> {
-        self.header.as_ref().map(|h| h.reveal().as_str())
+        self.header
+            .as_ref()
+            .map(|h| h.expose_own(&Own::here()).as_str())
     }
 }
 
@@ -260,11 +263,11 @@ pub(crate) fn next_refresh_secs(expires_at: u64, now: u64) -> u64 {
 }
 
 /// An OAuth token endpoint's success body (RFC 6749 section 5.1), as far as a minter reads it.
-/// Deserialize-only, and `access_token` is decoded straight into [`Held`] (secret-hygiene #53).
+/// Deserialize-only, and `access_token` is decoded straight into `Secret<_, Own>` (secret-hygiene #53).
 #[derive(serde::Deserialize)]
 struct TokenResponse {
     #[serde(deserialize_with = "deserialize_held")]
-    access_token: Held<String>,
+    access_token: Secret<String, Own>,
     #[serde(
         default = "default_expires_in",
         deserialize_with = "deserialize_expires_in"
@@ -442,7 +445,7 @@ impl Minted {
 
     /// Whether the first mint has populated a non-empty token.
     pub(crate) fn is_ready(&self) -> bool {
-        !self.current().token.reveal().is_empty()
+        !self.current().token.expose_own(&Own::here()).is_empty()
     }
 
     /// THE `ready` FACT at wall-clock `now` (epoch seconds), by the rule [`Minted::read`] applies:
@@ -475,7 +478,7 @@ impl Minted {
         }
         // BEFORE THE FIRST MINT a scheduled cell presents nothing: READY with no fields, so the
         // upstream answers 401, as 1.5.5 did (THE DESIGN §11.11; contract `abi/auth` `fields`).
-        if tok.token.reveal().is_empty() {
+        if tok.token.expose_own(&Own::here()).is_empty() {
             return f(Read::Nothing);
         }
         if now >= tok.expires_at && self.refresh_failed.load(Ordering::Acquire) {
@@ -603,7 +606,7 @@ impl Minted {
             // an empty token collides with the pre-first-mint sentinel, so `ready` would stay false
             // forever AND the per-request call would emit no auth header — a permanent wedge with no
             // self-healing. Retry at MIN_SLEEP instead, exactly like a mint error.
-            Ok((fresh, _)) if fresh.token.reveal().is_empty() => {
+            Ok((fresh, _)) if fresh.token.expose_own(&Own::here()).is_empty() => {
                 self.refresh_failed.store(true, Ordering::Release);
                 let due = if self.on_demand {
                     u64::MAX
