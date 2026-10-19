@@ -20,7 +20,8 @@
 
 use std::sync::Arc;
 
-use crate::held::Held;
+use crate::held::Own;
+use busbar_contract::Secret;
 
 use super::TokenRequest;
 
@@ -36,7 +37,7 @@ pub(crate) const ACCESS_TOKEN_TYPE: &str = "urn:ietf:params:oauth:token-type:acc
 pub(crate) struct Exchange {
     /// Busbar's own subject token, held redacted (never printed; zeroised on drop) and exposed only
     /// into the token-endpoint POST body.
-    subject_token: Held<String>,
+    subject_token: Secret<String, Own>,
     subject_token_type: String,
     token_url: String,
     resource: String,
@@ -50,7 +51,7 @@ pub(crate) fn build(
     resource: &str,
 ) -> Exchange {
     Exchange {
-        subject_token: Held::new(subject_token.to_string()),
+        subject_token: Secret::held(subject_token.to_string()),
         subject_token_type: subject_token_type.to_string(),
         token_url: token_url.to_string(),
         resource: resource.to_string(),
@@ -80,7 +81,10 @@ impl Scoped {
         let x = &self.exchange;
         let form = super::form(&[
             ("grant_type", GRANT_TYPE),
-            ("subject_token", x.subject_token.reveal().as_str()),
+            (
+                "subject_token",
+                x.subject_token.expose_own(&Own::here()).as_str(),
+            ),
             ("subject_token_type", x.subject_token_type.as_str()),
             ("requested_token_type", ACCESS_TOKEN_TYPE),
             ("resource", x.resource.as_str()),
