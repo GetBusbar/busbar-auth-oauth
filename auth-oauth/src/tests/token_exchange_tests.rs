@@ -380,3 +380,32 @@ fn a_token_exchange_binding_is_not_ready_while_its_last_exchange_failed() {
     o.tick(2_000, Ticket::NONE, Some(&host.host), &mut diags);
     assert!(o.ready(h), "an exchange landed: ready again");
 }
+
+/// A NEVER-USED EXCHANGE LANE IS TRIED ON ITS FIRST REQUEST (coordinator ruling on u29 auth-oauth
+/// #24): before any request the binding reads ready, so the prober and the router try it, and that
+/// first request starts its first exchange. A reading of "not ready until minted" would keep it
+/// untried forever (it mints only when asked). Pins the ruling against that reading.
+#[test]
+fn a_never_used_exchange_lane_is_tried_on_its_first_request() {
+    let host = TestHost::new();
+    let w = Arc::new(Scripted::default());
+    let o = instance(&w);
+    let h = open(&o);
+    assert!(o.ready(h), "never used: ready, so it is tried");
+    assert!(w.sent.lock().unwrap().is_empty(), "nothing minted yet");
+    assert_eq!(
+        fields(&o, &host, h, ticket(401), Some("s")).0,
+        Outcome::Pending
+    );
+    w.ok(r#"{"access_token":"tok-first","expires_in":3600}"#);
+    o.tick(1_000, Ticket::NONE, Some(&host.host), &mut Diags::default());
+    assert_eq!(
+        w.sent.lock().unwrap().len(),
+        1,
+        "the first request's exchange went out"
+    );
+    assert_eq!(
+        fields(&o, &host, h, ticket(401), Some("s")).1,
+        "authorization: Bearer tok-first"
+    );
+}

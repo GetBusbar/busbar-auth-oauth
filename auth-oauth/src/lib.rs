@@ -324,7 +324,13 @@ impl Oauth {
         match self.bound(handle) {
             Some(style::Binding::Minted(cell)) => cell.presents(self.wall_secs()),
             // A token exchange is ready unless its last settled exchange failed (its authorization
-            // server is refusing, so `fields` would fail); one not asked yet is not failing.
+            // server is refusing, so `fields` would fail). One not asked yet IS ready (coordinator
+            // ruling on u29 auth-oauth #24): it mints lazily, per request, so reading it unready
+            // until it minted would keep its lane from ever being tried and so from ever minting.
+            // 1.5.5 had no token exchange; its minted styles' readiness (v1.5.5
+            // egress_auth/bearer_token.rs `is_ready`, read by the health prober) was false only
+            // until the first mint, which 1.5.5 ran EAGERLY in the background at boot. A lazy mint
+            // has no such window: the first request is its first mint.
             Some(style::Binding::Exchange(b)) => !b.failing(),
             None => false,
         }
