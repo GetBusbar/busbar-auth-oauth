@@ -369,7 +369,16 @@ impl Oauth {
     ) {
         let failure = match report {
             None => None,
-            Some(Report::Minted | Report::TokenInvalidBytes) => Some(false),
+            Some(Report::Minted) => Some(false),
+            Some(Report::TokenInvalidBytes) => {
+                diags.push(
+                    diag::OAUTH_TOKEN_INVALID_BYTES,
+                    WARN,
+                    "the RFC 8693 exchange returned a token with bytes invalid for an HTTP header \
+                     value; the call is refused rather than made unauthenticated",
+                );
+                Some(true)
+            }
             Some(Report::EmptyToken) => {
                 diags.push(
                     diag::OAUTH_EMPTY_TOKEN,

@@ -418,3 +418,36 @@ fn the_form_is_serde_urlencoded_byte_for_byte_and_built_once() {
         "sized once"
     );
 }
+
+/// THE RESPONSE BUFFER GROWS TO WHAT ARRIVES, bounded by the cap (Q128 auth-oauth MEDIUM, the
+/// per-mint reservation): an exchange in flight holds no reservation the size of the cap, so a
+/// large `upstream_error_body_max_bytes` costs nothing per mint, and a cap near `usize::MAX` is a
+/// bound, not an allocation. RED before the fix: each mint reserved `cap + READ_BUF_BYTES` at once.
+#[test]
+fn an_exchange_in_flight_reserves_no_buffer_the_size_of_the_cap() {
+    let w = Scripted::default();
+    w.push(vec![
+        Step::Head(200),
+        Step::Body(br#"{"access_token":"#.to_vec(), false),
+        Step::Pending,
+        Step::Body(br#""t"}"#.to_vec(), true),
+    ]);
+    let m = Minted::new(client_credentials(), DEFAULT_MAX_RESPONSE_BYTES);
+    assert_eq!(m.tick(0, now_epoch(), Some(&w)), (IN_FLIGHT_POLL_NS, None));
+    let held = match &*m.exchange.lock().unwrap() {
+        Exchange::InFlight { body, .. } => body.capacity(),
+        Exchange::Idle { .. } => panic!("the exchange is in flight"),
+    };
+    assert!(
+        held <= READ_BUF_BYTES,
+        "an in-flight exchange holds {held} bytes for a {DEFAULT_MAX_RESPONSE_BYTES}-byte cap"
+    );
+    let (_, report) = m.tick(IN_FLIGHT_POLL_NS, now_epoch(), Some(&w));
+    assert_eq!(report, Some(Report::Minted), "the body still reads whole");
+
+    // A cap near `usize::MAX` is a bound only.
+    let w = Scripted::default();
+    w.ok(r#"{"access_token":"t","expires_in":3600}"#);
+    let m = Minted::new(client_credentials(), usize::MAX);
+    assert_eq!(m.tick(0, now_epoch(), Some(&w)).1, Some(Report::Minted));
+}
