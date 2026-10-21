@@ -198,6 +198,50 @@ fn token_response_tolerates_expires_in_as_number_string_or_absent() {
     }
 }
 
+/// THE ACCESS TOKEN IS UNESCAPED BY THE PLUGIN, NEVER BY THE JSON DECODER (THE DESIGN §6: "auth
+/// material is zeroised"): `serde_json` unescapes a string that carries an escape into a scratch
+/// buffer of its own that it frees unwiped, so the decode skips the token (its field is
+/// `IgnoredAny`: skipping copies nothing) and `access_token` reads the top-level member into one
+/// buffer, sized once and wiped on drop, with every escape resolved as the decoder resolves it.
+/// The crate forbids `unsafe`, so no test allocator can watch the freed bytes; what this holds is
+/// that no decoded field can carry the token and that the one buffer that does is the wiping one.
+#[test]
+fn an_escaped_access_token_is_read_into_one_wiped_buffer_never_by_the_decoder() {
+    fn held_as<T>(_: &T) -> &'static str {
+        std::any::type_name::<T>()
+    }
+    let body = r#"{"token_type":"Bearer","access_token":"ya29.a\/bAc","expires_in":60}"#;
+    let tok: TokenResponse = serde_json::from_str(body).expect("a well-formed response");
+    assert!(
+        held_as(&tok.access_token).contains("IgnoredAny"),
+        "the decoder skips the token, it never unescapes it: {}",
+        held_as(&tok.access_token)
+    );
+    let read = access_token(body).expect("the token");
+    assert!(held_as(&read).contains("Zeroizing"), "{}", held_as(&read));
+    assert_eq!(read.as_str(), "ya29.a/bAc");
+    assert!(
+        read.capacity() <= body.len(),
+        "sized once to the escaped length"
+    );
+    let (t, invalid) = parse_response(200, body.as_bytes(), 0).expect("a minted token");
+    assert!(!invalid);
+    assert_eq!(t.header(), Some("Bearer ya29.a/bAc"));
+    assert_eq!(t.expires_at, 60);
+    // A nested `access_token` is not the response's.
+    let nested = r#"{"x":{"access_token":"no"},"l":["access_token"],"access_token":"yes\n"}"#;
+    assert_eq!(access_token(nested).expect("the token").as_str(), "yes\n");
+    // A token that is not a string is refused without the decoder's text.
+    assert_eq!(
+        parse_response(200, br#"{"access_token":1}"#, 0).unwrap_err(),
+        "token response JSON invalid: a field is missing or has the wrong type (the decoder's \
+         text is withheld)"
+    );
+    // A missing one is still the decoder's own missing-field text.
+    let e = parse_response(200, br#"{"expires_in":60}"#, 0).unwrap_err();
+    assert!(e.contains("missing field `access_token`"), "{e}");
+}
+
 /// A token landed on the first tick: the header is presented, the cell is ready, and the next tick
 /// is scheduled a skew ahead of expiry.
 #[test]
