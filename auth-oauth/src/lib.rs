@@ -170,9 +170,9 @@ busbar_contract::auth_outbound_door!(Oauth, STATEMENT);
 /// `oauth-client-credentials` credential binds here, the kernel's own copies deleted (P2 D1, the
 /// auth split).
 pub mod compiled_in {
-    /// The door.
+    /// The door and its `MACRO_DOOR` (the `plugin_door!` door a linked table names).
     pub mod door {
-        pub use crate::door;
+        pub use crate::{door, MACRO_DOOR};
     }
 }
 
