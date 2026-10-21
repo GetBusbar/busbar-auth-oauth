@@ -100,7 +100,12 @@ fn bind(folds: &Arc<Folds>, dispatcher: &Dispatcher) -> Bind {
 
 /// The compiled-in row `door` states: its Statement rendering and the door.
 fn row(door: DoorFn) -> LinkedRow {
-    LinkedRow::of(door).expect("the door states its Statement")
+    // SAFETY: `door` is one of this file's forged doors, a `'static` door built over the plugin's
+    // own tables; the block is needed on #1469/#1471 (`from_raw` is an `unsafe fn` there) and
+    // allowed where it is not.
+    #[allow(unused_unsafe)]
+    let door = unsafe { busbar_plugin_loader::dispatch::LoadedDoor::from_raw(door) };
+    LinkedRow::of_loaded(door).expect("the door states its Statement")
 }
 
 /// The compiled-in row of this crate's own door.
