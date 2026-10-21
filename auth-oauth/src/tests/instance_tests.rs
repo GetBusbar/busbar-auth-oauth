@@ -102,7 +102,7 @@ fn oauth_client_credentials_mints_on_tick_and_honours_the_expired_token_rule() {
     // wall clock.
     w.ok(r#"{"access_token":"tok-1","expires_in":0}"#);
     let mut diags = Diags::default();
-    let due = o.tick(1_000, Ticket::NONE, Some(&host.host), &mut diags);
+    let due = o.tick(1_000, Ticket::NONE, Some(&host.host()), &mut diags);
     {
         let sent = w.sent.lock().unwrap();
         assert_eq!(sent.len(), 1);
@@ -145,7 +145,7 @@ fn oauth_client_credentials_mints_on_tick_and_honours_the_expired_token_rule() {
     // THE REFRESH FAILS: the expired token answers PENDING on a ticket, bounded by the deadline;
     // a call that may not pend answers REFUSED (the host re-submits it on a ticket).
     w.push(vec![Step::Head(503), Step::Body(b"down".to_vec(), true)]);
-    o.tick(due, Ticket::NONE, Some(&host.host), &mut diags);
+    o.tick(due, Ticket::NONE, Some(&host.host()), &mut diags);
     let ticket = Ticket {
         slot: 3,
         generation: 1,
@@ -163,7 +163,7 @@ fn oauth_client_credentials_mints_on_tick_and_honours_the_expired_token_rule() {
 
     // THE NEXT MINT LANDS: the waiting ticket is woken; the resumed call presents the new token.
     w.ok(r#"{"access_token":"tok-2","expires_in":3600}"#);
-    o.tick(due + 30 * NS, Ticket::NONE, Some(&host.host), &mut diags);
+    o.tick(due + 30 * NS, Ticket::NONE, Some(&host.host()), &mut diags);
     assert_eq!(host.take(), vec![ticket]);
     assert_eq!(
         fields(&o, &host, h, ticket).1,
@@ -189,7 +189,7 @@ fn jwt_bearer_mints_on_tick() {
     .to_string();
     let h = open(&o, style::JWT_BEARER, &sa, "{}");
     w.ok(r#"{"access_token":"ya29.tok","expires_in":3599}"#);
-    o.tick(1, Ticket::NONE, Some(&host.host), &mut Diags::default());
+    o.tick(1, Ticket::NONE, Some(&host.host()), &mut Diags::default());
     {
         let sent = w.sent.lock().unwrap();
         assert_eq!(sent[0].0, "https://oauth2.googleapis.com/token");
@@ -248,7 +248,7 @@ fn jwt_bearer_signs_at_the_hosts_wall_clock() {
     .to_string();
     let _ = open(&o, style::JWT_BEARER, &sa, "{}");
     w.ok(r#"{"access_token":"ya29.tok","expires_in":3599}"#);
-    o.tick(1, Ticket::NONE, Some(&host.host), &mut Diags::default());
+    o.tick(1, Ticket::NONE, Some(&host.host()), &mut Diags::default());
     let body = w.sent.lock().unwrap()[0].2.clone();
     let assertion = body.split("assertion=").nth(1).expect("an assertion");
     let claims = assertion.split('.').nth(1).expect("a claims part");
@@ -276,9 +276,9 @@ fn expired_and_failed(w: &Arc<Scripted>, host: &TestHost) -> (Oauth, u64) {
     );
     let mut diags = Diags::default();
     w.ok(r#"{"access_token":"tok-1","expires_in":0}"#);
-    let due = o.tick(1_000, Ticket::NONE, Some(&host.host), &mut diags);
+    let due = o.tick(1_000, Ticket::NONE, Some(&host.host()), &mut diags);
     w.push(vec![Step::Head(503), Step::Body(b"down".to_vec(), true)]);
-    o.tick(due, Ticket::NONE, Some(&host.host), &mut diags);
+    o.tick(due, Ticket::NONE, Some(&host.host()), &mut diags);
     (o, h)
 }
 
@@ -310,7 +310,12 @@ fn outbound_ready_is_false_for_an_expired_token_whose_refresh_failed() {
         CC_SETTINGS,
     );
     w.ok("{\"access_token\":\"tok\\u0001bad\",\"expires_in\":3600}");
-    o.tick(1_000, Ticket::NONE, Some(&host.host), &mut Diags::default());
+    o.tick(
+        1_000,
+        Ticket::NONE,
+        Some(&host.host()),
+        &mut Diags::default(),
+    );
     assert_eq!(
         fields(&o, &host, h, Ticket::NONE),
         (Outcome::Ready, String::new()),
@@ -402,7 +407,12 @@ fn a_cell_settled_between_the_lookup_and_the_park_is_not_a_lost_wake() {
     });
     assert_eq!(first.0, Outcome::Pending, "the call waits for its exchange");
     w.ok(r#"{"access_token":"tok-s","expires_in":3600}"#);
-    o.tick(1_000, Ticket::NONE, Some(&host.host), &mut Diags::default());
+    o.tick(
+        1_000,
+        Ticket::NONE,
+        Some(&host.host()),
+        &mut Diags::default(),
+    );
     assert_eq!(
         host.take(),
         vec![call],
@@ -453,7 +463,7 @@ fn fields_at(
         ticket,
         timestamp,
     };
-    let answer = o.answer(&ask, Some(&host.host), &mut |h| {
+    let answer = o.answer(&ask, Some(&host.host()), &mut |h| {
         written.push(format!("authorization: {h}"));
     });
     match answer {
@@ -491,7 +501,7 @@ fn token_expiry_and_caching_are_judged_on_the_hosts_clock() {
         CC_SETTINGS,
     );
     w.ok(r#"{"access_token":"tok-1","expires_in":3600}"#);
-    let due = o.tick(1_000, Ticket::NONE, Some(&host.host), &mut diags);
+    let due = o.tick(1_000, Ticket::NONE, Some(&host.host()), &mut diags);
     assert_eq!(
         due,
         1_000 + (3600 - 300) * NS,
@@ -499,7 +509,7 @@ fn token_expiry_and_caching_are_judged_on_the_hosts_clock() {
     );
     w.push(vec![Step::Head(503), Step::Body(b"down".to_vec(), true)]);
     wall.store(HOST_WALL + 3300, Ordering::Release);
-    o.tick(due, Ticket::NONE, Some(&host.host), &mut diags);
+    o.tick(due, Ticket::NONE, Some(&host.host()), &mut diags);
     let call = Ticket {
         slot: 11,
         generation: 1,
@@ -544,7 +554,7 @@ fn token_expiry_and_caching_are_judged_on_the_hosts_clock() {
         "no token for the scope yet: the call waits on its exchange"
     );
     w.ok(r#"{"access_token":"tok-x","expires_in":3600}"#);
-    o.tick(1_000, Ticket::NONE, Some(&host.host), &mut diags);
+    o.tick(1_000, Ticket::NONE, Some(&host.host()), &mut diags);
     let sent = w.sent.lock().unwrap().len();
     assert_eq!(
         fields_at(&o, &host, x, first, Some("s"), HOST_WALL + 10),

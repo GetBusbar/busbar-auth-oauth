@@ -29,16 +29,31 @@ use busbar_contract::conn::{ConnError, ConnId, PieceKind};
 
 use super::{Got, HostClock, TokenRequest, Wire};
 
+/// A host handle that makes the connector for one entry of a ticket's cycle: the SDK's [`Host`].
+/// [`HostWire`] is generic over it, so the wire borrows the handle it was built over rather than
+/// naming a `Host` in a field (the handle is the call's own borrow, never the host's `'static`
+/// install handle).
+pub(crate) trait Connects {
+    /// The connector for one entry on `ticket`, its handles counting on from `issued`.
+    fn connector_from(&self, ticket: Ticket, issued: u32) -> Connector<'_>;
+}
+
+impl Connects for Host {
+    fn connector_from(&self, ticket: Ticket, issued: u32) -> Connector<'_> {
+        Host::connector_from(self, ticket, issued)
+    }
+}
+
 /// The connector for one entry of the driver ticket's cycle.
-pub(crate) struct HostWire<'a> {
-    host: &'a Host,
+pub(crate) struct HostWire<'a, H: Connects> {
+    host: &'a H,
     ticket: Ticket,
     issued: &'a AtomicU32,
 }
 
-impl<'a> HostWire<'a> {
+impl<'a, H: Connects> HostWire<'a, H> {
     /// The need's services over `host`, on `ticket`, the cycle's handle count in `issued`.
-    pub(crate) fn new(host: &'a Host, ticket: Ticket, issued: &'a AtomicU32) -> Self {
+    pub(crate) fn new(host: &'a H, ticket: Ticket, issued: &'a AtomicU32) -> Self {
         Self {
             host,
             ticket,
@@ -128,7 +143,7 @@ fn head(req: &TokenRequest, timeout_ms: u64) -> Result<(Vec<u8>, RequestPiece), 
     Ok((bytes, piece))
 }
 
-impl Wire for HostWire<'_> {
+impl<H: Connects + Sync> Wire for HostWire<'_, H> {
     fn open(&self, req: &TokenRequest, timeout_ms: u64) -> Result<ConnId, ConnError> {
         let (head, head_piece) = head(req, timeout_ms)?;
         let body = req.body.expose_own(&Own::here()).as_bytes();

@@ -63,14 +63,13 @@ mod token_response;
 mod test_support;
 
 use std::borrow::Cow;
-use std::ptr;
 use std::task::Poll;
 
 use busbar_contract::abi::auth::{AuthPoints, AuthTail, StyleDecl, CANCEL_CONTINUES};
 use busbar_contract::abi::host::conn::connector::{
     Need, DIRECTION_OUTBOUND, EGRESS_OPERATOR_INFRASTRUCTURE, KEEP_NAMED,
 };
-use busbar_contract::abi::mechanism::call::{AbiStr, Blob, BLOB_ABSENT};
+use busbar_contract::abi::mechanism::call::AbiStr;
 use busbar_contract::abi::mechanism::door::Statement;
 use busbar_contract::abi::mechanism::ticket::Ticket;
 use busbar_contract::abi::sdk::auth_door::with_tail;
@@ -104,35 +103,18 @@ const STYLES: &[StyleDecl] = &[
 /// THE AUTH STATEMENT TAIL: outbound only, no login, no inbound carriers.
 const TAIL: &AuthTail = &outbound_tail(0, STYLES);
 
-const NO_STR: AbiStr = AbiStr {
-    ptr: ptr::null(),
-    len: 0,
-};
+const NO_STR: AbiStr = AbiStr::ABSENT;
 
 /// One token endpoint's need: outbound, `operator-infrastructure`, over the http transport, its target the
 /// binding's setting `target_from` names. It reads no response field beyond the reply's code.
 const fn token_need(target_from: &'static str) -> Need {
-    Need {
-        direction: DIRECTION_OUTBOUND,
-        egress_class: EGRESS_OPERATOR_INFRASTRUCTURE,
-        transport: abi_str("http"),
-        auth: NO_STR,
-        target_from: abi_str(target_from),
-        trust_from: NO_STR,
-        details: Blob {
-            ptr: ptr::null(),
-            len: 0,
-            fmt: BLOB_ABSENT,
-            flags: 0,
-        },
-        keep_response_headers: ptr::null(),
-        keep_response_headers_len: 0,
-        timeout_ms: 0,
-        keep_mode: KEEP_NAMED,
-        _reserved: 0,
-        deny_response_headers: ptr::null(),
-        deny_response_headers_len: 0,
-    }
+    let mut n = Need::EMPTY;
+    n.direction = DIRECTION_OUTBOUND;
+    n.egress_class = EGRESS_OPERATOR_INFRASTRUCTURE;
+    n.transport = abi_str("http");
+    n.target_from = abi_str(target_from);
+    n.keep_mode = KEEP_NAMED;
+    n
 }
 
 /// THE PLUGIN'S OWN NEEDS, in [`mint::need`] order: `oauth-client-credentials` POSTs to the
@@ -152,13 +134,9 @@ const DIAG_IDS: &[AbiStr] = &[
 /// What the plugin states: its name, version, the concurrency it serves, its diagnostics, its own
 /// needs and its outbound styles.
 pub const STATEMENT: Statement = with_tail(
-    Statement {
-        diag_ids: DIAG_IDS.as_ptr(),
-        diag_ids_len: DIAG_IDS.len(),
-        needs: NEEDS.as_ptr(),
-        needs_len: NEEDS.len(),
-        ..statement("busbar-auth-oauth", env!("CARGO_PKG_VERSION"), 1024)
-    },
+    statement("busbar-auth-oauth", env!("CARGO_PKG_VERSION"), 1024)
+        .with_diag_ids(DIAG_IDS)
+        .with_needs(NEEDS),
     TAIL,
 );
 
@@ -170,9 +148,9 @@ busbar_contract::auth_outbound_door!(Oauth, STATEMENT);
 /// `oauth-client-credentials` credential binds here, the kernel's own copies deleted (P2 D1, the
 /// auth split).
 pub mod compiled_in {
-    /// The door.
+    /// The door and its `MACRO_DOOR` (the `auth_outbound_door!` door a linked table names).
     pub mod door {
-        pub use crate::door;
+        pub use crate::{door, MACRO_DOOR};
     }
 }
 
