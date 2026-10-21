@@ -128,7 +128,7 @@ fn head(req: &TokenRequest, timeout_ms: u64) -> Result<(Vec<u8>, RequestPiece), 
     Ok((bytes, piece))
 }
 
-impl<'a, F: Fn(Ticket, u32) -> Connector<'a> + Sync> Wire for HostWire<'a, F> {
+impl<'a, F: Fn(Ticket, u32) -> Connector<'a> + Send + Sync> Wire for HostWire<'a, F> {
     fn open(&self, req: &TokenRequest, timeout_ms: u64) -> Result<ConnId, ConnError> {
         let (head, head_piece) = head(req, timeout_ms)?;
         let body = req.body.expose_own(&Own::here()).as_bytes();
