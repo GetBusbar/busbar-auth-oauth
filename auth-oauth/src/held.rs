@@ -21,6 +21,14 @@
 //! * **Equality is constant-time** (the contract's `constant_time_eq` over the byte form), so a
 //!   derived `PartialEq` on a struct that embeds one does not leak a common prefix through timing.
 //!
+//! A secret-named field (`client_secret`, `subject_token`, the minted `token`, the decoded
+//! `access_token`) is typed `Held<Zeroizing<String>>`: `Held` is the redaction shell (the `Debug` /
+//! `Display` / serde / equality rules here) and [`zeroize::Zeroizing`] is the wipe, named in the
+//! field's own type so a reader (and busbar's secret-hygiene gate, which judges a field by its
+//! declared type) sees the material is wiped without opening this module. `Held`'s own wipe on drop
+//! stays for every other value it holds; over a `Zeroizing` value it runs first and the inner wipe
+//! then clears memory already zeroed.
+//!
 //! The value is reached ONLY through [`Held::reveal`]: every call site is an audit point where the
 //! plaintext escapes on purpose.
 

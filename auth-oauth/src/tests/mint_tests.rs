@@ -142,19 +142,25 @@ fn next_refresh_never_sleeps_past_a_live_token_expiry() {
     assert_eq!(next_refresh_secs(now + 301, now), 1.max(MIN_SLEEP_SECS));
 }
 
+/// A token as the minters hand one to [`CachedToken::new`]: redacted by `Held`, wiped by
+/// `Zeroizing`.
+fn held_token(token: &str) -> Held<Zeroizing<String>> {
+    Held::new(Zeroizing::new(token.to_string()))
+}
+
 #[test]
 fn a_cached_token_is_redacted_in_debug() {
-    let (t, invalid) = CachedToken::new("super-secret-token".to_string().into(), 5);
+    let (t, invalid) = CachedToken::new(held_token("super-secret-token"), 5);
     assert!(!invalid);
     assert!(!format!("{t:?}").contains("super-secret-token"));
 }
 
 #[test]
 fn a_cached_token_omits_the_header_for_bytes_invalid_in_a_header_value() {
-    let (t, invalid) = CachedToken::new("tok\r\nen".to_string().into(), 5);
+    let (t, invalid) = CachedToken::new(held_token("tok\r\nen"), 5);
     assert!(invalid);
     assert_eq!(t.header(), None);
-    let (t, invalid) = CachedToken::new(String::new().into(), 0);
+    let (t, invalid) = CachedToken::new(held_token(""), 0);
     assert!(
         !invalid,
         "the pre-first-mint sentinel is not a reportable token"

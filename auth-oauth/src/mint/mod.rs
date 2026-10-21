@@ -181,8 +181,8 @@ impl Minter {
 
 /// A minted access token and the wall-clock epoch second it expires at.
 pub(crate) struct CachedToken {
-    /// The minted bearer, held redacted so it never leaks via `Debug`/logs and zeroizes on drop.
-    pub(crate) token: Held<String>,
+    /// The minted bearer: [`Held`] keeps it out of `Debug`/logs and [`Zeroizing`] wipes it on drop.
+    pub(crate) token: Held<Zeroizing<String>>,
     pub(crate) expires_at: u64,
     /// The `Bearer <token>` value, pre-built ONCE here (at mint time) rather than on every request.
     /// `None` when `token` is empty (the pre-first-mint sentinel) or contains bytes invalid for an
@@ -204,7 +204,7 @@ impl CachedToken {
     /// token was omitted for bytes invalid in a header value (the caller reports it). The token
     /// arrives already [`Held`] (the minters decode it straight into one); the header build
     /// below is its one exposure.
-    pub(crate) fn new(token: Held<String>, expires_at: u64) -> (Self, bool) {
+    pub(crate) fn new(token: Held<Zeroizing<String>>, expires_at: u64) -> (Self, bool) {
         let (header, invalid) = if token.reveal().is_empty() {
             (None, false)
         } else {
@@ -264,7 +264,7 @@ pub(crate) fn next_refresh_secs(expires_at: u64, now: u64) -> u64 {
 #[derive(serde::Deserialize)]
 struct TokenResponse {
     #[serde(deserialize_with = "deserialize_held")]
-    access_token: Held<String>,
+    access_token: Held<Zeroizing<String>>,
     #[serde(
         default = "default_expires_in",
         deserialize_with = "deserialize_expires_in"
@@ -401,11 +401,12 @@ pub(crate) struct Minted {
 impl Minted {
     /// A cell that has minted nothing yet; its first exchange is due on the first `tick`.
     pub(crate) fn new(minter: Minter, max_response_bytes: usize) -> Self {
+        let (unminted, _) = CachedToken::new(Held::new(Zeroizing::new(String::new())), 0);
         Self {
             on_demand: matches!(minter, Minter::TokenExchange(_)),
             minter,
             max_response_bytes,
-            token: RwLock::new(Arc::new(CachedToken::new(String::new().into(), 0).0)),
+            token: RwLock::new(Arc::new(unminted)),
             exchange: Mutex::new(Exchange::Idle { due_ns: 0 }),
             refresh_failed: AtomicBool::new(false),
             usable_until: AtomicU64::new(0),

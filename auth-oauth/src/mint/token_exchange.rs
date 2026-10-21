@@ -20,6 +20,8 @@
 
 use std::sync::Arc;
 
+use zeroize::Zeroizing;
+
 use crate::held::Held;
 
 use super::TokenRequest;
@@ -34,9 +36,9 @@ pub(crate) const ACCESS_TOKEN_TYPE: &str = "urn:ietf:params:oauth:token-type:acc
 /// it and adds its own scope.
 #[derive(Debug)]
 pub(crate) struct Exchange {
-    /// Busbar's own subject token, held redacted (never printed; zeroised on drop) and exposed only
-    /// into the token-endpoint POST body.
-    subject_token: Held<String>,
+    /// Busbar's own subject token: [`Held`] keeps it redacted (never printed, never serialized) and
+    /// [`Zeroizing`] wipes it on drop; exposed only into the token-endpoint POST body.
+    subject_token: Held<Zeroizing<String>>,
     subject_token_type: String,
     token_url: String,
     resource: String,
@@ -50,7 +52,7 @@ pub(crate) fn build(
     resource: &str,
 ) -> Exchange {
     Exchange {
-        subject_token: Held::new(subject_token.to_string()),
+        subject_token: Held::new(Zeroizing::new(subject_token.to_string())),
         subject_token_type: subject_token_type.to_string(),
         token_url: token_url.to_string(),
         resource: resource.to_string(),

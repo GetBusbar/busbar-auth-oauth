@@ -19,15 +19,18 @@
 //! judges an auth plugin's need target at seal and at `--validate` and renders those 1.5.5 texts
 //! itself (ARCHITECT ruling 2026-09-28, Q2 (a)).
 
+use zeroize::Zeroizing;
+
 use super::TokenRequest;
 
 /// The exchange material for one binding. Immutable after construction.
 #[derive(Debug)]
 pub(crate) struct ClientCreds {
     client_id: String,
-    /// The confidential-client secret, held [`crate::held::Held`] so it never leaks via `Debug`
-    /// (this struct derives it) and zeroizes on drop. Exposed only into the token-endpoint POST body.
-    client_secret: crate::held::Held<String>,
+    /// The confidential-client secret: [`crate::held::Held`] keeps it out of `Debug` (this struct
+    /// derives it) and [`Zeroizing`] wipes it on drop. Exposed only into the token-endpoint
+    /// POST body.
+    client_secret: crate::held::Held<Zeroizing<String>>,
     token_url: String,
     scope: String,
 }
@@ -39,7 +42,7 @@ pub(crate) fn build(credential: &str, token_url: &str, scope: &str) -> Result<Cl
     let (client_id, client_secret) = split_credential(credential)?;
     Ok(ClientCreds {
         client_id: client_id.to_string(),
-        client_secret: crate::held::Held::new(client_secret.to_string()),
+        client_secret: crate::held::Held::new(Zeroizing::new(client_secret.to_string())),
         token_url: token_url.to_string(),
         scope: scope.to_string(),
     })
