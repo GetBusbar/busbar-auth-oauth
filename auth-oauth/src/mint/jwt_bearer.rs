@@ -48,7 +48,7 @@ pub(crate) struct Signer {
 
 /// Build a `jwt-bearer` signer: PARSES the key material (failing loud on a malformed
 /// service-account JSON / PKCS#8 key, the common misconfig). It never touches the network: the first
-/// mint runs on `tick`. `credential` is the SA JSON's bytes, never a path: a key file is read by
+/// mint runs on the instance's driver ticket. `credential` is the SA JSON's bytes, never a path: a key file is read by
 /// the host's secret file source (`api_key: {file: <path>}`) and its JSON delivered here (THE
 /// DESIGN §11.11 R4, §6 trust boundary; ruling 11). `scope_override` replaces the default
 /// `cloud-platform` scope when set. `subject` is the operator-configured RFC 7523 `sub` — `None`
@@ -104,104 +104,7 @@ fn parse_service_account(
 pub(crate) fn private_key(json: &str) -> Result<Zeroizing<String>, String> {
     const NOT_TEXT: &str = "service-account JSON is invalid: a field is missing or has the wrong \
                             type (the decoder's text is withheld)";
-    let raw = top_level_string(json.as_bytes(), b"private_key").ok_or(NOT_TEXT)?;
-    unescape(raw).ok_or_else(|| NOT_TEXT.to_string())
-}
-
-/// The escaped bytes (between the quotes) of the top-level object member `name` of the
-/// well-formed JSON document `json`, when that member is a string.
-fn top_level_string<'a>(json: &'a [u8], name: &[u8]) -> Option<&'a [u8]> {
-    let mut i = 0;
-    let mut depth = 0_usize;
-    // At depth 1, whether the next string is a member name (after `{` or `,`).
-    let mut expect_name = false;
-    let mut want_value = false;
-    while i < json.len() {
-        match json[i] {
-            b'"' => {
-                let start = i + 1;
-                let mut j = start;
-                while j < json.len() && json[j] != b'"' {
-                    j += if json[j] == b'\\' { 2 } else { 1 };
-                }
-                let s = json.get(start..j)?;
-                if depth == 1 && want_value {
-                    return Some(s);
-                }
-                want_value = depth == 1 && expect_name && s == name;
-                expect_name = false;
-                i = j + 1;
-                continue;
-            }
-            b'{' => {
-                depth += 1;
-                expect_name = depth == 1;
-                want_value = false;
-            }
-            b'[' => {
-                depth += 1;
-                want_value = false;
-            }
-            b'}' | b']' => depth = depth.saturating_sub(1),
-            b',' => {
-                expect_name = depth == 1;
-                want_value = false;
-            }
-            b':' => {}
-            b if b.is_ascii_whitespace() => {}
-            // A value that is no string ends a pending match.
-            _ => want_value = false,
-        }
-        i += 1;
-    }
-    None
-}
-
-/// JSON string escapes resolved (RFC 8259 section 7), into a buffer sized once to the escaped
-/// length; `None` for an escape the decoder would have refused.
-fn unescape(raw: &[u8]) -> Option<Zeroizing<String>> {
-    let mut out = Zeroizing::new(String::with_capacity(raw.len()));
-    let mut i = 0;
-    let hex4 = |at: usize| -> Option<u32> {
-        let h = raw.get(at..at + 4)?;
-        u32::from_str_radix(std::str::from_utf8(h).ok()?, 16).ok()
-    };
-    while i < raw.len() {
-        if raw[i] != b'\\' {
-            // Copy the run of plain bytes up to the next escape (UTF-8 as the decoder judged it).
-            let end = raw[i..]
-                .iter()
-                .position(|b| *b == b'\\')
-                .map_or(raw.len(), |p| i + p);
-            out.push_str(std::str::from_utf8(&raw[i..end]).ok()?);
-            i = end;
-            continue;
-        }
-        let c = match *raw.get(i + 1)? {
-            b'"' => '"',
-            b'\\' => '\\',
-            b'/' => '/',
-            b'b' => '\u{8}',
-            b'f' => '\u{c}',
-            b'n' => '\n',
-            b'r' => '\r',
-            b't' => '\t',
-            b'u' => {
-                let hi = hex4(i + 2)?;
-                if (0xD800..0xDC00).contains(&hi) && raw.get(i + 6..i + 8) == Some(&b"\\u"[..]) {
-                    let lo = hex4(i + 8)?;
-                    i += 6;
-                    char::from_u32(0x10000 + ((hi - 0xD800) << 10) + (lo.checked_sub(0xDC00)?))?
-                } else {
-                    char::from_u32(hi)?
-                }
-            }
-            _ => return None,
-        };
-        i += if raw[i + 1] == b'u' { 6 } else { 2 };
-        out.push(c);
-    }
-    Some(out)
+    crate::token_response::wiped_member(json, b"private_key").ok_or_else(|| NOT_TEXT.to_string())
 }
 
 impl Signer {
