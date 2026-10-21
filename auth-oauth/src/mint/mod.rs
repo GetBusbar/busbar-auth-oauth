@@ -31,9 +31,9 @@ use busbar_contract::conn::{ConnError, ConnId, PieceKind};
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::held::Own;
+use crate::held::Secret;
 use crate::token_response::{default_expires_in, deserialize_expires_in, json_err, wiped_member};
 use busbar_contract::header::{is_legal_header_value, token_value};
-use busbar_contract::Secret;
 
 /// Refresh this many seconds BEFORE the token's stated expiry, so a request never races an expired
 /// token across the refresh boundary.
@@ -732,11 +732,9 @@ fn conn_cause(e: ConnError) -> &'static str {
         ConnError::Fault => "fault",
         ConnError::Unarmed => "not armed",
         ConnError::CredentialUnavailable => "the request's credential is unavailable",
-        // The binding's own auth said no, or could not answer: an auth outcome, never the token
-        // endpoint's (it never counts against the destination).
-        ConnError::AuthRefused => "the connection's auth refused the request",
-        ConnError::AuthFailed => "the connection's auth failed",
-        // `ConnError` is non-exhaustive: a cause this plugin predates is a failed connection.
+        // A cause this plugin predates is a failed connection. Busbar dev's `ConnError` names every
+        // variant above (the arm is unreachable there); a contract that grows one lands here.
+        #[allow(unreachable_patterns)]
         _ => "connection failed",
     }
 }
