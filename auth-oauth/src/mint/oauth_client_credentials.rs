@@ -28,7 +28,7 @@ pub(crate) struct ClientCreds {
     client_id: String,
     /// The confidential-client secret, held `Secret<_, Own>` so it never leaks via `Debug`
     /// (this struct derives it) and zeroizes on drop. Exposed only into the token-endpoint POST body.
-    client_secret: busbar_contract::Secret<String, Own>,
+    client_secret: crate::held::Secret<String, Own>,
     token_url: String,
     scope: String,
 }
@@ -40,7 +40,7 @@ pub(crate) fn build(credential: &str, token_url: &str, scope: &str) -> Result<Cl
     let (client_id, client_secret) = split_credential(credential)?;
     Ok(ClientCreds {
         client_id: client_id.to_string(),
-        client_secret: busbar_contract::Secret::held(client_secret.to_string()),
+        client_secret: crate::held::Secret::held(client_secret.to_string()),
         token_url: token_url.to_string(),
         scope: scope.to_string(),
     })
