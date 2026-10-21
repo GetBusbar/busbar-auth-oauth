@@ -22,6 +22,7 @@ use crate::mint::TokenRequest;
 use crate::style;
 use crate::test_support::{self, TestHost};
 use busbar_contract::abi::mechanism::call::Outcome;
+use busbar_contract::abi::sdk::conn::Host;
 use busbar_contract::conn::{ConnError, ConnId};
 
 /// The scripted need, shared so the test reads what was sent.
@@ -53,7 +54,7 @@ fn open(o: &Oauth, style: &str, cred: &str, settings: &str) -> u64 {
 }
 
 /// One `fields` call, as the kit's door answers it.
-fn fields(o: &Oauth, host: &TestHost, handle: u64, ticket: Ticket) -> (Outcome, String) {
+fn fields(o: &Oauth, host: &Host, handle: u64, ticket: Ticket) -> (Outcome, String) {
     test_support::fields(o, host, handle, ticket, None)
 }
 
@@ -84,7 +85,7 @@ fn oauth_client_credentials_mints_on_tick_and_honours_the_expired_token_rule() {
     // (THE DESIGN §11.11; App. A B.3; contract `abi/auth` `fields`). RED before the fix: the call
     // parked until the first mint landed.
     assert_eq!(
-        fields(&o, &host, h, Ticket::NONE),
+        fields(&o, &host.host(), h, Ticket::NONE),
         (Outcome::Ready, String::new()),
         "before the first mint, ticket-less: READY, no fields"
     );
@@ -93,7 +94,7 @@ fn oauth_client_credentials_mints_on_tick_and_honours_the_expired_token_rule() {
         generation: 1,
     };
     assert_eq!(
-        fields(&o, &host, h, first),
+        fields(&o, &host.host(), h, first),
         (Outcome::Ready, String::new()),
         "before the first mint, on a ticket: READY, no fields, nothing parked"
     );
@@ -131,9 +132,12 @@ fn oauth_client_credentials_mints_on_tick_and_honours_the_expired_token_rule() {
         Vec::<Ticket>::new(),
         "nothing parked before the first mint, so the landed mint wakes nothing"
     );
-    assert_eq!(fields(&o, &host, h, first).1, "authorization: Bearer tok-1");
     assert_eq!(
-        fields(&o, &host, h, Ticket::NONE).1,
+        fields(&o, &host.host(), h, first).1,
+        "authorization: Bearer tok-1"
+    );
+    assert_eq!(
+        fields(&o, &host.host(), h, Ticket::NONE).1,
         "authorization: Bearer tok-1"
     );
     assert_eq!(
@@ -150,14 +154,14 @@ fn oauth_client_credentials_mints_on_tick_and_honours_the_expired_token_rule() {
         slot: 3,
         generation: 1,
     };
-    let (outcome, _) = fields(&o, &host, h, ticket);
+    let (outcome, _) = fields(&o, &host.host(), h, ticket);
     assert_eq!(
         outcome,
         Outcome::Pending,
         "bounded by the attempt's deadline (the host cancels it then)"
     );
     assert_eq!(
-        fields(&o, &host, h, Ticket::NONE),
+        fields(&o, &host.host(), h, Ticket::NONE),
         (Outcome::Refused, String::new())
     );
 
@@ -166,7 +170,7 @@ fn oauth_client_credentials_mints_on_tick_and_honours_the_expired_token_rule() {
     o.tick(due + 30 * NS, Ticket::NONE, Some(&host.host()), &mut diags);
     assert_eq!(host.take(), vec![ticket]);
     assert_eq!(
-        fields(&o, &host, h, ticket).1,
+        fields(&o, &host.host(), h, ticket).1,
         "authorization: Bearer tok-2"
     );
     assert_eq!(
@@ -203,7 +207,7 @@ fn jwt_bearer_mints_on_tick() {
     }
     capture("jwt-bearer.json", &w);
     assert_eq!(
-        fields(&o, &host, h, Ticket::NONE).1,
+        fields(&o, &host.host(), h, Ticket::NONE).1,
         "authorization: Bearer ya29.tok"
     );
 }
@@ -292,7 +296,7 @@ fn outbound_ready_is_false_for_an_expired_token_whose_refresh_failed() {
     let w = Arc::new(Scripted::default());
     let (o, h) = expired_and_failed(&w, &host);
     assert_eq!(
-        fields(&o, &host, h, Ticket::NONE).0,
+        fields(&o, &host.host(), h, Ticket::NONE).0,
         Outcome::Refused,
         "positive control: the read does not present the expired token"
     );
@@ -317,7 +321,7 @@ fn outbound_ready_is_false_for_an_expired_token_whose_refresh_failed() {
         &mut Diags::default(),
     );
     assert_eq!(
-        fields(&o, &host, h, Ticket::NONE),
+        fields(&o, &host.host(), h, Ticket::NONE),
         (Outcome::Ready, String::new()),
         "positive control: a token with bytes invalid in a header is presented as no header"
     );
@@ -344,9 +348,10 @@ fn a_mint_landing_between_the_read_and_the_park_is_not_a_lost_wake() {
         slot: 7,
         generation: 1,
     };
+    let handle = host.host();
     let answered = std::thread::scope(|s| {
         let held = o.waiters.lock().unwrap();
-        let caller = s.spawn(|| fields(&o, &host, h, call));
+        let caller = s.spawn(|| fields(&o, &handle, h, call));
         // The call reads the expired token and stops at its park.
         std::thread::sleep(std::time::Duration::from_millis(500));
         // THE MINT LANDS: its token is stored, and its drain finds no one parked.
@@ -393,9 +398,10 @@ fn a_cell_settled_between_the_lookup_and_the_park_is_not_a_lost_wake() {
         slot: 301,
         generation: 1,
     };
+    let handle = host.host();
     let first = std::thread::scope(|s| {
         let held = o.exchange_waiters.lock().unwrap();
-        let caller = s.spawn(|| test_support::fields(&o, &host, h, call, Some("s")));
+        let caller = s.spawn(|| test_support::fields(&o, &handle, h, call, Some("s")));
         std::thread::sleep(std::time::Duration::from_millis(500));
         // THE SETTLING TICK, where the cache lets it: the cell is idle, holds no usable token and
         // no one waits on it yet, so it is dropped.
@@ -419,7 +425,7 @@ fn a_cell_settled_between_the_lookup_and_the_park_is_not_a_lost_wake() {
         "the exchange the call armed lands and wakes it"
     );
     assert_eq!(
-        test_support::fields(&o, &host, h, call, Some("s")).1,
+        test_support::fields(&o, &host.host(), h, call, Some("s")).1,
         "authorization: Bearer tok-s"
     );
 }

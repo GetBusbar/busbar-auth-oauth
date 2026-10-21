@@ -32,7 +32,7 @@ extern "C" fn wake(ctx: HostCtx, t: Ticket) {
         .push(t);
 }
 
-/// A host with a wake and no connector table. It owns its tables (a `FakeHost`); a test reads its
+/// A host with a wake whose connector table is empty (a `FakeHost::new()` table: non-null, serving nothing). It owns its tables (a `FakeHost`); a test reads its
 /// [`Host`] handle from it per call, never holding one past the borrow.
 pub(crate) struct TestHost {
     fake: FakeHost,
@@ -70,7 +70,7 @@ impl TestHost {
 /// `name: value` joined by ` ; `.
 pub(crate) fn fields(
     o: &Oauth,
-    host: &TestHost,
+    host: &Host,
     handle: u64,
     ticket: Ticket,
     scope: Option<&str>,
@@ -83,7 +83,7 @@ pub(crate) fn fields(
         ticket,
         timestamp: 0,
     };
-    let answer = o.answer(&ask, Some(&host.host()), &mut |h| {
+    let answer = o.answer(&ask, Some(host), &mut |h| {
         written.push(format!("authorization: {h}"));
     });
     let outcome = match answer {
