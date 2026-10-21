@@ -279,7 +279,7 @@ impl Oauth {
     ) -> Option<u64> {
         let host_wire = host
             .filter(|h| h.lends_connector())
-            .map(|h| HostWire::new(h, ticket, &self.issued));
+            .map(|h| HostWire::new(move |t, n| h.connector_from(t, n), ticket, &self.issued));
         let wire: Option<&dyn Wire> = match (&self.wire, &host_wire) {
             (Some(w), _) => Some(w.as_ref()),
             (None, Some(h)) => Some(h),

@@ -23,39 +23,26 @@ use busbar_contract::abi::host::conn::connector::{
     REQUEST_END, REQUEST_HEAD,
 };
 use busbar_contract::abi::mechanism::ticket::Ticket;
-use busbar_contract::abi::sdk::conn::{ConnFailure, Connector, Host};
+use busbar_contract::abi::sdk::conn::{ConnFailure, Connector};
 use busbar_contract::abi::transport::{fields, FrameSpan};
 use busbar_contract::conn::{ConnError, ConnId, PieceKind};
 
 use super::{Got, HostClock, TokenRequest, Wire};
 
-/// A host handle that makes the connector for one entry of a ticket's cycle: the SDK's [`Host`].
-/// [`HostWire`] is generic over it, so the wire borrows the handle it was built over rather than
-/// naming a `Host` in a field (the handle is the call's own borrow, never the host's `'static`
-/// install handle).
-pub(crate) trait Connects {
-    /// The connector for one entry on `ticket`, its handles counting on from `issued`.
-    fn connector_from(&self, ticket: Ticket, issued: u32) -> Connector<'_>;
-}
-
-impl Connects for Host {
-    fn connector_from(&self, ticket: Ticket, issued: u32) -> Connector<'_> {
-        Host::connector_from(self, ticket, issued)
-    }
-}
-
-/// The connector for one entry of the driver ticket's cycle.
-pub(crate) struct HostWire<'a, H: Connects> {
-    host: &'a H,
+/// The connector for one entry of the driver ticket's cycle. It holds a closure over the call's own
+/// host borrow (never the host's `'static` install handle), so no field names a `Host`: `connect`
+/// makes the connector for one entry on a ticket, its handles counting on from the second argument.
+pub(crate) struct HostWire<'a, F> {
+    connect: F,
     ticket: Ticket,
     issued: &'a AtomicU32,
 }
 
-impl<'a, H: Connects> HostWire<'a, H> {
-    /// The need's services over `host`, on `ticket`, the cycle's handle count in `issued`.
-    pub(crate) fn new(host: &'a H, ticket: Ticket, issued: &'a AtomicU32) -> Self {
+impl<'a, F: Fn(Ticket, u32) -> Connector<'a>> HostWire<'a, F> {
+    /// The need's services over `connect`, on `ticket`, the cycle's handle count in `issued`.
+    pub(crate) fn new(connect: F, ticket: Ticket, issued: &'a AtomicU32) -> Self {
         Self {
-            host,
+            connect,
             ticket,
             issued,
         }
@@ -63,9 +50,7 @@ impl<'a, H: Connects> HostWire<'a, H> {
 
     /// Run `f` over the connector, the cycle's handle count carried in and out.
     fn with<T>(&self, f: impl FnOnce(&mut Connector<'_>) -> T) -> T {
-        let mut c = self
-            .host
-            .connector_from(self.ticket, self.issued.load(Ordering::Acquire));
+        let mut c = (self.connect)(self.ticket, self.issued.load(Ordering::Acquire));
         let answer = f(&mut c);
         self.issued.store(c.issued(), Ordering::Release);
         answer
@@ -143,7 +128,7 @@ fn head(req: &TokenRequest, timeout_ms: u64) -> Result<(Vec<u8>, RequestPiece), 
     Ok((bytes, piece))
 }
 
-impl<H: Connects + Sync> Wire for HostWire<'_, H> {
+impl<'a, F: Fn(Ticket, u32) -> Connector<'a> + Sync> Wire for HostWire<'a, F> {
     fn open(&self, req: &TokenRequest, timeout_ms: u64) -> Result<ConnId, ConnError> {
         let (head, head_piece) = head(req, timeout_ms)?;
         let body = req.body.expose_own(&Own::here()).as_bytes();
