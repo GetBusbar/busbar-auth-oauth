@@ -39,3 +39,5 @@ sha2 = { workspace = true }
 # The token request forms are written by the crate's own encoder (`mint::form`, sized once and wiped
 # on drop); the tests read them back, and hold the encoder to `serde_urlencoded`'s bytes.
 serde_urlencoded = { workspace = true }
+# `FakeHost` (the unit tests' host) is compiled only under the dev-only `test-seal` feature.
+busbar-contract = { workspace = true, features = ["test-seal"] }

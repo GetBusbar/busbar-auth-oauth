@@ -11,9 +11,10 @@ use std::sync::Mutex;
 use std::task::Poll;
 
 use busbar_contract::abi::mechanism::call::Outcome;
-use busbar_contract::abi::mechanism::ticket::{HostCtx, HostTables, Ticket};
+use busbar_contract::abi::mechanism::ticket::{HostCtx, Ticket};
 use busbar_contract::abi::sdk::auth_outbound::FieldsAnswer;
 use busbar_contract::abi::sdk::conn::Host;
+use busbar_contract::abi::sdk::test_support::fake::FakeHost;
 
 use crate::instance::Oauth;
 use crate::Ask;
@@ -31,28 +32,27 @@ extern "C" fn wake(ctx: HostCtx, t: Ticket) {
         .push(t);
 }
 
-/// A host with a wake and no connector table.
+/// A host with a wake whose connector table is empty (a `FakeHost::new()` table: non-null, serving nothing). It owns its tables (a `FakeHost`); a test reads its
+/// [`Host`] handle from it per call, never holding one past the borrow.
 pub(crate) struct TestHost {
-    pub(crate) host: Host,
+    fake: FakeHost,
     id: u64,
 }
 
 impl TestHost {
     pub(crate) fn new() -> Self {
         let id = NEXT.fetch_add(1, Ordering::Relaxed);
-        let tables = HostTables {
-            size: u32::try_from(std::mem::size_of::<HostTables>()).unwrap(),
-            _reserved: 0,
-            ctx: HostCtx { handle: id },
-            wake: Some(wake),
-            conns: std::ptr::null(),
-            services: std::ptr::null(),
-            io: std::ptr::null(),
-        };
         Self {
-            host: Host::of(&tables),
+            fake: FakeHost::new().ctx(HostCtx { handle: id }).wake(wake),
             id,
         }
+    }
+
+    /// This host's handle, borrowed from its tables for as long as the host lives.
+    #[allow(mismatched_lifetime_syntaxes)]
+    pub(crate) fn host(&self) -> Host {
+        let tables = self.fake.lent();
+        Host::of(&tables)
     }
 
     /// The tickets this host woke since the last take, in order.
@@ -71,7 +71,7 @@ impl TestHost {
 /// `name: value` joined by ` ; `.
 pub(crate) fn fields(
     o: &Oauth,
-    host: &TestHost,
+    host: &Host,
     handle: u64,
     ticket: Ticket,
     scope: Option<&str>,
@@ -84,7 +84,7 @@ pub(crate) fn fields(
         ticket,
         timestamp: 0,
     };
-    let answer = o.answer(&ask, Some(&host.host), &mut |h| {
+    let answer = o.answer(&ask, Some(host), &mut |h| {
         written.push(format!("authorization: {h}"));
     });
     let outcome = match answer {

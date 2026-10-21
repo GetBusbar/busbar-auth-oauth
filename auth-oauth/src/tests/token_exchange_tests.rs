@@ -21,6 +21,7 @@ use crate::mint::tests::{Scripted, Step};
 use crate::mint::{Got, Wire};
 use crate::style;
 use crate::test_support::{self, TestHost};
+use busbar_contract::abi::sdk::conn::Host;
 
 /// The scripted need, shared so the test reads what was sent.
 struct Shared(Arc<Scripted>);
@@ -69,7 +70,7 @@ fn open(o: &Oauth) -> u64 {
 /// One `fields` call, its extensions stating `scope` (none: absent), as the kit's door answers it.
 fn fields(
     o: &Oauth,
-    host: &TestHost,
+    host: &Host,
     handle: u64,
     ticket: Ticket,
     scope: Option<&str>,
@@ -149,41 +150,41 @@ fn each_scope_is_its_own_exchange_and_its_own_cached_token() {
     let h = open(&o);
     let (a, b) = (ticket(101), ticket(102));
     assert_eq!(
-        fields(&o, &host, h, Ticket::NONE, Some("fs_read_file")).0,
+        fields(&o, &host.host(), h, Ticket::NONE, Some("fs_read_file")).0,
         Outcome::Refused,
         "ticket-less, nothing usable: REFUSED (the host submits it on a ticket)"
     );
     assert_eq!(
-        fields(&o, &host, h, a, Some("fs_read_file")).0,
+        fields(&o, &host.host(), h, a, Some("fs_read_file")).0,
         Outcome::Pending
     );
     w.ok(r#"{"access_token":"tok-read","token_type":"Bearer","expires_in":3600}"#);
     let mut diags = Diags::default();
-    o.tick(1_000, Ticket::NONE, Some(&host.host), &mut diags);
+    o.tick(1_000, Ticket::NONE, Some(&host.host()), &mut diags);
     assert_eq!(host.take(), vec![a], "the landed exchange wakes its call");
     assert_eq!(
-        fields(&o, &host, h, a, Some("fs_read_file")),
+        fields(&o, &host.host(), h, a, Some("fs_read_file")),
         (Outcome::Ready, "authorization: Bearer tok-read".to_string())
     );
 
     assert_eq!(
-        fields(&o, &host, h, b, Some("fs_read_file fs_write_file")).0,
+        fields(&o, &host.host(), h, b, Some("fs_read_file fs_write_file")).0,
         Outcome::Pending,
         "another scope never shares the first's token"
     );
     w.ok(r#"{"access_token":"tok-both","expires_in":3600}"#);
-    o.tick(2_000, Ticket::NONE, Some(&host.host), &mut diags);
+    o.tick(2_000, Ticket::NONE, Some(&host.host()), &mut diags);
     assert_eq!(host.take(), vec![b]);
     assert_eq!(
-        fields(&o, &host, h, b, Some("fs_read_file fs_write_file")).1,
+        fields(&o, &host.host(), h, b, Some("fs_read_file fs_write_file")).1,
         "authorization: Bearer tok-both"
     );
     // The first scope again, on the spot: its cached token, no exchange.
     assert_eq!(
-        fields(&o, &host, h, Ticket::NONE, Some("fs_read_file")).1,
+        fields(&o, &host.host(), h, Ticket::NONE, Some("fs_read_file")).1,
         "authorization: Bearer tok-read"
     );
-    o.tick(3_000, Ticket::NONE, Some(&host.host), &mut diags);
+    o.tick(3_000, Ticket::NONE, Some(&host.host()), &mut diags);
     let sent = w.sent.lock().unwrap();
     let scopes: Vec<String> = sent
         .iter()
@@ -209,19 +210,31 @@ fn a_refused_exchange_fails_the_calls_that_waited_and_the_next_call_asks_again()
     let o = instance(&w);
     let h = open(&o);
     let (first, second, later) = (ticket(201), ticket(202), ticket(203));
-    assert_eq!(fields(&o, &host, h, first, Some("s")).0, Outcome::Pending);
-    assert_eq!(fields(&o, &host, h, second, Some("s")).0, Outcome::Pending);
+    assert_eq!(
+        fields(&o, &host.host(), h, first, Some("s")).0,
+        Outcome::Pending
+    );
+    assert_eq!(
+        fields(&o, &host.host(), h, second, Some("s")).0,
+        Outcome::Pending
+    );
     w.push(vec![
         Step::Head(401),
         Step::Body(b"{\"error\":\"invalid_grant\"}".to_vec(), true),
     ]);
     let mut diags = Diags::default();
-    o.tick(1_000, Ticket::NONE, Some(&host.host), &mut diags);
+    o.tick(1_000, Ticket::NONE, Some(&host.host()), &mut diags);
     let mut both = host.take();
     both.sort_by_key(|t| t.slot);
     assert_eq!(both, vec![first, second]);
-    assert_eq!(fields(&o, &host, h, first, Some("s")).0, Outcome::Failed);
-    assert_eq!(fields(&o, &host, h, second, Some("s")).0, Outcome::Failed);
+    assert_eq!(
+        fields(&o, &host.host(), h, first, Some("s")).0,
+        Outcome::Failed
+    );
+    assert_eq!(
+        fields(&o, &host.host(), h, second, Some("s")).0,
+        Outcome::Failed
+    );
     assert!(
         diags
             .iter()
@@ -229,12 +242,15 @@ fn a_refused_exchange_fails_the_calls_that_waited_and_the_next_call_asks_again()
         "the failure is logged"
     );
     // The next call is not failed by the last one: it arms a fresh exchange.
-    assert_eq!(fields(&o, &host, h, later, Some("s")).0, Outcome::Pending);
+    assert_eq!(
+        fields(&o, &host.host(), h, later, Some("s")).0,
+        Outcome::Pending
+    );
     w.ok(r#"{"access_token":"tok-s","expires_in":3600}"#);
-    o.tick(2_000, Ticket::NONE, Some(&host.host), &mut diags);
+    o.tick(2_000, Ticket::NONE, Some(&host.host()), &mut diags);
     assert_eq!(host.take(), vec![later]);
     assert_eq!(
-        fields(&o, &host, h, later, Some("s")).1,
+        fields(&o, &host.host(), h, later, Some("s")).1,
         "authorization: Bearer tok-s"
     );
     assert_eq!(w.sent.lock().unwrap().len(), 2);
@@ -294,13 +310,13 @@ fn a_retire_keeps_the_exchange_a_parked_call_waits_on() {
     let h = open(&o);
     let a = ticket(301);
     assert_eq!(
-        fields(&o, &host, h, a, Some("fs_read_file")).0,
+        fields(&o, &host.host(), h, a, Some("fs_read_file")).0,
         Outcome::Pending
     );
     o.retire(1);
     w.ok(r#"{"access_token":"tok-kept","token_type":"Bearer","expires_in":3600}"#);
     let mut diags = Diags::default();
-    o.tick(1_000, Ticket::NONE, Some(&host.host), &mut diags);
+    o.tick(1_000, Ticket::NONE, Some(&host.host()), &mut diags);
     assert_eq!(
         host.take(),
         vec![a],
@@ -320,13 +336,16 @@ fn an_exchanged_token_with_invalid_header_bytes_fails_the_calls_that_waited() {
     let o = instance(&w);
     let h = open(&o);
     let (first, later) = (ticket(211), ticket(212));
-    assert_eq!(fields(&o, &host, h, first, Some("s")).0, Outcome::Pending);
+    assert_eq!(
+        fields(&o, &host.host(), h, first, Some("s")).0,
+        Outcome::Pending
+    );
     w.ok("{\"access_token\":\"tok\\u0001bad\",\"expires_in\":3600}");
     let mut diags = Diags::default();
-    o.tick(1_000, Ticket::NONE, Some(&host.host), &mut diags);
+    o.tick(1_000, Ticket::NONE, Some(&host.host()), &mut diags);
     assert_eq!(host.take(), vec![first]);
     assert_eq!(
-        fields(&o, &host, h, first, Some("s")),
+        fields(&o, &host.host(), h, first, Some("s")),
         (Outcome::Failed, String::new()),
         "the waiting call fails rather than going out with no auth"
     );
@@ -337,7 +356,7 @@ fn an_exchanged_token_with_invalid_header_bytes_fails_the_calls_that_waited() {
         "the un-encodable token is logged"
     );
     assert_eq!(
-        fields(&o, &host, h, later, Some("s")).0,
+        fields(&o, &host.host(), h, later, Some("s")).0,
         Outcome::Pending,
         "the next call arms a fresh exchange; the un-encodable token is not served"
     );
