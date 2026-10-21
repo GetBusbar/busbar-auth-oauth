@@ -21,7 +21,7 @@
 use std::sync::Arc;
 
 use crate::held::Own;
-use busbar_contract::Secret;
+use crate::held::Secret;
 
 use super::TokenRequest;
 
