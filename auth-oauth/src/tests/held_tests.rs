@@ -5,7 +5,7 @@
 //! crate's seal — redacted, constant-time equal, and readable under `Own` only.
 
 use super::Own;
-use busbar_contract::Secret;
+use super::Secret;
 
 #[test]
 fn debug_and_display_print_only_the_redaction_marker() {
