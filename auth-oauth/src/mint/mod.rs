@@ -169,7 +169,7 @@ pub(crate) enum Minter {
 }
 
 impl Minter {
-    fn request(&self, now: u64) -> Result<TokenRequest, String> {
+    pub(crate) fn request(&self, now: u64) -> Result<TokenRequest, String> {
         match self {
             Minter::JwtBearer(s) => s.request(now),
             Minter::ClientCredentials(c) => c.request(),
@@ -432,6 +432,14 @@ impl Minted {
             exchange: Mutex::new(Exchange::Idle { due_ns: 0 }),
             refresh_failed: AtomicBool::new(false),
             usable_until: AtomicU64::new(0),
+        }
+    }
+
+    /// The binding's exchange material, for a token-exchange cell; `None` for a scheduled one.
+    pub(crate) fn exchange(&self) -> Option<&token_exchange::Exchange> {
+        match &self.minter {
+            Minter::TokenExchange(scoped) => Some(scoped.exchange()),
+            _ => None,
         }
     }
 

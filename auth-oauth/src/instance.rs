@@ -191,6 +191,21 @@ impl Oauth {
         });
     }
 
+    /// A SCHEDULED cell `retire` kept because its mint was in flight, dropped once that mint has
+    /// settled: idle, held by no handle (the cache's reference and the caller's `cell` are the only
+    /// two), and still the cache's cell for `key`. Judged under the cache lock, which every new
+    /// holder takes to clone it, so a re-open racing this keeps its cell. A cell a handle holds, or
+    /// one still minting, stays.
+    fn drop_orphan(&self, key: [u8; 32], cell: &Arc<Minted>) {
+        let mut cache = lock(&self.cache);
+        let orphan = cache.get(&key).is_some_and(|c| Arc::ptr_eq(c, cell))
+            && Arc::strong_count(cell) == 2
+            && cell.idle();
+        if orphan {
+            cache.remove(&key);
+        }
+    }
+
     /// Park `ticket` until a mint lands.
     pub(crate) fn park(&self, ticket: Ticket) {
         let mut w = lock(&self.waiters);
@@ -340,6 +355,7 @@ impl Oauth {
                 ),
                 None => {}
             }
+            self.drop_orphan(key, &cell);
         }
         if minted {
             // The token is stored before this drain: a call that parks after the drain reads it
@@ -398,6 +414,9 @@ impl Oauth {
             }
         };
         if let Some(failed) = failure {
+            if let Some(exchange) = cell.exchange() {
+                exchange.settled(failed);
+            }
             let woken = lock(&self.exchange_waiters)
                 .remove(&key)
                 .unwrap_or_default();

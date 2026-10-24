@@ -66,7 +66,10 @@ use std::borrow::Cow;
 use std::ptr;
 use std::task::Poll;
 
-use busbar_contract::abi::auth::{AuthPoints, AuthTail, StyleDecl, CANCEL_CONTINUES};
+use busbar_contract::abi::auth::{
+    ranked, AuthPoints, AuthTail, StyleDecl, CANCEL_CONTINUES, STYLE_ENDPOINT_FROM_CREDENTIAL,
+    STYLE_ENDPOINT_TOKEN_URL,
+};
 use busbar_contract::abi::host::conn::connector::{
     Need, DIRECTION_OUTBOUND, EGRESS_OPERATOR_INFRASTRUCTURE, KEEP_NAMED,
 };
@@ -95,9 +98,24 @@ const FIELD_FLAGS: u32 = 0;
 /// The styles this plugin serves, each at `Head` (a bearer token reads nothing past the head).
 /// None carries [`busbar_contract::abi::auth::STYLE_CALLER_CREDENTIAL`] (an OAuth token is always
 /// minted from the operator's own credential).
+///
+/// The two the previous release offered rank third and fourth (after the header styles' first and
+/// second), so the host lists them in that release's order when it refuses an unknown style; the
+/// token exchange is unranked. Each states where its token endpoint comes from, so the host judges
+/// it as a destination before the binding opens: the credential itself for `jwt-bearer`, the
+/// entry's `token_url` for `oauth-client-credentials` (the one style the previous release judged a
+/// `token_url` for).
 const STYLES: &[StyleDecl] = &[
-    style_decl(style::JWT_BEARER, 0, AuthPoints::HEAD),
-    style_decl(style::OAUTH_CLIENT_CREDENTIALS, 0, AuthPoints::HEAD),
+    style_decl(
+        style::JWT_BEARER,
+        ranked(3) | STYLE_ENDPOINT_FROM_CREDENTIAL,
+        AuthPoints::HEAD,
+    ),
+    style_decl(
+        style::OAUTH_CLIENT_CREDENTIALS,
+        ranked(4) | STYLE_ENDPOINT_TOKEN_URL,
+        AuthPoints::HEAD,
+    ),
     style_decl(style::OAUTH_TOKEN_EXCHANGE, 0, AuthPoints::HEAD),
 ];
 
@@ -305,8 +323,15 @@ impl Oauth {
     pub(crate) fn ready(&self, handle: u64) -> bool {
         match self.bound(handle) {
             Some(style::Binding::Minted(cell)) => cell.presents(self.wall_secs()),
-            // A token exchange is ready whenever asked: each request's exchange is its own.
-            Some(style::Binding::Exchange(_)) => true,
+            // A token exchange is ready unless its last settled exchange failed (its authorization
+            // server is refusing, so `fields` would fail). One not asked yet IS ready (coordinator
+            // ruling on u29 auth-oauth #24): it mints lazily, per request, so reading it unready
+            // until it minted would keep its lane from ever being tried and so from ever minting.
+            // 1.5.5 had no token exchange; its minted styles' readiness (v1.5.5
+            // egress_auth/bearer_token.rs `is_ready`, read by the health prober) was false only
+            // until the first mint, which 1.5.5 ran EAGERLY in the background at boot. A lazy mint
+            // has no such window: the first request is its first mint.
+            Some(style::Binding::Exchange(b)) => !b.failing(),
             None => false,
         }
     }

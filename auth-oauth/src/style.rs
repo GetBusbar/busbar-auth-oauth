@@ -59,6 +59,11 @@ pub struct ExchangeBinding {
 }
 
 impl ExchangeBinding {
+    /// Whether this binding's last settled exchange failed (its `ready` fact reads `0`).
+    pub(crate) fn failing(&self) -> bool {
+        self.exchange.failing()
+    }
+
     /// The cache key of this binding's cell for `scope`: SHA-256 over the binding's own key and the
     /// scope, so two scopes never share a token and two bindings never share a scope's.
     pub fn scope_key(&self, scope: &[u8]) -> [u8; 32] {
@@ -359,8 +364,15 @@ fn open_jwt_bearer(
     let scope = text(m, "scope").map_err(|r| vec![r])?;
     let subject = text(m, "subject").map_err(|r| vec![r])?;
     let max = max_response_bytes(m).map_err(|r| vec![r])?;
+    // The host's judged copy of the service account's endpoint, when it hands one: the mint dials
+    // it (the need is pinned to it), never the credential's raw spelling.
+    let judged = text(m, "token_uri").map_err(|r| vec![r])?;
     let signer = mint::jwt_bearer::build(cred, scope.as_deref(), subject.as_deref())
         .map_err(|e| vec![Refusal::Credential(e)])?;
+    let signer = match judged {
+        Some(endpoint) => signer.dialling(&endpoint),
+        None => signer,
+    };
     let key = cache_key(
         JWT_BEARER,
         raw.unwrap_or_default(),
