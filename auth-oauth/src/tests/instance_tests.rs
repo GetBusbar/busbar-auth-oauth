@@ -566,3 +566,16 @@ fn token_expiry_and_caching_are_judged_on_the_hosts_clock() {
         "the cached token was served without a new exchange until the host's clock passed it"
     );
 }
+
+/// A TICK NEVER RESTARTS THE HANDLE COUNT (the oracle's egress.auth mint-refresh cells): the host
+/// keeps a driver ticket's answers across a tick while anything is held or pending, so a count
+/// reset at the tick reused a kept handle, and the refresh ahead of expiry never left (`fault`, or
+/// a replayed reply read as status 0) — a 2 s token was never re-minted. RED before: 9 -> 0.
+#[test]
+fn a_tick_carries_the_handle_count_on() {
+    let wire = Arc::new(Scripted::default());
+    let o = instance(&wire);
+    o.issued.store(9, Ordering::Release);
+    o.tick(1, Ticket::NONE, None, &mut Diags::default());
+    assert_eq!(o.issued.load(Ordering::Acquire), 9);
+}
