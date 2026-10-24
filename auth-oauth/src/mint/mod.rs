@@ -31,11 +31,9 @@ use busbar_contract::conn::{ConnError, ConnId, PieceKind};
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::held::Own;
-use crate::token_response::{
-    default_expires_in, deserialize_expires_in, deserialize_held, json_err,
-};
+use crate::held::Secret;
+use crate::token_response::{default_expires_in, deserialize_expires_in, json_err, wiped_member};
 use busbar_contract::header::{is_legal_header_value, token_value};
-use busbar_contract::Secret;
 
 /// Refresh this many seconds BEFORE the token's stated expiry, so a request never races an expired
 /// token across the refresh boundary.
@@ -203,8 +201,8 @@ impl std::fmt::Debug for CachedToken {
 impl CachedToken {
     /// Construct a `CachedToken`, building its header once here. The second value is whether the
     /// token was omitted for bytes invalid in a header value (the caller reports it). The token
-    /// arrives already `Secret<_, Own>` (the minters decode it straight into one); the header build
-    /// below is its one exposure.
+    /// arrives already `Secret<_, Own>` (a response's token is read into a wiped buffer and moved
+    /// into one, [`access_token`]); the header build below is its one exposure.
     pub(crate) fn new(token: Secret<String, Own>, expires_at: u64) -> (Self, bool) {
         let (header, invalid) = if token.expose_own(&Own::here()).is_empty() {
             (None, false)
@@ -263,16 +261,34 @@ pub(crate) fn next_refresh_secs(expires_at: u64, now: u64) -> u64 {
 }
 
 /// An OAuth token endpoint's success body (RFC 6749 section 5.1), as far as a minter reads it.
-/// Deserialize-only, and `access_token` is decoded straight into `Secret<_, Own>` (secret-hygiene #53).
+/// Deserialize-only. The decoder never decodes the access token: it unescapes a string that
+/// carries an escape into a scratch buffer of its own that it frees unwiped, so the decode skips
+/// the token's value (skipping copies nothing) and [`access_token`] reads it (THE DESIGN §6: "auth
+/// material is zeroised"; secret-hygiene #53).
 #[derive(serde::Deserialize)]
 struct TokenResponse {
-    #[serde(deserialize_with = "deserialize_held")]
-    access_token: Secret<String, Own>,
+    /// Required, and skipped by the decoder; [`access_token`] reads it.
+    #[allow(dead_code)]
+    access_token: serde::de::IgnoredAny,
     #[serde(
         default = "default_expires_in",
         deserialize_with = "deserialize_expires_in"
     )]
     expires_in: u64,
+}
+
+/// THE ACCESS TOKEN of a token response `json` the decoder has already judged well-formed (with an
+/// `access_token` member), its escapes resolved into ONE buffer sized to the escaped length and
+/// wiped on drop.
+///
+/// # Errors
+/// The response's `access_token` is not a string (the decode has already refused a missing one).
+pub(crate) fn access_token(json: &str) -> Result<Zeroizing<String>, String> {
+    wiped_member(json, b"access_token").ok_or_else(|| {
+        "token response JSON invalid: a field is missing or has the wrong type (the decoder's \
+         text is withheld)"
+            .to_string()
+    })
 }
 
 /// Parse a finished token response: a non-2xx status is the endpoint's refusal, named with a short
@@ -298,8 +314,11 @@ pub(crate) fn parse_response(
     // A decode failure is described without the decoder's text, which can quote the token.
     let tok: TokenResponse =
         serde_json::from_str(&body).map_err(json_err("token response JSON invalid"))?;
+    // The token's buffer moves into the held secret whole (no copy): the emptied wrapper drops.
+    let mut read = access_token(&body)?;
+    let token = Secret::held(std::mem::take(&mut *read));
     Ok(CachedToken::new(
-        tok.access_token,
+        token,
         // saturating_add: `expires_in` is attacker-influenced (comes off the token endpoint), so a
         // huge value must clamp to u64::MAX rather than wrap/panic.
         now.saturating_add(tok.expires_in),
@@ -402,7 +421,8 @@ pub(crate) struct Minted {
 }
 
 impl Minted {
-    /// A cell that has minted nothing yet; its first exchange is due on the first `tick`.
+    /// A cell that has minted nothing yet; its first exchange is due at once, on the next `tick` or
+    /// `drive` that advances it.
     pub(crate) fn new(minter: Minter, max_response_bytes: usize) -> Self {
         Self {
             on_demand: matches!(minter, Minter::TokenExchange(_)),
@@ -720,11 +740,9 @@ fn conn_cause(e: ConnError) -> &'static str {
         ConnError::Fault => "fault",
         ConnError::Unarmed => "not armed",
         ConnError::CredentialUnavailable => "the request's credential is unavailable",
-        // The binding's own auth said no, or could not answer: an auth outcome, never the token
-        // endpoint's (it never counts against the destination).
-        ConnError::AuthRefused => "the connection's auth refused the request",
-        ConnError::AuthFailed => "the connection's auth failed",
-        // `ConnError` is non-exhaustive: a cause this plugin predates is a failed connection.
+        // A cause this plugin predates is a failed connection. Busbar dev's `ConnError` names every
+        // variant above (the arm is unreachable there); a contract that grows one lands here.
+        #[allow(unreachable_patterns)]
         _ => "connection failed",
     }
 }

@@ -2,8 +2,9 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! `open_outbound`'s body: `jwt-bearer` and `oauth-client-credentials` bind from their settings
-//! ([`open_binding`]). Neither touches the network at open — the first mint runs in the background
-//! on `tick`. Neither serves a caller-credential passthrough mode: an OAuth token is always minted
+//! ([`open_binding`]). Neither touches the network at open — an open wakes the instance's driver
+//! ticket and the first mint runs on the `drive` that wake brings (before the instance's first
+//! `tick`, on that tick). Neither serves a caller-credential passthrough mode: an OAuth token is always minted
 //! from the OPERATOR's own configured credential (a service-account key, a client id/secret), never
 //! from a per-request caller credential, so this mechanism declares no
 //! [`busbar_contract::abi::auth::STYLE_CALLER_CREDENTIAL`] (ARCHITECT ruling 2026-09-29).
@@ -252,7 +253,8 @@ fn open_token_exchange(
 }
 
 /// Bind `style` to `credential` under `settings` — `open_outbound`'s body for a minted style.
-/// Never touches the network: a minted style's first mint runs on `tick`.
+/// Never touches the network: the door wakes the driver ticket and a minted style's first mint runs
+/// on the `drive` that wake brings (before the instance's first `tick`, on that tick).
 ///
 /// # Errors
 ///
