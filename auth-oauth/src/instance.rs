@@ -224,7 +224,8 @@ impl Oauth {
     }
 
     /// `tick` at tick-clock `now_ns` on the driver ticket `ticket`: a new cycle (its handle count
-    /// starts again), the refresh ahead of expiry, the wakes. Answers the next tick; an instance
+    /// carries on: the host may still keep the last cycle's answers), the refresh ahead of expiry,
+    /// the wakes. Answers the next tick; an instance
     /// with no binding yet still asks for one ([`MIN_SLEEP_SECS`] on), never ending its schedule.
     pub(crate) fn tick(
         &self,
@@ -236,7 +237,6 @@ impl Oauth {
         if !ticket.is_none() {
             *lock(&self.driver) = ticket;
         }
-        self.issued.store(0, Ordering::Release);
         self.advance(Some(now_ns), ticket, host, diags)
             .unwrap_or(now_ns.saturating_add(MIN_SLEEP_SECS * crate::mint::NS))
     }
