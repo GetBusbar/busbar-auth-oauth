@@ -10,9 +10,9 @@
 //!
 //! THE REPLAY RULE (`busbar_contract::abi::sdk::conn`): every service carries the next completion
 //! handle of the op's ticket. The exchange runs on the instance's DRIVER ticket, inside `tick` and
-//! the `drive`s between ticks, which are one cycle (a tick's start forgets what the last cycle
-//! kept): the handle count is the instance's, reset at each tick and carried on through each
-//! drive, so no service is ever answered from another's kept result.
+//! the `drive`s between ticks. The host forgets a ticket's kept answers only at a tick that
+//! starts with nothing held, so the handle count is the instance's for the ticket's life, never
+//! reset: no service is ever answered from another's kept result.
 
 use crate::held::Own;
 use std::sync::atomic::{AtomicU32, Ordering};
