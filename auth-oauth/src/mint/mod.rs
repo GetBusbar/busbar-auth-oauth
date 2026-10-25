@@ -483,7 +483,6 @@ impl Minted {
     /// Present the cached token for a request at wall-clock `now` (epoch seconds), through `f`
     /// (so the borrow of the cached value never escapes the read).
     pub(crate) fn read<T>(&self, now: u64, f: impl FnOnce(Read<'_>) -> T) -> T {
-        let tok = self.current();
         // ON DEMAND: a token past its use is not presented; the request arms the next exchange
         // (due at once, when none is in flight) and waits for it.
         if self.on_demand && !self.usable(now) {
@@ -496,6 +495,10 @@ impl Minted {
             }
             return f(Read::Wait);
         }
+        // The snapshot comes AFTER the usable check: `tick` stores the token before it stores
+        // `usable_until`, so a read that finds the cell usable snapshots the stored token, never
+        // an older (empty or expired) one an exchange landing in between has replaced.
+        let tok = self.current();
         // BEFORE THE FIRST MINT a scheduled cell presents nothing: READY with no fields, so the
         // upstream answers 401, as 1.5.5 did (THE DESIGN §11.11; contract `abi/auth` `fields`).
         if tok.token.expose_own(&Own::here()).is_empty() {
