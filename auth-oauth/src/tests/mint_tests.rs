@@ -409,6 +409,23 @@ fn an_expired_token_whose_refresh_failed_answers_wait_until_a_mint_lands() {
     );
 }
 
+/// A reply code too large for 16 bits is not read as another code: 65736 is 200 modulo 65536, but
+/// it is no success, so its (valid-looking) body is not taken as a token.
+#[test]
+fn a_reply_code_past_sixteen_bits_is_a_failure_not_a_token() {
+    let w = Scripted::default();
+    w.push(vec![
+        Step::Head(65736),
+        Step::Body(br#"{"access_token":"t","expires_in":3600}"#.to_vec(), true),
+    ]);
+    let m = Minted::new(client_credentials(), DEFAULT_MAX_RESPONSE_BYTES);
+    let (_, report) = m.tick(0, now_epoch(), Some(&w));
+    assert!(
+        matches!(report, Some(Report::MintFailed(_))),
+        "{report:?}"
+    );
+}
+
 /// Without a granted need nothing mints, and the failure says so once per retry period.
 #[test]
 fn no_granted_need_mints_nothing() {

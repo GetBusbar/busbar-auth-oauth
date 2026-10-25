@@ -623,7 +623,7 @@ impl Minted {
             }
         };
         wire.close(conn);
-        match finished.and_then(|(status, body)| parse_response(status as u16, &body, wall)) {
+        match finished.and_then(|(status, body)| parse_response(u16::try_from(status).unwrap_or(0), &body, wall)) {
             // A 200 with an EMPTY access_token must be treated as a (retryable) failure, not stored:
             // an empty token collides with the pre-first-mint sentinel, so `ready` would stay false
             // forever AND the per-request call would emit no auth header — a permanent wedge with no
