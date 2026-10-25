@@ -429,6 +429,31 @@ fn an_expired_token_whose_refresh_failed_answers_wait_until_a_mint_lands() {
     );
 }
 
+/// A reply code too large for 16 bits is not read as another code: 65736 is 200 modulo 65536, but
+/// it is no success, so its (valid-looking) body is not taken as a token.
+#[test]
+fn a_reply_code_past_sixteen_bits_is_a_failure_not_a_token() {
+    let w = Scripted::default();
+    w.push(vec![
+        Step::Head(65736),
+        Step::Body(br#"{"access_token":"t","expires_in":3600}"#.to_vec(), true),
+    ]);
+    let m = Minted::new(client_credentials(), DEFAULT_MAX_RESPONSE_BYTES);
+    let (_, report) = m.tick(0, now_epoch(), Some(&w));
+    assert!(matches!(report, Some(Report::MintFailed(_))), "{report:?}");
+}
+
+/// THE LOSSY TEXT OF A TOKEN RESPONSE IS BUILT ONCE: a body with bytes that are not UTF-8 becomes
+/// the text `from_utf8_lossy` gives, in a string sized exactly first, so it never grows (a growth
+/// would free an unwiped copy of the access token).
+#[test]
+fn the_lossy_body_is_one_exactly_sized_string() {
+    let raw: &[u8] = b"{\"access_token\":\"a\xffb\xc3\x28c\xe2\x82\",\"x\":\"\xf0\x90\"}";
+    let got = lossy_wiped(raw);
+    assert_eq!(got.as_str(), String::from_utf8_lossy(raw));
+    assert_eq!(got.capacity(), got.len(), "sized once, no growth");
+}
+
 /// Without a granted need nothing mints, and the failure says so once per retry period.
 #[test]
 fn no_granted_need_mints_nothing() {

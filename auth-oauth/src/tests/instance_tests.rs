@@ -414,6 +414,48 @@ fn a_cell_settled_between_the_lookup_and_the_park_is_not_a_lost_wake() {
     );
 }
 
+/// A CANCELLED WAIT LEAVES NO ENTRY: forgetting the last ticket parked on an on-demand cell drops
+/// the cell's waiter entry, so a scope whose cell the cache then drops does not leak an empty list.
+#[test]
+fn forgetting_the_last_waiter_drops_its_exchange_entry() {
+    for via_cancel in [true, false] {
+        let host = TestHost::new();
+        let w = Arc::new(Scripted::default());
+        let o = instance(&w);
+        let h = o.keep_binding(
+            style::open(
+                style::OAUTH_TOKEN_EXCHANGE,
+                Some(b"busbar-own-subject-token".as_slice()),
+                Some(br#"{"token_url":"https://as.example/token","resource":"https://tools.example/rpc"}"#.as_slice()),
+                &o,
+            )
+            .unwrap_or_else(|_| panic!("the binding opens")),
+        );
+        let Some(Binding::Exchange(x)) = o.bound(h) else {
+            panic!("an exchange binding")
+        };
+        let key = x.scope_key(b"s");
+        let call = Ticket {
+            slot: 401,
+            generation: 1,
+        };
+        assert_eq!(
+            test_support::fields(&o, &host, h, call, Some("s")).0,
+            Outcome::Pending
+        );
+        assert!(o.exchange_waiters.lock().unwrap().contains_key(&key));
+        if via_cancel {
+            o.unpark(call);
+        } else {
+            o.unpark_exchange(key, call);
+        }
+        assert!(
+            !o.exchange_waiters.lock().unwrap().contains_key(&key),
+            "no empty entry remains (cancel: {via_cancel})"
+        );
+    }
+}
+
 /// The scripted need on a host whose clock the test sets: wall seconds from `wall`.
 struct HostClocked(Arc<Scripted>, Arc<AtomicU64>);
 

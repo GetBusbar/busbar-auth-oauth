@@ -160,8 +160,12 @@ impl Oauth {
 
     /// Forget `ticket` as waiting on the on-demand cell `key` (its call answered after all).
     pub(crate) fn unpark_exchange(&self, key: [u8; 32], ticket: Ticket) {
-        if let Some(waiting) = lock(&self.exchange_waiters).get_mut(&key) {
+        let mut w = lock(&self.exchange_waiters);
+        if let Some(waiting) = w.get_mut(&key) {
             waiting.retain(|t| *t != ticket);
+            if waiting.is_empty() {
+                w.remove(&key);
+            }
         }
     }
 
@@ -207,9 +211,11 @@ impl Oauth {
     /// `cancel`: forget `ticket`.
     pub(crate) fn unpark(&self, ticket: Ticket) {
         lock(&self.waiters).retain(|t| *t != ticket);
-        for waiting in lock(&self.exchange_waiters).values_mut() {
+        // An emptied list is dropped with its key: no entry outlives the waiters it served.
+        lock(&self.exchange_waiters).retain(|_, waiting| {
             waiting.retain(|t| *t != ticket);
-        }
+            !waiting.is_empty()
+        });
         lock(&self.exchange_failed).retain(|t| *t != ticket);
     }
 
