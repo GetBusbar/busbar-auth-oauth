@@ -579,3 +579,71 @@ fn a_tick_carries_the_handle_count_on() {
     o.tick(1, Ticket::NONE, None, &mut Diags::default());
     assert_eq!(o.issued.load(Ordering::Acquire), 9);
 }
+
+/// A SCHEDULED CELL NO HANDLE HOLDS LEAVES THE CACHE ONCE IDLE: `retire` keeps a cell whose mint is
+/// in flight, and the tick that lands it drops the cell, so a provider a reload removed mid-mint is
+/// never ticked again nor refreshed with its secret.
+#[test]
+fn a_retired_scheduled_cell_kept_for_its_mint_leaves_the_cache_when_it_lands() {
+    let host = TestHost::new();
+    let w = Arc::new(Scripted::default());
+    let o = instance(&w);
+    let _h = open(
+        &o,
+        style::OAUTH_CLIENT_CREDENTIALS,
+        "client-abc:s3cr&t",
+        r#"{"token_url":"https://login.example.com/token","scope":"s"}"#,
+    );
+    w.push(vec![
+        Step::Pending,
+        Step::Head(200),
+        Step::Body(
+            br#"{"access_token":"tok-1","expires_in":3600}"#.to_vec(),
+            true,
+        ),
+    ]);
+    let mut diags = Diags::default();
+    o.tick(1_000, Ticket::NONE, Some(&host.host), &mut diags);
+    assert_eq!(w.sent.lock().unwrap().len(), 1, "the mint is in flight");
+    o.retire(1);
+    assert_eq!(
+        o.cache.lock().unwrap().len(),
+        1,
+        "kept: its mint is in flight"
+    );
+    o.tick(2_000, Ticket::NONE, Some(&host.host), &mut diags);
+    let sent = w.sent.lock().unwrap().len();
+    o.tick(10_000 * NS, Ticket::NONE, Some(&host.host), &mut diags);
+    assert!(o.cache.lock().unwrap().is_empty(), "the idle orphan left");
+    assert_eq!(
+        w.sent.lock().unwrap().len(),
+        sent,
+        "no refresh exchange was opened for the removed provider"
+    );
+}
+
+/// A cell a reload's new handle still holds stays through the old generation's `retire`.
+#[test]
+fn a_retired_generation_leaves_a_cell_the_new_generation_holds() {
+    let host = TestHost::new();
+    let w = Arc::new(Scripted::default());
+    let o = instance(&w);
+    let (cred, settings) = (
+        "client-abc:s3cr&t",
+        r#"{"token_url":"https://login.example.com/token","scope":"s"}"#,
+    );
+    let _h1 = open(&o, style::OAUTH_CLIENT_CREDENTIALS, cred, settings);
+    w.ok(r#"{"access_token":"tok-1","expires_in":3600}"#);
+    let mut diags = Diags::default();
+    o.tick(1_000, Ticket::NONE, Some(&host.host), &mut diags);
+    o.set_generation(2);
+    let h2 = open(&o, style::OAUTH_CLIENT_CREDENTIALS, cred, settings);
+    o.retire(1);
+    o.tick(2_000, Ticket::NONE, Some(&host.host), &mut diags);
+    assert_eq!(
+        fields(&o, &host, h2, Ticket::NONE).1,
+        "authorization: Bearer tok-1"
+    );
+    assert_eq!(w.sent.lock().unwrap().len(), 1, "no new exchange");
+    assert_eq!(o.cache.lock().unwrap().len(), 1, "one cell");
+}
