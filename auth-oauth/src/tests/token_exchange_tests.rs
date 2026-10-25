@@ -198,6 +198,98 @@ fn each_scope_is_its_own_exchange_and_its_own_cached_token() {
     assert_eq!(scopes, ["fs_read_file", "fs_read_file fs_write_file"]);
 }
 
+/// EVERY REFUSAL IS EXPLAINED: the call a failed exchange refuses carries non-empty text (the SDK
+/// passes it as the attempt's failure text), not an empty string.
+#[test]
+fn a_call_refused_for_a_failed_exchange_carries_an_explanation() {
+    let host = TestHost::new();
+    let w = Arc::new(Scripted::default());
+    let o = instance(&w);
+    let h = open(&o);
+    let call = ticket(211);
+    assert_eq!(fields(&o, &host, h, call, Some("s")).0, Outcome::Pending);
+    w.push(vec![
+        Step::Head(401),
+        Step::Body(b"{\"error\":\"invalid_grant\"}".to_vec(), true),
+    ]);
+    o.tick(1_000, Ticket::NONE, Some(&host.host), &mut Diags::default());
+    let ask = crate::Ask {
+        handle: h,
+        own: true,
+        scope: Some(b"s".as_slice()),
+        ticket: call,
+        timestamp: 0,
+    };
+    match o.answer(&ask, Some(&host.host), &mut |_| {}) {
+        std::task::Poll::Ready(busbar_contract::abi::sdk::auth_outbound::FieldsAnswer::Failed(
+            text,
+        )) => assert!(!text.is_empty(), "the refusal is explained"),
+        _ => panic!("the call is refused as failed"),
+    }
+}
+
+/// TWO BINDINGS NEVER SHARE A SCOPE'S TOKEN: two bindings on ONE instance that differ only in the
+/// subject token (the credential) each ask the same scope, and each gets its own exchange, carrying
+/// its own subject token, and its own token. A shared cell would present one binding's token to
+/// the other.
+#[test]
+fn two_bindings_on_one_instance_never_share_a_scopes_token() {
+    let host = TestHost::new();
+    let w = Arc::new(Scripted::default());
+    let o = instance(&w);
+    let h1 = open(&o);
+    let b2 = style::open(
+        style::OAUTH_TOKEN_EXCHANGE,
+        Some(b"another-subject-token".as_slice()),
+        Some(SETTINGS.as_bytes()),
+        &o,
+    )
+    .unwrap_or_else(|_| panic!("the second binding opens"));
+    let h2 = o.keep_binding(b2);
+    let (a, b) = (ticket(201), ticket(202));
+    let mut diags = Diags::default();
+
+    assert_eq!(fields(&o, &host, h1, a, Some("s")).0, Outcome::Pending);
+    w.ok(r#"{"access_token":"tok-one","expires_in":3600}"#);
+    o.tick(1_000, Ticket::NONE, Some(&host.host), &mut diags);
+    assert_eq!(host.take(), vec![a]);
+    assert_eq!(
+        fields(&o, &host, h1, a, Some("s")).1,
+        "authorization: Bearer tok-one"
+    );
+
+    assert_eq!(
+        fields(&o, &host, h2, b, Some("s")).0,
+        Outcome::Pending,
+        "the other binding, same scope: its own exchange, not the first's cached token"
+    );
+    w.ok(r#"{"access_token":"tok-two","expires_in":3600}"#);
+    o.tick(2_000, Ticket::NONE, Some(&host.host), &mut diags);
+    assert_eq!(host.take(), vec![b]);
+    assert_eq!(
+        fields(&o, &host, h2, b, Some("s")).1,
+        "authorization: Bearer tok-two"
+    );
+    assert_eq!(
+        fields(&o, &host, h1, Ticket::NONE, Some("s")).1,
+        "authorization: Bearer tok-one"
+    );
+    let subjects: Vec<String> = w
+        .sent
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(_, _, body)| {
+            form(body)
+                .into_iter()
+                .find(|(k, _)| k == "subject_token")
+                .map(|(_, v)| v)
+                .unwrap_or_default()
+        })
+        .collect();
+    assert_eq!(subjects, [SUBJECT, "another-subject-token"]);
+}
+
 /// A FAILED EXCHANGE FAILS ITS CALLS: the authorization server's refusal wakes every call that
 /// waited on it, and each answers FAILED (the attempt fails; nothing unauthenticated is sent), the
 /// instance's log naming why; the scope's next call arms a fresh exchange rather than inheriting

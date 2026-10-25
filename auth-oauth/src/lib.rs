@@ -62,6 +62,10 @@ mod token_response;
 #[path = "tests/support.rs"]
 mod test_support;
 
+#[cfg(test)]
+#[path = "tests/lib_tests.rs"]
+mod tests;
+
 use std::borrow::Cow;
 use std::ptr;
 use std::task::Poll;
@@ -252,7 +256,10 @@ impl Oauth {
         };
         let ticket = ask.ticket;
         if !ticket.is_none() && self.exchange_failed(ticket) {
-            return Poll::Ready(FieldsAnswer::Failed(Cow::Borrowed("")));
+            return Poll::Ready(FieldsAnswer::Failed(Cow::Borrowed(
+                "the RFC 8693 token exchange for this call's scope failed; the call is refused \
+                 rather than made unauthenticated (see diagnostics BUSBAR-4014/4015/4016)",
+            )));
         }
         let scope = ask.scope.unwrap_or_default();
         let key = x.scope_key(scope);

@@ -198,6 +198,28 @@ fn token_response_tolerates_expires_in_as_number_string_or_absent() {
     }
 }
 
+/// `expires_in` that is not a non-negative finite number is a mint failure, never a token: a
+/// negative number, a NaN or infinite string and a non-numeric string are each refused.
+#[test]
+fn token_response_refuses_an_expires_in_that_is_not_a_non_negative_number() {
+    for body in [
+        r#"{"access_token":"a","expires_in":-5}"#,
+        r#"{"access_token":"a","expires_in":-1.5}"#,
+        r#"{"access_token":"a","expires_in":"-5"}"#,
+        r#"{"access_token":"a","expires_in":"NaN"}"#,
+        r#"{"access_token":"a","expires_in":"inf"}"#,
+        r#"{"access_token":"a","expires_in":"soon"}"#,
+    ] {
+        let e = parse_response(200, body.as_bytes(), 0)
+            .err()
+            .unwrap_or_else(|| panic!("{body} minted a token"));
+        assert!(
+            e.starts_with("token response JSON invalid: "),
+            "{body}: {e}"
+        );
+    }
+}
+
 /// THE ACCESS TOKEN IS UNESCAPED BY THE PLUGIN, NEVER BY THE JSON DECODER (THE DESIGN §6: "auth
 /// material is zeroised"): `serde_json` unescapes a string that carries an escape into a scratch
 /// buffer of its own that it frees unwiped, so the decode skips the token (its field is
@@ -272,6 +294,26 @@ fn the_first_tick_mints_and_the_request_path_presents_it() {
     );
 }
 
+/// A token endpoint's `expires_in` is untrusted: one so large that `ahead * NS` would overflow
+/// u64 schedules the refresh at the far end of the clock, never a wrapped (arbitrary) instant.
+#[test]
+fn a_huge_expires_in_schedules_no_overflowed_refresh() {
+    let w = Scripted::default();
+    w.ok(r#"{"access_token":"tok","expires_in":100000000000}"#);
+    let m = Minted::new(client_credentials(), DEFAULT_MAX_RESPONSE_BYTES);
+    let (due, report) = m.tick(1_000, now_epoch(), Some(&w));
+    assert_eq!(report, Some(Report::Minted));
+    assert_eq!(
+        m.read(now_epoch(), |r| format!("{r:?}")),
+        "Header(\"Bearer tok\")"
+    );
+    assert_eq!(
+        due,
+        u64::MAX,
+        "the refresh is effectively never, not a wrapped instant"
+    );
+}
+
 /// A read with nothing ready leaves the exchange in flight; the next tick finishes it.
 #[test]
 fn a_pending_read_is_finished_on_a_later_tick() {
@@ -338,6 +380,25 @@ fn a_dropped_or_refused_exchange_is_a_failure() {
             "token endpoint request failed: refused".to_string()
         ))
     );
+}
+
+/// A CLOSE-DELIMITED RESPONSE: a head, a complete token body, then the connection closing (no end
+/// marker) is the whole response, and mints the token.
+#[test]
+fn a_close_after_a_complete_body_mints_the_token() {
+    let w = Scripted::default();
+    w.push(vec![
+        Step::Head(200),
+        Step::Body(
+            br#"{"access_token":"closed-tok","expires_in":3600}"#.to_vec(),
+            false,
+        ),
+        Step::Fail(ConnError::Closed),
+    ]);
+    let m = Minted::new(client_credentials(), DEFAULT_MAX_RESPONSE_BYTES);
+    let (_, report) = m.tick(0, now_epoch(), Some(&w));
+    assert_eq!(report, Some(Report::Minted));
+    assert!(m.is_ready());
 }
 
 /// An exchange still unread at the mint deadline is abandoned in 1.5.5's words.
@@ -407,6 +468,31 @@ fn an_expired_token_whose_refresh_failed_answers_wait_until_a_mint_lands() {
         m.read(later, |r| format!("{r:?}")),
         "Header(\"Bearer new\")"
     );
+}
+
+/// A reply code too large for 16 bits is not read as another code: 65736 is 200 modulo 65536, but
+/// it is no success, so its (valid-looking) body is not taken as a token.
+#[test]
+fn a_reply_code_past_sixteen_bits_is_a_failure_not_a_token() {
+    let w = Scripted::default();
+    w.push(vec![
+        Step::Head(65736),
+        Step::Body(br#"{"access_token":"t","expires_in":3600}"#.to_vec(), true),
+    ]);
+    let m = Minted::new(client_credentials(), DEFAULT_MAX_RESPONSE_BYTES);
+    let (_, report) = m.tick(0, now_epoch(), Some(&w));
+    assert!(matches!(report, Some(Report::MintFailed(_))), "{report:?}");
+}
+
+/// THE LOSSY TEXT OF A TOKEN RESPONSE IS BUILT ONCE: a body with bytes that are not UTF-8 becomes
+/// the text `from_utf8_lossy` gives, in a string sized exactly first, so it never grows (a growth
+/// would free an unwiped copy of the access token).
+#[test]
+fn the_lossy_body_is_one_exactly_sized_string() {
+    let raw: &[u8] = b"{\"access_token\":\"a\xffb\xc3\x28c\xe2\x82\",\"x\":\"\xf0\x90\"}";
+    let got = lossy_wiped(raw);
+    assert_eq!(got.as_str(), String::from_utf8_lossy(raw));
+    assert_eq!(got.capacity(), got.len(), "sized once, no growth");
 }
 
 /// Without a granted need nothing mints, and the failure says so once per retry period.
@@ -494,4 +580,54 @@ fn an_exchange_in_flight_reserves_no_buffer_the_size_of_the_cap() {
     w.ok(r#"{"access_token":"t","expires_in":3600}"#);
     let m = Minted::new(client_credentials(), usize::MAX);
     assert_eq!(m.tick(0, now_epoch(), Some(&w)).1, Some(Report::Minted));
+}
+
+/// AN ON-DEMAND READ NEVER PRESENTS A TOKEN SNAPSHOTTED BEFORE THE EXCHANGE LANDED: a read racing
+/// the tick that stores the token either waits or presents the new token. It never answers
+/// `Nothing` (an unauthenticated token-exchange call) for a cell whose exchange succeeds.
+/// A bounded stress run: the interleaving cannot be forced without a production hook.
+#[test]
+fn an_on_demand_read_racing_the_exchange_never_presents_nothing() {
+    use std::sync::atomic::{AtomicBool, AtomicU64};
+    let exchange = Arc::new(token_exchange::build(
+        "subject",
+        "https://as.example/token",
+        token_exchange::ACCESS_TOKEN_TYPE,
+        "https://tools.example/rpc",
+    ));
+    const READERS: usize = 6;
+    let nothing = AtomicU64::new(0);
+    for _ in 0..30_000 {
+        let w = Scripted::default();
+        w.ok(r#"{"access_token":"tok-x","expires_in":3600}"#);
+        let m = Minted::new(
+            Minter::TokenExchange(token_exchange::Scoped::new(exchange.clone(), "s")),
+            DEFAULT_MAX_RESPONSE_BYTES,
+        );
+        let stop = AtomicBool::new(false);
+        let spinning = std::sync::atomic::AtomicUsize::new(0);
+        std::thread::scope(|s| {
+            for _ in 0..READERS {
+                s.spawn(|| {
+                    spinning.fetch_add(1, Ordering::AcqRel);
+                    while !stop.load(Ordering::Acquire) {
+                        if m.read(now_epoch(), |r| matches!(r, Read::Nothing)) {
+                            nothing.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                });
+            }
+            while spinning.load(Ordering::Acquire) < READERS {
+                std::hint::spin_loop();
+            }
+            let (_, report) = m.tick(1_000, now_epoch(), Some(&w));
+            assert_eq!(report, Some(Report::Minted));
+            stop.store(true, Ordering::Release);
+        });
+    }
+    assert_eq!(
+        nothing.load(Ordering::Relaxed),
+        0,
+        "an on-demand read presented no authorization while its exchange landed"
+    );
 }
