@@ -308,8 +308,22 @@ fn lossy_wiped(b: &[u8]) -> Zeroizing<String> {
     out
 }
 
-/// Parse a finished token response: a non-2xx status is the endpoint's refusal, named with a short
-/// snippet of its body; otherwise the JSON token. Verbatim from the two mint bodies.
+/// The RFC 6749 section 5.2 `error` code of a JSON error body: a string member of at most 64 chars
+/// from `%x20-21 / %x23-5B / %x5D-7E`; `None` for anything else (never other body text).
+fn oauth_error_code(body: &str) -> Option<Zeroizing<String>> {
+    // Well-formed only (`IgnoredAny` copies nothing); `wiped_member` answers none unless the
+    // top level is an object holding a string `error`.
+    serde_json::from_str::<serde::de::IgnoredAny>(body).ok()?;
+    let code = crate::token_response::wiped_member(body, b"error")?;
+    let ok = code.len() <= 64
+        && code
+            .bytes()
+            .all(|b| matches!(b, 0x20..=0x21 | 0x23..=0x5B | 0x5D..=0x7E));
+    ok.then_some(code)
+}
+
+/// Parse a finished token response: a non-2xx status is the endpoint's refusal, named with its
+/// status and error code only; otherwise the JSON token. Verbatim from the two mint bodies.
 pub(crate) fn parse_response(
     status: u16,
     body: &[u8],
@@ -318,15 +332,16 @@ pub(crate) fn parse_response(
     // The body carries the access token: a lossy copy (bytes that are not UTF-8) is wiped too.
     let body = lossy_wiped(body);
     if !(200..300).contains(&status) {
-        // Never log the request/assertion wholesale (may echo claims or the client secret); status +
-        // a short snippet only. Diagnostic-only: the request has already failed on `status`.
+        // Never put body text in the error: a server may reflect the request (client secret,
+        // assertion) and the error reaches the diag channel. Status plus the RFC 6749 section 5.2
+        // `error` code, only when the body proves it is one.
         let status = http::StatusCode::from_u16(status)
             .map(|s| s.to_string())
             .unwrap_or_else(|_| status.to_string());
-        return Err(format!(
-            "token endpoint returned {status}: {}",
-            body.chars().take(200).collect::<String>()
-        ));
+        return Err(match oauth_error_code(&body) {
+            Some(code) => format!("token endpoint returned {status}: {}", code.as_str()),
+            None => format!("token endpoint returned {status}"),
+        });
     }
     // A decode failure is described without the decoder's text, which can quote the token.
     let tok: TokenResponse =

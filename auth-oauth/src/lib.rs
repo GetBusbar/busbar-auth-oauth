@@ -195,7 +195,7 @@ fn judged(settings: &[u8]) -> Result<(), Refusal> {
     if settings_ok(settings) {
         Ok(())
     } else {
-        Err(Refusal::refused(SETTINGS_NOT_OBJECT))
+        Err(Refusal::failed(SETTINGS_NOT_OBJECT))
     }
 }
 

@@ -29,3 +29,20 @@ fn the_diag_indices_are_the_table_positions() {
     assert_eq!(diag::OAUTH_EMPTY_TOKEN, 1);
     assert_eq!(diag::OAUTH_MINT_FAILED, 2);
 }
+
+/// Settings that are not a JSON object are FAILED (the contract's settings refusal), never
+/// REFUSED, at validate, open and refresh alike.
+#[test]
+fn bad_settings_answer_failed_at_validate_open_and_refresh() {
+    use busbar_contract::abi::mechanism::call::Outcome;
+    let r = Oauth::validate(b"[]").unwrap_err();
+    assert_eq!(r.outcome(), Outcome::Failed);
+    assert!(r.text().is_some_and(|t| t.contains("JSON object")));
+    let r = <Oauth as OutboundPlugin>::open(b"[]", &[], 1)
+        .err()
+        .unwrap();
+    assert_eq!(r.outcome(), Outcome::Failed);
+    let o = Oauth::new(1);
+    let r = o.refresh(b"[]", &[], 2).unwrap_err();
+    assert_eq!(r.outcome(), Outcome::Failed);
+}
