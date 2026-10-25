@@ -495,3 +495,53 @@ fn an_exchange_in_flight_reserves_no_buffer_the_size_of_the_cap() {
     let m = Minted::new(client_credentials(), usize::MAX);
     assert_eq!(m.tick(0, now_epoch(), Some(&w)).1, Some(Report::Minted));
 }
+
+/// AN ON-DEMAND READ NEVER PRESENTS A TOKEN SNAPSHOTTED BEFORE THE EXCHANGE LANDED: a read racing
+/// the tick that stores the token either waits or presents the new token. It never answers
+/// `Nothing` (an unauthenticated token-exchange call) for a cell whose exchange succeeds.
+/// A bounded stress run: the interleaving cannot be forced without a production hook.
+#[test]
+fn an_on_demand_read_racing_the_exchange_never_presents_nothing() {
+    use std::sync::atomic::{AtomicBool, AtomicU64};
+    let exchange = Arc::new(token_exchange::build(
+        "subject",
+        "https://as.example/token",
+        token_exchange::ACCESS_TOKEN_TYPE,
+        "https://tools.example/rpc",
+    ));
+    const READERS: usize = 6;
+    let nothing = AtomicU64::new(0);
+    for _ in 0..30_000 {
+        let w = Scripted::default();
+        w.ok(r#"{"access_token":"tok-x","expires_in":3600}"#);
+        let m = Minted::new(
+            Minter::TokenExchange(token_exchange::Scoped::new(exchange.clone(), "s")),
+            DEFAULT_MAX_RESPONSE_BYTES,
+        );
+        let stop = AtomicBool::new(false);
+        let spinning = std::sync::atomic::AtomicUsize::new(0);
+        std::thread::scope(|s| {
+            for _ in 0..READERS {
+                s.spawn(|| {
+                    spinning.fetch_add(1, Ordering::AcqRel);
+                    while !stop.load(Ordering::Acquire) {
+                        if m.read(now_epoch(), |r| matches!(r, Read::Nothing)) {
+                            nothing.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                });
+            }
+            while spinning.load(Ordering::Acquire) < READERS {
+                std::hint::spin_loop();
+            }
+            let (_, report) = m.tick(1_000, now_epoch(), Some(&w));
+            assert_eq!(report, Some(Report::Minted));
+            stop.store(true, Ordering::Release);
+        });
+    }
+    assert_eq!(
+        nothing.load(Ordering::Relaxed),
+        0,
+        "an on-demand read presented no authorization while its exchange landed"
+    );
+}
