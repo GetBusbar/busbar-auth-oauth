@@ -6,7 +6,8 @@
 //! tests), and the tick-driven exchange with THE EXPIRED-TOKEN RULE.
 
 use super::*;
-use crate::held::Own;
+use busbar_contract::abi::sdk::cred::FormBody;
+use busbar_contract::abi::sdk::test_support::chip::cred;
 use std::collections::VecDeque;
 
 /// One scripted read.
@@ -69,7 +70,7 @@ impl Wire for Scripted {
                 .iter()
                 .map(|(k, v)| (k.to_string(), v.to_string()))
                 .collect(),
-            req.body.expose_own(&Own::here()).clone(),
+            form_text(&req.body),
         ));
         let next = self
             .scripts
@@ -145,22 +146,22 @@ fn next_refresh_never_sleeps_past_a_live_token_expiry() {
 
 #[test]
 fn a_cached_token_is_redacted_in_debug() {
-    let (t, invalid) = CachedToken::new(Secret::held("super-secret-token".to_string()), 5);
+    let (t, invalid) = CachedToken::new(cred("super-secret-token"), 5);
     assert!(!invalid);
     assert!(!format!("{t:?}").contains("super-secret-token"));
 }
 
 #[test]
 fn a_cached_token_omits_the_header_for_bytes_invalid_in_a_header_value() {
-    let (t, invalid) = CachedToken::new(Secret::held("tok\r\nen".to_string()), 5);
+    let (t, invalid) = CachedToken::new(cred("tok\r\nen"), 5);
     assert!(invalid);
-    assert_eq!(t.header(), None);
-    let (t, invalid) = CachedToken::new(Secret::held(String::new()), 0);
+    assert!(t.header().is_none());
+    let (t, invalid) = CachedToken::new(cred(""), 0);
     assert!(
         !invalid,
         "the pre-first-mint sentinel is not a reportable token"
     );
-    assert_eq!(t.header(), None);
+    assert!(t.header().is_none());
 }
 
 /// The texts a failed exchange names: the status line plus, only when the body is JSON with an
@@ -189,7 +190,7 @@ fn a_refused_or_malformed_response_is_named_in_1_5_5_words() {
     assert!(e.starts_with("token response JSON invalid: "), "{e}");
     let (t, _) = parse_response(200, br#"{"access_token":"a","expires_in":"7200"}"#, 10).unwrap();
     assert_eq!(t.expires_at, 7210);
-    assert_eq!(t.header(), Some("Bearer a"));
+    assert_eq!(t.header().map(bearer_text).as_deref(), Some("Bearer a"));
 }
 
 /// `expires_in` tolerates a number, a numeric string, a float, a decimal string and absence.
@@ -257,7 +258,10 @@ fn an_escaped_access_token_is_read_into_one_wiped_buffer_never_by_the_decoder() 
     );
     let (t, invalid) = parse_response(200, body.as_bytes(), 0).expect("a minted token");
     assert!(!invalid);
-    assert_eq!(t.header(), Some("Bearer ya29.a/bAc"));
+    assert_eq!(
+        t.header().map(bearer_text).as_deref(),
+        Some("Bearer ya29.a/bAc")
+    );
     assert_eq!(t.expires_at, 60);
     // A nested `access_token` is not the response's.
     let nested = r#"{"x":{"access_token":"no"},"l":["access_token"],"access_token":"yes\n"}"#;
@@ -282,17 +286,14 @@ fn the_first_tick_mints_and_the_request_path_presents_it() {
     let m = Minted::new(client_credentials(), DEFAULT_MAX_RESPONSE_BYTES);
     assert!(!m.is_ready());
     assert_eq!(
-        m.read(now_epoch(), |r| format!("{r:?}")),
+        m.read(now_epoch(), shown),
         "Nothing",
         "nothing minted yet: READY with no fields (the upstream answers 401, as in 1.5.5)"
     );
     let (due, report) = m.tick(1_000, now_epoch(), Some(&w));
     assert_eq!(report, Some(Report::Minted));
     assert!(m.is_ready());
-    assert_eq!(
-        m.read(now_epoch(), |r| format!("{r:?}")),
-        "Header(\"Bearer tok-1\")"
-    );
+    assert_eq!(m.read(now_epoch(), shown), "Header(\"Bearer tok-1\")");
     assert_eq!(due, 1_000 + (3600 - REFRESH_SKEW_SECS) * S);
     assert_eq!(*w.closed.lock().unwrap(), 1);
     let sent = w.sent.lock().unwrap();
@@ -312,10 +313,7 @@ fn a_huge_expires_in_schedules_no_overflowed_refresh() {
     let m = Minted::new(client_credentials(), DEFAULT_MAX_RESPONSE_BYTES);
     let (due, report) = m.tick(1_000, now_epoch(), Some(&w));
     assert_eq!(report, Some(Report::Minted));
-    assert_eq!(
-        m.read(now_epoch(), |r| format!("{r:?}")),
-        "Header(\"Bearer tok\")"
-    );
+    assert_eq!(m.read(now_epoch(), shown), "Header(\"Bearer tok\")");
     assert_eq!(
         due,
         u64::MAX,
@@ -453,7 +451,7 @@ fn an_expired_token_whose_refresh_failed_answers_wait_until_a_mint_lands() {
     let (due, _) = m.tick(0, now_epoch(), Some(&w));
     let later = now_epoch() + 3600;
     assert_eq!(
-        m.read(later, |r| format!("{r:?}")),
+        m.read(later, shown),
         "Header(\"Bearer old\")",
         "expired, refresh not failed: the current token"
     );
@@ -465,18 +463,15 @@ fn an_expired_token_whose_refresh_failed_answers_wait_until_a_mint_lands() {
             "token endpoint returned 500 Internal Server Error".to_string()
         ))
     );
-    assert_eq!(m.read(later, |r| format!("{r:?}")), "Wait");
+    assert_eq!(m.read(later, shown), "Wait");
     assert_eq!(
-        m.read(now_epoch(), |r| format!("{r:?}")),
+        m.read(now_epoch(), shown),
         "Header(\"Bearer old\")",
         "not yet expired: served even while refreshes fail"
     );
     w.ok(r#"{"access_token":"new","expires_in":3600}"#);
     assert_eq!(m.tick(due, now_epoch(), Some(&w)).1, Some(Report::Minted));
-    assert_eq!(
-        m.read(later, |r| format!("{r:?}")),
-        "Header(\"Bearer new\")"
-    );
+    assert_eq!(m.read(later, shown), "Header(\"Bearer new\")");
 }
 
 /// A reply code too large for 16 bits is not read as another code: 65736 is 200 modulo 65536, but
@@ -546,15 +541,14 @@ fn the_form_is_serde_urlencoded_byte_for_byte_and_built_once() {
         ("scope", "https://cognitiveservices.azure.com/.default a b"),
         ("empty", ""),
     ];
-    let held: Secret<String, Own> = form(&pairs);
+    let body = FormBody::new()
+        .public(pairs[0].0, pairs[0].1)
+        .sealed(pairs[1].0, &cred(pairs[1].1))
+        .public(pairs[2].0, pairs[2].1)
+        .public(pairs[3].0, pairs[3].1);
     assert_eq!(
-        held.expose_own(&Own::here()),
-        &serde_urlencoded::to_string(pairs).expect("a form")
-    );
-    assert_eq!(
-        held.expose_own(&Own::here()).capacity(),
-        held.expose_own(&Own::here()).len(),
-        "sized once"
+        form_text(&body),
+        serde_urlencoded::to_string(pairs).expect("a form")
     );
 }
 
@@ -639,4 +633,20 @@ fn an_on_demand_read_racing_the_exchange_never_presents_nothing() {
         0,
         "an on-demand read presented no authorization while its exchange landed"
     );
+}
+
+/// The `Bearer` value the chip presents for `token`, read back through the dev-only test support.
+fn bearer_text(token: &busbar_contract::abi::sdk::cred::Cred) -> String {
+    String::from_utf8(busbar_contract::abi::sdk::test_support::chip::sealed_bytes(
+        &token.bearer(),
+    ))
+    .expect("text")
+}
+
+/// A read as the tests name it: a header by the `Bearer` value the chip presents.
+fn shown(r: Read<'_>) -> String {
+    match r {
+        Read::Header(c) => format!("Header({:?})", bearer_text(c)),
+        other => format!("{other:?}"),
+    }
 }

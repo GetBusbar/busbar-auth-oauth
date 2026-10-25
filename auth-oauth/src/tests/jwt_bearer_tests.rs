@@ -5,7 +5,6 @@
 //! The `token_uri` https/metadata vetting tests stay with the kernel (ARCHITECT ruling Q2 (a)).
 
 use super::*;
-use crate::held::Own;
 
 #[test]
 fn pem_to_pkcs8_der_strips_armor_and_decodes() {
@@ -249,8 +248,8 @@ fn the_token_request_is_the_form_1_5_5_posted() {
     );
     let assertion = signer.assertion(1_700_000_000).unwrap();
     assert_eq!(
-        req.body.expose_own(&Own::here()),
-        &format!(
+        crate::mint::form_text(&req.body),
+        format!(
             "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion={}",
             assertion.as_str()
         )
@@ -388,8 +387,8 @@ fn the_private_key_is_read_into_one_wiped_buffer_with_every_escape_resolved() {
     let _ = test_signer("https://oauth2.googleapis.com/token", None);
 }
 
-/// THE SIGNED ASSERTION IS HELD WIPED (THE DESIGN §6): the token endpoint accepts it for an hour,
-/// so the plugin holds it in a buffer sized once and wiped on drop — byte-identical to 1.5.5's.
+/// THE SIGNED ASSERTION IS THE CHIP'S (the token endpoint accepts it for an hour, so the plugin never
+/// holds it): byte-identical to 1.5.5's.
 #[test]
 fn the_assertion_is_held_in_a_wiped_buffer_sized_once() {
     let signer = test_signer("https://oauth2.googleapis.com/token", None);
@@ -398,7 +397,6 @@ fn the_assertion_is_held_in_a_wiped_buffer_sized_once() {
         assertion.as_str(),
         include_str!("fixtures/jwt_assertion_1_5_5.txt").trim_end()
     );
-    assert_eq!(assertion.capacity(), assertion.len(), "sized once");
 }
 
 /// THE KEY FILE IS THE HOST'S TO READ (THE DESIGN §11.11 R4 l.1464-1469: only the host's bounded

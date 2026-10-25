@@ -28,12 +28,10 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use busbar_contract::conn::{ConnError, ConnId, PieceKind};
-use zeroize::{Zeroize, Zeroizing};
+use zeroize::Zeroizing;
 
-use crate::held::Own;
-use crate::held::Secret;
 use crate::token_response::{default_expires_in, deserialize_expires_in, json_err, wiped_member};
-use busbar_contract::header::{is_legal_header_value, token_value};
+use busbar_contract::abi::sdk::cred::{Cred, FormBody};
 
 /// Refresh this many seconds BEFORE the token's stated expiry, so a request never races an expired
 /// token across the refresh boundary.
@@ -84,8 +82,8 @@ pub(crate) struct TokenRequest {
     pub target: String,
     /// The head fields, in order.
     pub fields: Vec<(&'static str, &'static str)>,
-    /// The form body.
-    pub body: Secret<String, Own>,
+    /// The form body (its credential values the chip's).
+    pub body: FormBody,
 }
 
 impl TokenRequest {
@@ -93,7 +91,7 @@ impl TokenRequest {
     /// order: the form's `content-type`, then reqwest's client-default `accept: */*`, which the
     /// request carries itself (the http door writes no field the caller did not: transport
     /// neutrality, SEAM-4i).
-    pub(crate) fn form(need: u32, target: String, body: Secret<String, Own>) -> Self {
+    pub(crate) fn form(need: u32, target: String, body: FormBody) -> Self {
         Self {
             need,
             target,
@@ -104,57 +102,6 @@ impl TokenRequest {
             body,
         }
     }
-}
-
-/// Whether `b` is written as itself in an `application/x-www-form-urlencoded` value (the WHATWG
-/// byte serializer `serde_urlencoded` writes with: ASCII alphanumerics and `*-._`).
-const fn form_kept(b: u8) -> bool {
-    b.is_ascii_alphanumeric() || matches!(b, b'*' | b'-' | b'.' | b'_')
-}
-
-/// How many bytes `v` takes form-encoded.
-fn form_len(v: &str) -> usize {
-    v.bytes()
-        .map(|b| if form_kept(b) || b == b' ' { 1 } else { 3 })
-        .sum()
-}
-
-/// THE TOKEN REQUEST FORM: `pairs` as `name=value&...`, byte for byte what
-/// `serde_urlencoded::to_string` wrote for them (space as `+`, every byte but ASCII alphanumerics
-/// and `*-._` as an upper-case `%XX`), built in ONE buffer sized to the exact length first, so no
-/// growth frees a partial copy of the credential the form carries; held wiped on drop (THE DESIGN
-/// §6: "auth material is zeroised").
-pub(crate) fn form(pairs: &[(&str, &str)]) -> Secret<String, Own> {
-    const HEX: &[u8; 16] = b"0123456789ABCDEF";
-    let len = pairs
-        .iter()
-        .map(|(n, v)| form_len(n) + 1 + form_len(v))
-        .sum::<usize>()
-        + pairs.len().saturating_sub(1);
-    let mut out = String::with_capacity(len);
-    for (i, (name, value)) in pairs.iter().enumerate() {
-        if i > 0 {
-            out.push('&');
-        }
-        for (j, part) in [name, value].into_iter().enumerate() {
-            if j == 1 {
-                out.push('=');
-            }
-            for b in part.bytes() {
-                if form_kept(b) {
-                    out.push(char::from(b));
-                } else if b == b' ' {
-                    out.push('+');
-                } else {
-                    out.push('%');
-                    out.push(char::from(HEX[usize::from(b >> 4)]));
-                    out.push(char::from(HEX[usize::from(b & 0x0f)]));
-                }
-            }
-        }
-    }
-    debug_assert_eq!(out.len(), len, "the form is sized once");
-    Secret::held(out)
 }
 
 /// A style that mints: how it builds its token request.
@@ -178,21 +125,29 @@ impl Minter {
     }
 }
 
+/// The form as the wire carries it (tests read it through the dev-only test support).
+#[cfg(test)]
+pub(crate) fn form_text(body: &FormBody) -> String {
+    String::from_utf8(busbar_contract::abi::sdk::test_support::chip::form_bytes(
+        body,
+    ))
+    .expect("a form is text")
+}
+
 /// A minted access token and the wall-clock epoch second it expires at.
 pub(crate) struct CachedToken {
-    /// The minted bearer, held redacted so it never leaks via `Debug`/logs and zeroizes on drop.
-    pub(crate) token: Secret<String, Own>,
+    /// The minted bearer, held by the chip.
+    pub(crate) token: Cred,
     pub(crate) expires_at: u64,
-    /// The `Bearer <token>` value, pre-built ONCE here (at mint time) rather than on every request.
-    /// `None` when `token` is empty (the pre-first-mint sentinel) or contains bytes invalid for an
-    /// header value — both cases mean "emit no auth header".
-    header: Option<Secret<String, Own>>,
+    /// Whether the `Bearer <token>` value is presented: not when `token` is empty (the pre-first-mint
+    /// sentinel) or contains bytes invalid for a header value — both mean "emit no auth header".
+    header: bool,
 }
 
 impl std::fmt::Debug for CachedToken {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CachedToken")
-            .field("token", &self.token)
+            .field("token", &"[REDACTED]")
             .field("expires_at", &self.expires_at)
             .finish_non_exhaustive()
     }
@@ -203,17 +158,13 @@ impl CachedToken {
     /// token was omitted for bytes invalid in a header value (the caller reports it). The token
     /// arrives already `Secret<_, Own>` (a response's token is read into a wiped buffer and moved
     /// into one, [`access_token`]); the header build below is its one exposure.
-    pub(crate) fn new(token: Secret<String, Own>, expires_at: u64) -> (Self, bool) {
-        let (header, invalid) = if token.expose_own(&Own::here()).is_empty() {
-            (None, false)
+    pub(crate) fn new(token: Cred, expires_at: u64) -> (Self, bool) {
+        let (header, invalid) = if token.is_empty() {
+            (false, false)
+        } else if token.is_field_value() {
+            (true, false)
         } else {
-            let mut v = token_value(token.expose_own(&Own::here()));
-            if is_legal_header_value(&v) {
-                (Some(Secret::held(v)), false)
-            } else {
-                v.zeroize();
-                (None, true)
-            }
+            (false, true)
         };
         (
             Self {
@@ -225,11 +176,9 @@ impl CachedToken {
         )
     }
 
-    /// The header value, when there is one to present.
-    pub(crate) fn header(&self) -> Option<&str> {
-        self.header
-            .as_ref()
-            .map(|h| h.expose_own(&Own::here()).as_str())
+    /// The bearer to present (`Bearer <token>`, the chip's), when there is one.
+    pub(crate) fn header(&self) -> Option<&Cred> {
+        self.header.then_some(&self.token)
     }
 }
 
@@ -348,7 +297,7 @@ pub(crate) fn parse_response(
         serde_json::from_str(&body).map_err(json_err("token response JSON invalid"))?;
     // The token's buffer moves into the held secret whole (no copy): the emptied wrapper drops.
     let mut read = access_token(&body)?;
-    let token = Secret::held(std::mem::take(&mut *read));
+    let token = Cred::captured(Zeroizing::new(std::mem::take(&mut *read).into_bytes()));
     Ok(CachedToken::new(
         token,
         // saturating_add: `expires_in` is attacker-influenced (comes off the token endpoint), so a
@@ -425,15 +374,25 @@ pub(crate) enum Report {
 }
 
 /// The answer the per-request call reads.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(PartialEq, Eq)]
 pub(crate) enum Read<'a> {
-    /// Present this header value (`Bearer <token>`).
-    Header(&'a str),
+    /// Present this bearer (`Bearer <token>`, the chip's).
+    Header(&'a Cred),
     /// No header (before the first mint, or an un-encodable token): the upstream answers 401.
     Nothing,
     /// Not ready: the token has expired and its refresh failed (Q-EXPIRED), or an on-demand
     /// exchange is due.
     Wait,
+}
+
+impl std::fmt::Debug for Read<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Header(_) => f.write_str("Header([REDACTED])"),
+            Self::Nothing => f.write_str("Nothing"),
+            Self::Wait => f.write_str("Wait"),
+        }
+    }
 }
 
 /// ONE BINDING'S TOKEN: keyed by (style, credential, settings) in the instance's cache, so it
@@ -460,7 +419,7 @@ impl Minted {
             on_demand: matches!(minter, Minter::TokenExchange(_)),
             minter,
             max_response_bytes,
-            token: RwLock::new(Arc::new(CachedToken::new(Secret::held(String::new()), 0).0)),
+            token: RwLock::new(Arc::new(CachedToken::new(Cred::empty(), 0).0)),
             exchange: Mutex::new(Exchange::Idle { due_ns: 0 }),
             refresh_failed: AtomicBool::new(false),
             usable_until: AtomicU64::new(0),
@@ -497,7 +456,7 @@ impl Minted {
 
     /// Whether the first mint has populated a non-empty token.
     pub(crate) fn is_ready(&self) -> bool {
-        !self.current().token.expose_own(&Own::here()).is_empty()
+        !self.current().token.is_empty()
     }
 
     /// THE `ready` FACT at wall-clock `now` (epoch seconds), by the rule [`Minted::read`] applies:
@@ -533,7 +492,7 @@ impl Minted {
         let tok = self.current();
         // BEFORE THE FIRST MINT a scheduled cell presents nothing: READY with no fields, so the
         // upstream answers 401, as 1.5.5 did (THE DESIGN §11.11; contract `abi/auth` `fields`).
-        if tok.token.expose_own(&Own::here()).is_empty() {
+        if tok.token.is_empty() {
             return f(Read::Nothing);
         }
         if now >= tok.expires_at && self.refresh_failed.load(Ordering::Acquire) {
@@ -665,7 +624,7 @@ impl Minted {
             // an empty token collides with the pre-first-mint sentinel, so `ready` would stay false
             // forever AND the per-request call would emit no auth header — a permanent wedge with no
             // self-healing. Retry at MIN_SLEEP instead, exactly like a mint error.
-            Ok((fresh, _)) if fresh.token.expose_own(&Own::here()).is_empty() => {
+            Ok((fresh, _)) if fresh.token.is_empty() => {
                 self.refresh_failed.store(true, Ordering::Release);
                 let due = if self.on_demand {
                     u64::MAX

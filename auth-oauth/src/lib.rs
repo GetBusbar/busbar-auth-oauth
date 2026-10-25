@@ -52,7 +52,6 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
-mod held;
 mod instance;
 mod mint;
 mod style;
@@ -83,6 +82,7 @@ use busbar_contract::abi::sdk::auth_outbound::{
     Mode, OpenRefusal, OutboundPlugin,
 };
 use busbar_contract::abi::sdk::conn::Host;
+use busbar_contract::abi::sdk::cred::{Cred, Parts};
 use busbar_contract::abi::sdk::door::{abi_str, statement};
 use busbar_contract::abi::sdk::exchange::Op;
 use busbar_contract::abi::sdk::life::Refusal;
@@ -215,7 +215,7 @@ pub(crate) struct Ask<'a> {
 }
 
 /// What a read answers a call at once (`None`: it waits), the header handed to `present`.
-fn ready_answer(r: Read<'_>, present: &mut dyn FnMut(&str)) -> Option<FieldsAnswer> {
+fn ready_answer(r: Read<'_>, present: &mut dyn FnMut(&Cred)) -> Option<FieldsAnswer> {
     match r {
         Read::Header(h) => {
             present(h);
@@ -240,7 +240,7 @@ impl Oauth {
         &self,
         ask: &Ask<'_>,
         host: Option<&Host>,
-        present: &mut dyn FnMut(&str),
+        present: &mut dyn FnMut(&Cred),
     ) -> Poll<FieldsAnswer> {
         if !ask.own {
             return Poll::Ready(FieldsAnswer::Refused);
@@ -289,7 +289,7 @@ impl Oauth {
         ticket: Ticket,
         now: u64,
         host: Option<&Host>,
-        present: &mut dyn FnMut(&str),
+        present: &mut dyn FnMut(&Cred),
     ) -> Poll<FieldsAnswer> {
         if let Some(a) = m.read(now, |r| ready_answer(r, &mut *present)) {
             return Poll::Ready(a);
@@ -382,7 +382,11 @@ impl OutboundPlugin for Oauth {
             timestamp: request.timestamp(),
         };
         self.answer(&ask, op.host(), &mut |h| {
-            out.push(b"authorization", h.as_bytes(), FIELD_FLAGS);
+            out.push_sealed(
+                b"authorization",
+                Parts::new().sealed(h.bearer()),
+                FIELD_FLAGS,
+            );
         })
     }
 

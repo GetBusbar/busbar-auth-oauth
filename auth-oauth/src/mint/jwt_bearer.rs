@@ -22,6 +22,7 @@
 
 use super::TokenRequest;
 use base64::Engine as _;
+use busbar_contract::abi::sdk::cred::{Cred, FormBody, FormValue};
 use zeroize::Zeroizing;
 
 /// Default OAuth scope when the provider does not override it — the Vertex/GCP common case.
@@ -29,8 +30,8 @@ const DEFAULT_SCOPE: &str = "https://www.googleapis.com/auth/cloud-platform";
 
 /// The signing + exchange material for one binding. Immutable after construction.
 pub(crate) struct Signer {
-    key_pair: ring::signature::RsaKeyPair,
-    rng: ring::rand::SystemRandom,
+    /// The PKCS #8 RSA key, held by the chip: it signs the assertion.
+    key: Cred,
     /// JWT `iss` — the service account's `client_email`.
     issuer: String,
     /// JWT `aud` AND the POST target — the SA JSON `token_uri`.
@@ -59,10 +60,9 @@ pub(crate) fn build(
     scope_override: Option<&str>,
     subject: Option<&str>,
 ) -> Result<Signer, String> {
-    let (sa, key_pair) = parse_service_account(credential)?;
+    let (sa, key) = parse_service_account(credential)?;
     Ok(Signer {
-        key_pair,
-        rng: ring::rand::SystemRandom::new(),
+        key,
         issuer: sa.client_email,
         token_uri: sa.token_uri,
         scope: scope_override.unwrap_or(DEFAULT_SCOPE).to_string(),
@@ -79,9 +79,7 @@ pub(crate) fn build(
 /// decoder unescapes a string into a scratch buffer of its own that it frees unwiped. The decode
 /// skips the key's value (skipping copies nothing) and [`private_key`] unescapes it straight into a
 /// buffer sized once and wiped on drop (THE DESIGN §6: "auth material is zeroised").
-fn parse_service_account(
-    credential: &str,
-) -> Result<(ServiceAccount, ring::signature::RsaKeyPair), String> {
+fn parse_service_account(credential: &str) -> Result<(ServiceAccount, Cred), String> {
     let sa_json = read_credential(credential)?;
     // The decoder's own text is withheld (`json_err`): a data error quotes the offending value, and
     // the value here may be the private key.
@@ -89,10 +87,11 @@ fn parse_service_account(
         crate::token_response::json_err("service-account JSON is invalid"),
     )?;
     let key = private_key(&sa_json)?;
-    let der = pem_to_pkcs8_der(&key)?;
-    let key_pair = ring::signature::RsaKeyPair::from_pkcs8(&der)
+    let mut der = pem_to_pkcs8_der(&key)?;
+    let key = Cred::captured(Zeroizing::new(std::mem::take(&mut *der)));
+    key.rsa_pkcs8_check()
         .map_err(|e| format!("service-account private_key is not a valid PKCS#8 RSA key: {e}"))?;
-    Ok((sa, key_pair))
+    Ok((sa, key))
 }
 
 /// THE SERVICE ACCOUNT'S `private_key`, unescaped out of `json` (a document the decoder has
@@ -108,11 +107,10 @@ pub(crate) fn private_key(json: &str) -> Result<Zeroizing<String>, String> {
 }
 
 impl Signer {
-    /// Sign a JWT-bearer assertion for `now` (epoch seconds): `header.claims.signature`, RS256 over
-    /// the url-safe unpadded base64 of the fixed header and the claim set (RFC 7523). The assertion
-    /// is accepted by the token endpoint for an hour: it is built in ONE buffer sized to its exact
-    /// length first and wiped on drop, as is the signature it carries.
-    pub(crate) fn assertion(&self, now: u64) -> Result<Zeroizing<String>, String> {
+    /// The JWT-bearer assertion's signing input for `now` (epoch seconds): the url-safe unpadded
+    /// base64 of the fixed header and the claim set, `.`-joined (RFC 7523). The chip signs it
+    /// (RS256) as the form is written; the assertion is accepted by the token endpoint for an hour.
+    pub(crate) fn signing_input(&self, now: u64) -> Result<String, String> {
         use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
         let exp = now + 3600; // 1h assertion; the returned token's own TTL governs refresh
         const HEADER: &[u8] = br#"{"alg":"RS256","typ":"JWT"}"#;
@@ -124,35 +122,40 @@ impl Signer {
             exp,
             self.subject.as_deref(),
         )?;
-        let mut sig = Zeroizing::new(vec![0u8; self.key_pair.public().modulus_len()]);
-        let b64_len = |n: usize| base64::encoded_len(n, false).unwrap_or(0);
-        let len = b64_len(HEADER.len()) + 1 + b64_len(claims_json.len()) + 1 + b64_len(sig.len());
-        let mut out = Zeroizing::new(String::with_capacity(len));
+        let mut out = String::new();
         B64.encode_string(HEADER, &mut out);
         out.push('.');
         B64.encode_string(claims_json.as_bytes(), &mut out);
-        self.key_pair
-            .sign(
-                &ring::signature::RSA_PKCS1_SHA256,
-                &self.rng,
-                out.as_bytes(),
-                &mut sig,
-            )
-            .map_err(|_| "RS256 signing failed".to_string())?;
-        out.push('.');
-        B64.encode_string(&*sig, &mut out);
-        debug_assert_eq!(out.len(), len, "the assertion is sized once");
         Ok(out)
+    }
+
+    /// The whole assertion, as the chip signs it (tests read it through the dev-only test support).
+    #[cfg(test)]
+    pub(crate) fn assertion(&self, now: u64) -> Result<Zeroizing<String>, String> {
+        let input = self.signing_input(now)?;
+        let sig = self
+            .key
+            .jws_rs256(input.as_bytes())
+            .map_err(|e| e.to_string())?;
+        let sig = busbar_contract::abi::sdk::test_support::chip::sealed_bytes(&sig);
+        Ok(Zeroizing::new(format!(
+            "{input}.{}",
+            String::from_utf8(sig).expect("base64url")
+        )))
     }
 
     /// The token request for `now`: the assertion, form-encoded byte for byte as reqwest's `.form()`
     /// (`serde_urlencoded`) wrote it ([`super::form`]), POSTed to the SA's `token_uri` (RFC 7523).
     pub(crate) fn request(&self, now: u64) -> Result<TokenRequest, String> {
-        let assertion = self.assertion(now)?;
-        let form = super::form(&[
-            ("grant_type", "urn:ietf:params:oauth:grant-type:jwt-bearer"),
-            ("assertion", assertion.as_str()),
-        ]);
+        let form = FormBody::new()
+            .public("grant_type", "urn:ietf:params:oauth:grant-type:jwt-bearer")
+            .value(
+                "assertion",
+                FormValue::JwsRs256 {
+                    key: self.key.clone(),
+                    signing_input: self.signing_input(now)?,
+                },
+            );
         Ok(TokenRequest::form(
             super::need::TOKEN_URI,
             self.token_uri.clone(),

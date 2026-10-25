@@ -559,7 +559,11 @@ fn fields_at(
         timestamp,
     };
     let answer = o.answer(&ask, Some(&host.host), &mut |h| {
-        written.push(format!("authorization: {h}"));
+        let value = busbar_contract::abi::sdk::test_support::chip::sealed_bytes(&h.bearer());
+        written.push(format!(
+            "authorization: {}",
+            String::from_utf8(value).expect("text")
+        ));
     });
     match answer {
         std::task::Poll::Ready(busbar_contract::abi::sdk::auth_outbound::FieldsAnswer::Ready) => {

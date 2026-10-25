@@ -14,7 +14,6 @@
 //! starts with nothing held, so the handle count is the instance's for the ticket's life, never
 //! reset: no service is ever answered from another's kept result.
 
-use crate::held::Own;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::task::Poll;
 
@@ -131,7 +130,7 @@ fn head(req: &TokenRequest, timeout_ms: u64) -> Result<(Vec<u8>, RequestPiece), 
 impl Wire for HostWire<'_> {
     fn open(&self, req: &TokenRequest, timeout_ms: u64) -> Result<ConnId, ConnError> {
         let (head, head_piece) = head(req, timeout_ms)?;
-        let body = req.body.expose_own(&Own::here()).as_bytes();
+        let mut body = req.body.encoded().map_err(|_| ConnError::Refused)?;
         let body_piece = RequestPiece {
             kind: REQUEST_BODY,
             ..RequestPiece::default()
@@ -146,13 +145,7 @@ impl Wire for HostWire<'_> {
                 if now(c.write_request(stream, &head_piece, &head))? != head.len() {
                     return Err(ConnError::Refused);
                 }
-                let mut at = 0;
-                while at < body.len() {
-                    match now(c.write_request(stream, &body_piece, &body[at..]))? {
-                        0 => return Err(ConnError::Refused),
-                        n => at += n,
-                    }
-                }
+                now(body.poll_request(c, stream, &body_piece))?;
                 now(c.write_request(stream, &end_piece, &[])).map(|_| ())
             })();
             match sent {

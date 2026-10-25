@@ -85,7 +85,11 @@ pub(crate) fn fields(
         timestamp: 0,
     };
     let answer = o.answer(&ask, Some(&host.host), &mut |h| {
-        written.push(format!("authorization: {h}"));
+        let value = busbar_contract::abi::sdk::test_support::chip::sealed_bytes(&h.bearer());
+        written.push(format!(
+            "authorization: {}",
+            String::from_utf8(value).expect("text")
+        ));
     });
     let outcome = match answer {
         Poll::Pending if ticket.is_none() => Outcome::Refused,

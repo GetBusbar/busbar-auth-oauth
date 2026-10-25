@@ -1,4 +1,5 @@
 {
+  "credentials": ["conformance:secret", "conformance-subject-token"],
   "auth": {
     "outbound": [
       {

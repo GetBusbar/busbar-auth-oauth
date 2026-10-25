@@ -20,8 +20,8 @@
 
 use std::sync::Arc;
 
-use crate::held::Own;
-use crate::held::Secret;
+use busbar_contract::abi::sdk::cred::{Cred, FormBody};
+use zeroize::Zeroizing;
 
 use super::TokenRequest;
 
@@ -33,14 +33,24 @@ pub(crate) const ACCESS_TOKEN_TYPE: &str = "urn:ietf:params:oauth:token-type:acc
 
 /// One binding's exchange material, immutable after construction: every per-call exchange shares
 /// it and adds its own scope.
-#[derive(Debug)]
 pub(crate) struct Exchange {
     /// Busbar's own subject token, held redacted (never printed; zeroised on drop) and exposed only
     /// into the token-endpoint POST body.
-    subject_token: Secret<String, Own>,
+    subject_token: Cred,
     subject_token_type: String,
     token_url: String,
     resource: String,
+}
+
+impl std::fmt::Debug for Exchange {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Exchange")
+            .field("subject_token", &"[REDACTED]")
+            .field("subject_token_type", &self.subject_token_type)
+            .field("token_url", &self.token_url)
+            .field("resource", &self.resource)
+            .finish()
+    }
 }
 
 /// Build a binding's exchange material.
@@ -51,7 +61,7 @@ pub(crate) fn build(
     resource: &str,
 ) -> Exchange {
     Exchange {
-        subject_token: Secret::held(subject_token.to_string()),
+        subject_token: Cred::captured(Zeroizing::new(subject_token.as_bytes().to_vec())),
         subject_token_type: subject_token_type.to_string(),
         token_url: token_url.to_string(),
         resource: resource.to_string(),
@@ -79,17 +89,13 @@ impl Scoped {
     /// POSTed to `token_url` over the need that names it.
     pub(crate) fn request(&self) -> Result<TokenRequest, String> {
         let x = &self.exchange;
-        let form = super::form(&[
-            ("grant_type", GRANT_TYPE),
-            (
-                "subject_token",
-                x.subject_token.expose_own(&Own::here()).as_str(),
-            ),
-            ("subject_token_type", x.subject_token_type.as_str()),
-            ("requested_token_type", ACCESS_TOKEN_TYPE),
-            ("resource", x.resource.as_str()),
-            ("scope", self.scope.as_str()),
-        ]);
+        let form = FormBody::new()
+            .public("grant_type", GRANT_TYPE)
+            .sealed("subject_token", &x.subject_token)
+            .public("subject_token_type", &x.subject_token_type)
+            .public("requested_token_type", ACCESS_TOKEN_TYPE)
+            .public("resource", &x.resource)
+            .public("scope", &self.scope);
         Ok(TokenRequest::form(
             super::need::TOKEN_URL,
             x.token_url.clone(),
