@@ -460,6 +460,28 @@ extern "C" fn sensitive_door() -> *const Door {
     door_with_fields(sensitive_fields)
 }
 
+/// THE DIAGNOSTIC TABLE: each `diag` index names its 1.5.5 catalog code (the indices are
+/// `instance::diag`, pinned to 0, 1, 2 by the crate's own unit test).
+#[test]
+fn the_diag_indices_name_their_catalog_codes() {
+    let ids: Vec<&str> = (0..busbar_auth_oauth::STATEMENT.diag_ids_len)
+        .map(|i| {
+            // SAFETY: the Statement's `diag_ids` is a program-lifetime static of `diag_ids_len` `AbiStr`s
+            // whose bytes are program-lifetime string literals.
+            unsafe {
+                (*busbar_auth_oauth::STATEMENT.diag_ids.add(i))
+                    .as_str()
+                    .unwrap()
+            }
+        })
+        .collect();
+    assert_eq!(
+        ids,
+        ["BUSBAR-4014", "BUSBAR-4015", "BUSBAR-4016"],
+        "OAUTH_TOKEN_INVALID_BYTES, OAUTH_EMPTY_TOKEN, OAUTH_MINT_FAILED"
+    );
+}
+
 #[test]
 fn red_a_sensitive_field_flag_is_not_the_1_5_5_bytes() {
     let d = Dispatcher::new(DispatchConfig::default());
