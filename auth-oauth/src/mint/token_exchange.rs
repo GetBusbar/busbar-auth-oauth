@@ -61,7 +61,9 @@ pub(crate) fn build(
     resource: &str,
 ) -> Exchange {
     Exchange {
-        subject_token: Cred::captured(Zeroizing::new(subject_token.as_bytes().to_vec())),
+        // The token goes only to `token_url`: an `https` one requires a secured connection.
+        subject_token: Cred::captured(Zeroizing::new(subject_token.as_bytes().to_vec()))
+            .secure_for(token_url),
         subject_token_type: subject_token_type.to_string(),
         token_url: token_url.to_string(),
         resource: resource.to_string(),

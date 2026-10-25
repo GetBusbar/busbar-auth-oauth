@@ -51,7 +51,9 @@ pub(crate) fn build(credential: &str, token_url: &str, scope: &str) -> Result<Cl
     let (client_id, client_secret) = split_credential(credential)?;
     Ok(ClientCreds {
         client_id: client_id.to_string(),
-        client_secret: Cred::captured(Zeroizing::new(client_secret.as_bytes().to_vec())),
+        // The secret goes only to `token_url`: an `https` one requires a secured connection.
+        client_secret: Cred::captured(Zeroizing::new(client_secret.as_bytes().to_vec()))
+            .secure_for(token_url),
         token_url: token_url.to_string(),
         scope: scope.to_string(),
     })
