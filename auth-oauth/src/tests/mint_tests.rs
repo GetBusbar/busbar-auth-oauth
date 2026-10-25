@@ -163,19 +163,28 @@ fn a_cached_token_omits_the_header_for_bytes_invalid_in_a_header_value() {
     assert_eq!(t.header(), None);
 }
 
-/// The texts a failed exchange names, 1.5.5's words: the status line with a 200-char snippet, the
-/// JSON error.
+/// The texts a failed exchange names: the status line plus, only when the body is JSON with an
+/// RFC 6749 section 5.2 `error` code, that code; never other body text (a server may reflect the
+/// request, client secret and assertion included, into the diag channel).
 #[test]
 fn a_refused_or_malformed_response_is_named_in_1_5_5_words() {
     let long = "x".repeat(500);
     let e = parse_response(401, long.as_bytes(), 0).unwrap_err();
-    assert_eq!(
-        e,
-        format!(
-            "token endpoint returned 401 Unauthorized: {}",
-            "x".repeat(200)
-        )
-    );
+    assert_eq!(e, "token endpoint returned 401 Unauthorized");
+    let e = parse_response(400, br#"{"error":"invalid_client","x":"SECRETX"}"#, 0).unwrap_err();
+    assert!(e.contains("invalid_client"), "{e}");
+    assert!(!e.contains("SECRETX"), "{e}");
+    let e = parse_response(400, b"SECRETY", 0).unwrap_err();
+    assert!(!e.contains("SECRETY"), "{e}");
+    // A reflected secret in the `error` member is not an RFC code: no charset (quote), too long.
+    for body in [
+        r#"{"error":"bad \"SECRETZ\""}"#.to_string(),
+        format!(r#"{{"error":"{}"}}"#, "SECRETZ".repeat(10)),
+        r#"{"error":{"a":"SECRETZ"}}"#.to_string(),
+    ] {
+        let e = parse_response(400, body.as_bytes(), 0).unwrap_err();
+        assert!(!e.contains("SECRETZ"), "{e}");
+    }
     let e = parse_response(200, b"not json", 0).unwrap_err();
     assert!(e.starts_with("token response JSON invalid: "), "{e}");
     let (t, _) = parse_response(200, br#"{"access_token":"a","expires_in":"7200"}"#, 10).unwrap();
@@ -453,7 +462,7 @@ fn an_expired_token_whose_refresh_failed_answers_wait_until_a_mint_lands() {
     assert_eq!(
         report,
         Some(Report::MintFailed(
-            "token endpoint returned 500 Internal Server Error: down".to_string()
+            "token endpoint returned 500 Internal Server Error".to_string()
         ))
     );
     assert_eq!(m.read(later, |r| format!("{r:?}")), "Wait");

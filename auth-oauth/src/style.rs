@@ -17,6 +17,9 @@
 //! | `oauth-client-credentials` | `{token_url, scope, max_response_bytes?}` |
 //! | `oauth-token-exchange` | `{token_url, resource, subject_token_type?, max_response_bytes?}` |
 //!
+//! A key outside a style's row is refused (`settings: unknown key `<k>``), so a typo never
+//! silently falls back to a default.
+//!
 //! `oauth-token-exchange` (RFC 8693, ARCHITECT round 5 Q-L3B-EXCHANGE (B)) binds busbar's own
 //! subject token (the credential) and mints nothing at open: each request's scope (the call's
 //! extensions blob) is its own exchange, on demand, cached per scope ([`ExchangeBinding`]).
@@ -103,6 +106,33 @@ impl Refusal {
     }
 }
 
+/// The keys each style documents (the schema table above). `jwt-bearer`'s `token_uri` is the host's
+/// judged copy of the service account's endpoint: accepted, and read past (the credential's own is
+/// what signs).
+const JWT_BEARER_KEYS: &[&str] = &["token_uri", "scope", "subject", "max_response_bytes"];
+const OAUTH_CLIENT_CREDENTIALS_KEYS: &[&str] = &["token_url", "scope", "max_response_bytes"];
+const OAUTH_TOKEN_EXCHANGE_KEYS: &[&str] = &[
+    "token_url",
+    "resource",
+    "subject_token_type",
+    "max_response_bytes",
+];
+
+/// Refuse every key the style does not document, naming it: a typo'd optional key must not
+/// silently fall back to its default.
+fn deny_unknown(m: &Map<String, Value>, allowed: &[&str]) -> Result<(), Vec<Refusal>> {
+    let unknown: Vec<Refusal> = m
+        .keys()
+        .filter(|k| !allowed.contains(&k.as_str()))
+        .map(|k| Refusal::Settings(format!("unknown key `{k}`")))
+        .collect();
+    if unknown.is_empty() {
+        Ok(())
+    } else {
+        Err(unknown)
+    }
+}
+
 /// The settings object (`{}` when absent).
 fn object(settings: Option<&[u8]>) -> Result<Map<String, Value>, Refusal> {
     let Some(bytes) = settings.filter(|b| !b.is_empty()) else {
@@ -186,6 +216,7 @@ fn open_token_exchange(
     settings: Option<&[u8]>,
 ) -> Result<ExchangeBinding, Vec<Refusal>> {
     let m = object(settings).map_err(|r| vec![r])?;
+    deny_unknown(&m, OAUTH_TOKEN_EXCHANGE_KEYS)?;
     let subject = match credential.map(std::str::from_utf8) {
         None => None,
         Some(Ok(s)) => Some(s),
@@ -261,6 +292,11 @@ pub fn open_binding(
     cache: &dyn TokenCache,
 ) -> Result<Arc<Minted>, Vec<Refusal>> {
     let m = object(settings).map_err(|r| vec![r])?;
+    match style {
+        OAUTH_CLIENT_CREDENTIALS => deny_unknown(&m, OAUTH_CLIENT_CREDENTIALS_KEYS)?,
+        JWT_BEARER => deny_unknown(&m, JWT_BEARER_KEYS)?,
+        _ => {}
+    }
     let credential_text = match credential.map(std::str::from_utf8) {
         None => None,
         Some(Ok(s)) => Some(s),
