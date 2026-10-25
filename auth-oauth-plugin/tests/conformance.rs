@@ -356,7 +356,7 @@ fn script(p: &Plugin<Auth>) -> Vec<String> {
 }
 
 const EXPECTED: &[&str] = &[
-    "validate [1] Refused busbar-auth-oauth settings must be a JSON object",
+    "validate [1] Failed busbar-auth-oauth settings must be a JSON object",
     "validate Ready",
     "open Ready",
     "open_outbound oauth-client-credentials Ready ",

@@ -152,3 +152,33 @@ fn a_reopen_shares_the_token_cell_and_a_change_does_not() {
         &cell("id:secret", br#"{"token_url":"https://t","scope":"t"}"#)
     ));
 }
+
+/// An unknown settings key is refused, naming it (a typo'd optional key must not silently vanish).
+#[test]
+fn an_unknown_settings_key_is_refused_by_name() {
+    let want = "settings: unknown key `scoep`".to_string();
+    for (style, settings) in [
+        (JWT_BEARER, r#"{"scoep":"x"}"#),
+        (
+            OAUTH_CLIENT_CREDENTIALS,
+            r#"{"token_url":"https://i/t","scope":"s","scoep":"x"}"#,
+        ),
+    ] {
+        let l = lines(open(style, Some("id:secret"), settings));
+        assert_eq!(l, std::slice::from_ref(&want), "{style}");
+    }
+    let r = super::open(
+        OAUTH_TOKEN_EXCHANGE,
+        Some(b"subject"),
+        Some(br#"{"token_url":"https://i/t","resource":"r","scoep":"x"}"#),
+        &Cache::default(),
+    );
+    assert_eq!(r.err().unwrap()[0].line(), want);
+    // Every documented key stays accepted.
+    assert!(open(
+        JWT_BEARER,
+        Some("unused"),
+        r#"{"token_uri":"u","scope":"s","subject":"x","max_response_bytes":9}"#
+    )
+    .is_err_and(|r| r[0].line().starts_with("credential:")));
+}
