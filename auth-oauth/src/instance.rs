@@ -311,8 +311,8 @@ impl Oauth {
         let mut minted = false;
         for (key, cell) in cells {
             let (due, report) = cell.tick(now_ns, wall, wire);
-            next = next.min(due);
             if cell.on_demand() {
+                next = next.min(due);
                 self.settle_exchange(key, &cell, report, host, diags);
                 continue;
             }
@@ -340,6 +340,9 @@ impl Oauth {
                 ),
                 None => {}
             }
+            if !self.reap(key, &cell) {
+                next = next.min(due);
+            }
         }
         if minted {
             // The token is stored before this drain: a call that parks after the drain reads it
@@ -352,6 +355,20 @@ impl Oauth {
             }
         }
         (next != u64::MAX).then_some(next)
+    }
+
+    /// A scheduled cell no handle holds leaves the cache once it is idle (what `retire`'s doc
+    /// promises of a cell it kept for its mint): the cache's Arc and the tick's own are the only
+    /// two, judged under the cache's lock. Whether it was dropped.
+    fn reap(&self, key: [u8; 32], cell: &Arc<Minted>) -> bool {
+        let mut cache = lock(&self.cache);
+        let orphan = Arc::strong_count(cell) == 2
+            && cell.idle()
+            && cache.get(&key).is_some_and(|c| Arc::ptr_eq(c, cell));
+        if orphan {
+            cache.remove(&key);
+        }
+        orphan
     }
 
     /// AN ON-DEMAND CELL'S TICK, settled: a landed exchange wakes the tickets waiting on it; a
