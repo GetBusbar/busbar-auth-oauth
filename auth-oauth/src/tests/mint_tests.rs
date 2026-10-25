@@ -272,6 +272,26 @@ fn the_first_tick_mints_and_the_request_path_presents_it() {
     );
 }
 
+/// A token endpoint's `expires_in` is untrusted: one so large that `ahead * NS` would overflow
+/// u64 schedules the refresh at the far end of the clock, never a wrapped (arbitrary) instant.
+#[test]
+fn a_huge_expires_in_schedules_no_overflowed_refresh() {
+    let w = Scripted::default();
+    w.ok(r#"{"access_token":"tok","expires_in":100000000000}"#);
+    let m = Minted::new(client_credentials(), DEFAULT_MAX_RESPONSE_BYTES);
+    let (due, report) = m.tick(1_000, now_epoch(), Some(&w));
+    assert_eq!(report, Some(Report::Minted));
+    assert_eq!(
+        m.read(now_epoch(), |r| format!("{r:?}")),
+        "Header(\"Bearer tok\")"
+    );
+    assert_eq!(
+        due,
+        u64::MAX,
+        "the refresh is effectively never, not a wrapped instant"
+    );
+}
+
 /// A read with nothing ready leaves the exchange in flight; the next tick finishes it.
 #[test]
 fn a_pending_read_is_finished_on_a_later_tick() {

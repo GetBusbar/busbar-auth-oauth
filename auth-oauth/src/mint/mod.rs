@@ -530,7 +530,7 @@ impl Minted {
             let Some(wire) = wire else {
                 // No need was granted: nothing can mint. Say so once per retry period.
                 *ex = Exchange::Idle {
-                    due_ns: now_ns + MIN_SLEEP_SECS * NS,
+                    due_ns: now_ns.saturating_add(MIN_SLEEP_SECS * NS),
                 };
                 return self.failed(
                     &mut ex,
@@ -564,7 +564,7 @@ impl Minted {
             }
         }
         let Some(wire) = wire else {
-            return (now_ns + IN_FLIGHT_POLL_NS, None);
+            return (now_ns.saturating_add(IN_FLIGHT_POLL_NS), None);
         };
         let Exchange::InFlight {
             conn,
@@ -573,7 +573,7 @@ impl Minted {
             body,
         } = &mut *ex
         else {
-            return (now_ns + IN_FLIGHT_POLL_NS, None);
+            return (now_ns.saturating_add(IN_FLIGHT_POLL_NS), None);
         };
         let conn = *conn;
         let mut buf = Zeroizing::new([0_u8; READ_BUF_BYTES]);
@@ -608,7 +608,7 @@ impl Minted {
                         break Ok((status.unwrap_or(0), std::mem::take(body)));
                     }
                 }
-                Err(ConnError::Pending) => return (now_ns + IN_FLIGHT_POLL_NS, None),
+                Err(ConnError::Pending) => return (now_ns.saturating_add(IN_FLIGHT_POLL_NS), None),
                 Err(ConnError::Closed) if status.is_some() && !body.is_empty() => {
                     break Ok((status.unwrap_or(0), std::mem::take(body)))
                 }
@@ -633,7 +633,7 @@ impl Minted {
                 let due = if self.on_demand {
                     u64::MAX
                 } else {
-                    now_ns + MIN_SLEEP_SECS * NS
+                    now_ns.saturating_add(MIN_SLEEP_SECS * NS)
                 };
                 *ex = Exchange::Idle { due_ns: due };
                 (due, Some(Report::EmptyToken))
@@ -655,7 +655,7 @@ impl Minted {
                 let due = if self.on_demand {
                     u64::MAX
                 } else {
-                    now_ns + ahead * NS
+                    now_ns.saturating_add(ahead.saturating_mul(NS))
                 };
                 *self
                     .token
@@ -687,7 +687,7 @@ impl Minted {
         let due = if self.on_demand {
             u64::MAX
         } else {
-            now_ns + MIN_SLEEP_SECS * NS
+            now_ns.saturating_add(MIN_SLEEP_SECS * NS)
         };
         *ex = Exchange::Idle { due_ns: due };
         (due, Some(Report::MintFailed(e)))
