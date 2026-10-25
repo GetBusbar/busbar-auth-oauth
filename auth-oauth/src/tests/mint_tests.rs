@@ -198,6 +198,28 @@ fn token_response_tolerates_expires_in_as_number_string_or_absent() {
     }
 }
 
+/// `expires_in` that is not a non-negative finite number is a mint failure, never a token: a
+/// negative number, a NaN or infinite string and a non-numeric string are each refused.
+#[test]
+fn token_response_refuses_an_expires_in_that_is_not_a_non_negative_number() {
+    for body in [
+        r#"{"access_token":"a","expires_in":-5}"#,
+        r#"{"access_token":"a","expires_in":-1.5}"#,
+        r#"{"access_token":"a","expires_in":"-5"}"#,
+        r#"{"access_token":"a","expires_in":"NaN"}"#,
+        r#"{"access_token":"a","expires_in":"inf"}"#,
+        r#"{"access_token":"a","expires_in":"soon"}"#,
+    ] {
+        let e = parse_response(200, body.as_bytes(), 0)
+            .err()
+            .unwrap_or_else(|| panic!("{body} minted a token"));
+        assert!(
+            e.starts_with("token response JSON invalid: "),
+            "{body}: {e}"
+        );
+    }
+}
+
 /// THE ACCESS TOKEN IS UNESCAPED BY THE PLUGIN, NEVER BY THE JSON DECODER (THE DESIGN §6: "auth
 /// material is zeroised"): `serde_json` unescapes a string that carries an escape into a scratch
 /// buffer of its own that it frees unwiped, so the decode skips the token (its field is
@@ -338,6 +360,25 @@ fn a_dropped_or_refused_exchange_is_a_failure() {
             "token endpoint request failed: refused".to_string()
         ))
     );
+}
+
+/// A CLOSE-DELIMITED RESPONSE: a head, a complete token body, then the connection closing (no end
+/// marker) is the whole response, and mints the token.
+#[test]
+fn a_close_after_a_complete_body_mints_the_token() {
+    let w = Scripted::default();
+    w.push(vec![
+        Step::Head(200),
+        Step::Body(
+            br#"{"access_token":"closed-tok","expires_in":3600}"#.to_vec(),
+            false,
+        ),
+        Step::Fail(ConnError::Closed),
+    ]);
+    let m = Minted::new(client_credentials(), DEFAULT_MAX_RESPONSE_BYTES);
+    let (_, report) = m.tick(0, now_epoch(), Some(&w));
+    assert_eq!(report, Some(Report::Minted));
+    assert!(m.is_ready());
 }
 
 /// An exchange still unread at the mint deadline is abandoned in 1.5.5's words.
