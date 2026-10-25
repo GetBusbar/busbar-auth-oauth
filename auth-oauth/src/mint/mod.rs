@@ -291,6 +291,23 @@ pub(crate) fn access_token(json: &str) -> Result<Zeroizing<String>, String> {
     })
 }
 
+/// `body` as text, bytes that are not UTF-8 replaced as `String::from_utf8_lossy` does, built into
+/// ONE wiped string sized exactly first, so it never reallocates and frees an unwiped copy.
+fn lossy_wiped(b: &[u8]) -> Zeroizing<String> {
+    let len: usize = b
+        .utf8_chunks()
+        .map(|c| c.valid().len() + if c.invalid().is_empty() { 0 } else { 3 })
+        .sum();
+    let mut out = Zeroizing::new(String::with_capacity(len));
+    for c in b.utf8_chunks() {
+        out.push_str(c.valid());
+        if !c.invalid().is_empty() {
+            out.push('\u{FFFD}');
+        }
+    }
+    out
+}
+
 /// Parse a finished token response: a non-2xx status is the endpoint's refusal, named with a short
 /// snippet of its body; otherwise the JSON token. Verbatim from the two mint bodies.
 pub(crate) fn parse_response(
@@ -299,7 +316,7 @@ pub(crate) fn parse_response(
     now: u64,
 ) -> Result<(CachedToken, bool), String> {
     // The body carries the access token: a lossy copy (bytes that are not UTF-8) is wiped too.
-    let body = Zeroizing::new(String::from_utf8_lossy(body).into_owned());
+    let body = lossy_wiped(body);
     if !(200..300).contains(&status) {
         // Never log the request/assertion wholesale (may echo claims or the client secret); status +
         // a short snippet only. Diagnostic-only: the request has already failed on `status`.
@@ -623,7 +640,9 @@ impl Minted {
             }
         };
         wire.close(conn);
-        match finished.and_then(|(status, body)| parse_response(u16::try_from(status).unwrap_or(0), &body, wall)) {
+        match finished.and_then(|(status, body)| {
+            parse_response(u16::try_from(status).unwrap_or(0), &body, wall)
+        }) {
             // A 200 with an EMPTY access_token must be treated as a (retryable) failure, not stored:
             // an empty token collides with the pre-first-mint sentinel, so `ready` would stay false
             // forever AND the per-request call would emit no auth header — a permanent wedge with no
