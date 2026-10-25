@@ -62,6 +62,10 @@ mod token_response;
 #[path = "tests/support.rs"]
 mod test_support;
 
+#[cfg(test)]
+#[path = "tests/lib_tests.rs"]
+mod tests;
+
 use std::borrow::Cow;
 use std::ptr;
 use std::task::Poll;
