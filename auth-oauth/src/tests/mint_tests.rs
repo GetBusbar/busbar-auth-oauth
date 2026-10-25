@@ -420,10 +420,18 @@ fn a_reply_code_past_sixteen_bits_is_a_failure_not_a_token() {
     ]);
     let m = Minted::new(client_credentials(), DEFAULT_MAX_RESPONSE_BYTES);
     let (_, report) = m.tick(0, now_epoch(), Some(&w));
-    assert!(
-        matches!(report, Some(Report::MintFailed(_))),
-        "{report:?}"
-    );
+    assert!(matches!(report, Some(Report::MintFailed(_))), "{report:?}");
+}
+
+/// THE LOSSY TEXT OF A TOKEN RESPONSE IS BUILT ONCE: a body with bytes that are not UTF-8 becomes
+/// the text `from_utf8_lossy` gives, in a string sized exactly first, so it never grows (a growth
+/// would free an unwiped copy of the access token).
+#[test]
+fn the_lossy_body_is_one_exactly_sized_string() {
+    let raw: &[u8] = b"{\"access_token\":\"a\xffb\xc3\x28c\xe2\x82\",\"x\":\"\xf0\x90\"}";
+    let got = lossy_wiped(raw);
+    assert_eq!(got.as_str(), String::from_utf8_lossy(raw));
+    assert_eq!(got.capacity(), got.len(), "sized once, no growth");
 }
 
 /// Without a granted need nothing mints, and the failure says so once per retry period.
