@@ -55,16 +55,6 @@ pub(crate) const IN_FLIGHT_POLL_NS: u64 = 5_000_000;
 /// Nanoseconds in a second, on the tick clock.
 pub(crate) const NS: u64 = 1_000_000_000;
 
-/// The unit tests' wall clock (epoch seconds): their doubles stand in for the host's `clock.now`.
-/// The plugin itself reads no clock (THE DESIGN §1: "one clock"); see [`HostClock`].
-#[cfg(test)]
-pub(crate) fn now_epoch() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-}
-
 /// THE PLUGIN'S OWN NEEDS, by their index in the Statement (`crate::NEEDS`): the token endpoint
 /// each style POSTs to, its target the binding's own setting (THE DESIGN §5: egress class
 /// `operator-infrastructure`, "auth mint endpoints (`token_url`, `token_uri`)").
