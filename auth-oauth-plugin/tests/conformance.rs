@@ -17,7 +17,7 @@
 // auth kind's OUTBOUND script over this crate's linked door and its dropped-in cdylib (built with
 // `dropped-in`), driven by `conformance.json`; the hand-written both-ways proof below stays beside
 // it. `plugin-ci.yml` runs the suite under `--release` once the crate lives in its own repo.
-busbar_plugin_loader::conformance_suite! {
+busbar_test_kit::conformance_suite! {
     door: busbar_auth_oauth::door,
     cdylib: "busbar_auth_oauth_plugin",
     inputs: include_str!("conformance.json"),
@@ -117,7 +117,7 @@ fn linked(folds: &Arc<Folds>, d: &Dispatcher) -> Plugin<Auth> {
 }
 
 fn dropped(folds: &Arc<Folds>, d: &Dispatcher) -> Option<Plugin<Auth>> {
-    let path = busbar_plugin_loader::conformance::cdylib_of("busbar_auth_oauth_plugin");
+    let path = busbar_test_kit::conformance::cdylib_of("busbar_auth_oauth_plugin");
     let stated = rendering_of(busbar_auth_oauth::door).expect("the door renders its Statement");
     Some(load_dropped::<Auth>(&path, &stated, bind(folds, d)).expect("the dropped door loads"))
 }
