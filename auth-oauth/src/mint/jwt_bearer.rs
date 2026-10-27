@@ -74,17 +74,6 @@ pub(crate) fn build(
     })
 }
 
-impl Signer {
-    /// This signer POSTing to `endpoint`, the host's judged copy of the token endpoint (the
-    /// `token_uri` setting its need is pinned to); the assertion's `aud` stays the service
-    /// account's own `token_uri`.
-    #[must_use]
-    pub(crate) fn dialling(mut self, endpoint: &str) -> Self {
-        self.endpoint = endpoint.to_string();
-        self
-    }
-}
-
 /// Parse + fully validate a `jwt-bearer` credential: read the SA JSON (inline; the host resolves a key file) and parse
 /// the PKCS#8 RSA key. Run by [`build`], which the config `--validate` dry-run
 /// reaches through `open_outbound` (it never dials), so both apply IDENTICAL checks with identical
@@ -158,6 +147,15 @@ impl Signer {
         B64.encode_string(&*sig, &mut out);
         debug_assert_eq!(out.len(), len, "the assertion is sized once");
         Ok(out)
+    }
+
+    /// This signer POSTing to `endpoint`, the host's judged copy of the token endpoint (the
+    /// `token_uri` setting its need is pinned to); the assertion's `aud` stays the service
+    /// account's own `token_uri`.
+    #[must_use]
+    pub(crate) fn dialling(mut self, endpoint: String) -> Self {
+        self.endpoint = endpoint;
+        self
     }
 
     /// The token request for `now`: the assertion, form-encoded byte for byte as reqwest's `.form()`

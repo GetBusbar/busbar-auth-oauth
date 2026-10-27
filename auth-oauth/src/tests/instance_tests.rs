@@ -17,7 +17,7 @@
 
 use super::*;
 use crate::mint;
-use crate::mint::tests::{Scripted, Step};
+use crate::mint::tests::{now_epoch, Scripted, Step};
 use crate::mint::TokenRequest;
 use crate::style;
 use crate::test_support::{self, TestHost};
@@ -208,6 +208,69 @@ fn jwt_bearer_mints_on_tick() {
     );
 }
 
+/// A BINDING'S SETTINGS REACH ITS ASSERTION: `jwt-bearer` opened with `scope` and `subject` settings
+/// signs an assertion whose claims carry that scope and that `sub`.
+#[test]
+fn jwt_bearer_settings_reach_the_assertion_claims() {
+    use base64::Engine as _;
+    let host = TestHost::new();
+    let w = Arc::new(Scripted::default());
+    let o = instance(&w);
+    let sa = serde_json::json!({
+        "client_email": "svc@proj.iam.gserviceaccount.com",
+        "private_key": include_str!("fixtures/test_sa_key.pem"),
+        "token_uri": "https://oauth2.googleapis.com/token",
+    })
+    .to_string();
+    let _ = open(
+        &o,
+        style::JWT_BEARER,
+        &sa,
+        r#"{"scope":"s1","subject":"u@x"}"#,
+    );
+    w.ok(r#"{"access_token":"ya29.tok","expires_in":3599}"#);
+    o.tick(1, Ticket::NONE, Some(&host.host), &mut Diags::default());
+    let body = w.sent.lock().unwrap()[0].2.clone();
+    let assertion = body.split("assertion=").nth(1).expect("an assertion");
+    let claims = assertion.split('.').nth(1).expect("a claims part");
+    let claims: serde_json::Value = serde_json::from_slice(
+        &base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(claims)
+            .expect("base64url claims"),
+    )
+    .expect("JSON claims");
+    assert_eq!(claims["scope"], "s1", "{claims}");
+    assert_eq!(claims["sub"], "u@x", "{claims}");
+}
+
+/// THE DRIVER TICKET IS WOKEN when a binding opens: after a `tick` on a real driver ticket, opening
+/// a binding that wants a mint wakes that ticket on the host, so a `drive` starts the mint without
+/// waiting for the next `tick`.
+#[test]
+fn opening_a_binding_wakes_the_driver_ticket() {
+    let host = TestHost::new();
+    let w = Arc::new(Scripted::default());
+    let o = instance(&w);
+    let driver = Ticket {
+        slot: 7,
+        generation: 1,
+    };
+    o.tick(1, driver, Some(&host.host), &mut Diags::default());
+    assert_eq!(
+        host.take(),
+        Vec::<Ticket>::new(),
+        "nothing wanted a mint yet"
+    );
+    o.bind(
+        style::OAUTH_CLIENT_CREDENTIALS,
+        Some(b"client-abc:s3cr&t".as_slice()),
+        Some(CC_SETTINGS.as_bytes()),
+        Some(&host.host),
+    )
+    .unwrap_or_else(|_| panic!("the binding opens"));
+    assert_eq!(host.take(), vec![driver], "the open woke the driver ticket");
+}
+
 /// The scripted need on a host whose clock reads `wall_secs` (and a monotonic `mono_ns`).
 struct Pinned(Arc<Scripted>, u64);
 
@@ -347,7 +410,7 @@ fn a_mint_landing_between_the_read_and_the_park_is_not_a_lost_wake() {
         // THE MINT LANDS: its token is stored, and its drain finds no one parked.
         w.ok(r#"{"access_token":"tok-2","expires_in":3600}"#);
         let wire = Shared(Arc::clone(&w));
-        let (_, report) = cell.tick(u64::MAX / 2, mint::now_epoch(), Some(&wire as &dyn Wire));
+        let (_, report) = cell.tick(u64::MAX / 2, now_epoch(), Some(&wire as &dyn Wire));
         assert_eq!(report, Some(Report::Minted), "the mint landed");
         assert!(held.is_empty(), "the drain finds no one parked yet");
         drop(held);
@@ -412,6 +475,48 @@ fn a_cell_settled_between_the_lookup_and_the_park_is_not_a_lost_wake() {
         test_support::fields(&o, &host, h, call, Some("s")).1,
         "authorization: Bearer tok-s"
     );
+}
+
+/// A CANCELLED WAIT LEAVES NO ENTRY: forgetting the last ticket parked on an on-demand cell drops
+/// the cell's waiter entry, so a scope whose cell the cache then drops does not leak an empty list.
+#[test]
+fn forgetting_the_last_waiter_drops_its_exchange_entry() {
+    for via_cancel in [true, false] {
+        let host = TestHost::new();
+        let w = Arc::new(Scripted::default());
+        let o = instance(&w);
+        let h = o.keep_binding(
+            style::open(
+                style::OAUTH_TOKEN_EXCHANGE,
+                Some(b"busbar-own-subject-token".as_slice()),
+                Some(br#"{"token_url":"https://as.example/token","resource":"https://tools.example/rpc"}"#.as_slice()),
+                &o,
+            )
+            .unwrap_or_else(|_| panic!("the binding opens")),
+        );
+        let Some(Binding::Exchange(x)) = o.bound(h) else {
+            panic!("an exchange binding")
+        };
+        let key = x.scope_key(b"s");
+        let call = Ticket {
+            slot: 401,
+            generation: 1,
+        };
+        assert_eq!(
+            test_support::fields(&o, &host, h, call, Some("s")).0,
+            Outcome::Pending
+        );
+        assert!(o.exchange_waiters.lock().unwrap().contains_key(&key));
+        if via_cancel {
+            o.unpark(call);
+        } else {
+            o.unpark_exchange(key, call);
+        }
+        assert!(
+            !o.exchange_waiters.lock().unwrap().contains_key(&key),
+            "no empty entry remains (cancel: {via_cancel})"
+        );
+    }
 }
 
 /// The scripted need on a host whose clock the test sets: wall seconds from `wall`.
@@ -551,6 +656,14 @@ fn token_expiry_and_caching_are_judged_on_the_hosts_clock() {
         (Outcome::Ready, "authorization: Bearer tok-x".to_string()),
         "the cached exchange token is fresh on the host's clock (the process clock says stale)"
     );
+    // A tick before the token's refresh is due: exchanges only start in a tick, so were the
+    // fresh read to have armed one, it would start here and show in the count.
+    o.tick(2_000, Ticket::NONE, Some(&host.host), &mut diags);
+    assert_eq!(
+        w.sent.lock().unwrap().len(),
+        sent,
+        "the cached token was served without a new exchange (a tick ran after the read)"
+    );
     let later = Ticket {
         slot: 13,
         generation: 1,
@@ -567,14 +680,24 @@ fn token_expiry_and_caching_are_judged_on_the_hosts_clock() {
     );
 }
 
-/// A SCHEDULED CELL RETIRED MID-MINT IS DROPPED WHEN ITS MINT SETTLES (Q128 auth-oauth reader A,
-/// LOW; THE DESIGN §6 item 3: the cache outlives a handle only so a re-open can share it). The
-/// generation that opened a client-credentials binding retires while the cell's mint is in flight,
-/// so `retire` keeps it (not idle). Once that mint settles, no handle holds the cell and nothing
-/// waits on it: it is dropped, and no later tick mints for it again. RED: the orphan stayed in the
-/// cache and was refreshed against its token endpoint on every due tick, until some later retire.
+/// A TICK NEVER RESTARTS THE HANDLE COUNT (the oracle's egress.auth mint-refresh cells): the host
+/// keeps a driver ticket's answers across a tick while anything is held or pending, so a count
+/// reset at the tick reused a kept handle, and the refresh ahead of expiry never left (`fault`, or
+/// a replayed reply read as status 0) — a 2 s token was never re-minted. RED before: 9 -> 0.
 #[test]
-fn a_scheduled_cell_retired_mid_mint_is_dropped_when_the_mint_settles() {
+fn a_tick_carries_the_handle_count_on() {
+    let wire = Arc::new(Scripted::default());
+    let o = instance(&wire);
+    o.issued.store(9, Ordering::Release);
+    o.tick(1, Ticket::NONE, None, &mut Diags::default());
+    assert_eq!(o.issued.load(Ordering::Acquire), 9);
+}
+
+/// A SCHEDULED CELL NO HANDLE HOLDS LEAVES THE CACHE ONCE IDLE: `retire` keeps a cell whose mint is
+/// in flight, and the tick that lands it drops the cell, so a provider a reload removed mid-mint is
+/// never ticked again nor refreshed with its secret.
+#[test]
+fn a_retired_scheduled_cell_kept_for_its_mint_leaves_the_cache_when_it_lands() {
     let host = TestHost::new();
     let w = Arc::new(Scripted::default());
     let o = instance(&w);
@@ -582,34 +705,58 @@ fn a_scheduled_cell_retired_mid_mint_is_dropped_when_the_mint_settles() {
         &o,
         style::OAUTH_CLIENT_CREDENTIALS,
         "client-abc:s3cr&t",
-        CC_SETTINGS,
+        r#"{"token_url":"https://login.example.com/token","scope":"s"}"#,
     );
     w.push(vec![
         Step::Pending,
         Step::Head(200),
-        Step::Body(br#"{"access_token":"tok","expires_in":0}"#.to_vec(), true),
+        Step::Body(
+            br#"{"access_token":"tok-1","expires_in":3600}"#.to_vec(),
+            true,
+        ),
     ]);
     let mut diags = Diags::default();
     o.tick(1_000, Ticket::NONE, Some(&host.host), &mut diags);
-    assert_eq!(w.sent.lock().unwrap().len(), 1, "the first mint is out");
+    assert_eq!(w.sent.lock().unwrap().len(), 1, "the mint is in flight");
     o.retire(1);
     assert_eq!(
-        lock(&o.cache).len(),
+        o.cache.lock().unwrap().len(),
         1,
-        "positive control: retire keeps the cell its mint is in flight on"
+        "kept: its mint is in flight"
     );
-    let due = o.tick(2_000, Ticket::NONE, Some(&host.host), &mut diags);
-    assert_eq!(
-        lock(&o.cache).len(),
-        0,
-        "the settled orphan is dropped: no handle holds it, nothing waits"
-    );
-    // An expiring token would be refreshed at once: nothing is minted for the dropped cell.
-    w.ok(r#"{"access_token":"tok-2","expires_in":3600}"#);
-    o.tick(due.max(3_000), Ticket::NONE, Some(&host.host), &mut diags);
+    o.tick(2_000, Ticket::NONE, Some(&host.host), &mut diags);
+    let sent = w.sent.lock().unwrap().len();
+    o.tick(10_000 * NS, Ticket::NONE, Some(&host.host), &mut diags);
+    assert!(o.cache.lock().unwrap().is_empty(), "the idle orphan left");
     assert_eq!(
         w.sent.lock().unwrap().len(),
-        1,
-        "no mint for a dropped cell"
+        sent,
+        "no refresh exchange was opened for the removed provider"
     );
+}
+
+/// A cell a reload's new handle still holds stays through the old generation's `retire`.
+#[test]
+fn a_retired_generation_leaves_a_cell_the_new_generation_holds() {
+    let host = TestHost::new();
+    let w = Arc::new(Scripted::default());
+    let o = instance(&w);
+    let (cred, settings) = (
+        "client-abc:s3cr&t",
+        r#"{"token_url":"https://login.example.com/token","scope":"s"}"#,
+    );
+    let _h1 = open(&o, style::OAUTH_CLIENT_CREDENTIALS, cred, settings);
+    w.ok(r#"{"access_token":"tok-1","expires_in":3600}"#);
+    let mut diags = Diags::default();
+    o.tick(1_000, Ticket::NONE, Some(&host.host), &mut diags);
+    o.set_generation(2);
+    let h2 = open(&o, style::OAUTH_CLIENT_CREDENTIALS, cred, settings);
+    o.retire(1);
+    o.tick(2_000, Ticket::NONE, Some(&host.host), &mut diags);
+    assert_eq!(
+        fields(&o, &host, h2, Ticket::NONE).1,
+        "authorization: Bearer tok-1"
+    );
+    assert_eq!(w.sent.lock().unwrap().len(), 1, "no new exchange");
+    assert_eq!(o.cache.lock().unwrap().len(), 1, "one cell");
 }

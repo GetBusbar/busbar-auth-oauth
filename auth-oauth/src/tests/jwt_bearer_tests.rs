@@ -25,16 +25,6 @@ fn pem_to_pkcs8_der_rejects_empty_and_garbage() {
 }
 
 #[test]
-fn b64url_is_url_safe_and_unpadded() {
-    // 0xFB 0xFF encodes to "+/8=" in standard base64; url-safe-no-pad must yield "-_8".
-    use base64::Engine as _;
-    assert_eq!(
-        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([0xFB, 0xFF]),
-        "-_8"
-    );
-}
-
-#[test]
 fn read_credential_passes_inline_json_through() {
     let json = r#"{"client_email":"x@y.iam.gserviceaccount.com"}"#;
     assert_eq!(read_credential(json).unwrap().as_str(), json);

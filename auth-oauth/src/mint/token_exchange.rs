@@ -18,6 +18,7 @@
 //! `requested_token_type` (always an access token), `resource`, `scope` (present, empty when the
 //! call states none), POSTed to `token_url` over the plugin's own need.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use crate::held::Own;
@@ -43,19 +44,18 @@ pub(crate) struct Exchange {
     resource: String,
     /// The binding's LAST settled exchange (any scope) failed: its `ready` fact reads `0` until one
     /// lands (contract `OutboundReadyOut::ready`).
-    failing: std::sync::atomic::AtomicBool,
+    failing: AtomicBool,
 }
 
 impl Exchange {
     /// Record how an exchange of this binding settled.
     pub(crate) fn settled(&self, failed: bool) {
-        self.failing
-            .store(failed, std::sync::atomic::Ordering::Release);
+        self.failing.store(failed, Ordering::Release);
     }
 
     /// Whether the binding's last settled exchange failed.
     pub(crate) fn failing(&self) -> bool {
-        self.failing.load(std::sync::atomic::Ordering::Acquire)
+        self.failing.load(Ordering::Acquire)
     }
 }
 
@@ -71,7 +71,7 @@ pub(crate) fn build(
         subject_token_type: subject_token_type.to_string(),
         token_url: token_url.to_string(),
         resource: resource.to_string(),
-        failing: std::sync::atomic::AtomicBool::new(false),
+        failing: AtomicBool::new(false),
     }
 }
 

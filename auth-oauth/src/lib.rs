@@ -62,18 +62,18 @@ mod token_response;
 #[path = "tests/support.rs"]
 mod test_support;
 
+#[cfg(test)]
+#[path = "tests/lib_tests.rs"]
+mod tests;
+
 use std::borrow::Cow;
-use std::ptr;
 use std::task::Poll;
 
-use busbar_contract::abi::auth::{
-    ranked, AuthPoints, AuthTail, StyleDecl, CANCEL_CONTINUES, STYLE_ENDPOINT_FROM_CREDENTIAL,
-    STYLE_ENDPOINT_TOKEN_URL,
-};
+use busbar_contract::abi::auth::{AuthPoints, AuthTail, StyleDecl, CANCEL_CONTINUES};
 use busbar_contract::abi::host::conn::connector::{
     Need, DIRECTION_OUTBOUND, EGRESS_OPERATOR_INFRASTRUCTURE, KEEP_NAMED,
 };
-use busbar_contract::abi::mechanism::call::{AbiStr, Blob, BLOB_ABSENT};
+use busbar_contract::abi::mechanism::call::AbiStr;
 use busbar_contract::abi::mechanism::door::Statement;
 use busbar_contract::abi::mechanism::ticket::Ticket;
 use busbar_contract::abi::sdk::auth_door::with_tail;
@@ -98,34 +98,14 @@ const FIELD_FLAGS: u32 = 0;
 /// The styles this plugin serves, each at `Head` (a bearer token reads nothing past the head).
 /// None carries [`busbar_contract::abi::auth::STYLE_CALLER_CREDENTIAL`] (an OAuth token is always
 /// minted from the operator's own credential).
-///
-/// The two the previous release offered rank third and fourth (after the header styles' first and
-/// second), so the host lists them in that release's order when it refuses an unknown style; the
-/// token exchange is unranked. Each states where its token endpoint comes from, so the host judges
-/// it as a destination before the binding opens: the credential itself for `jwt-bearer`, the
-/// entry's `token_url` for `oauth-client-credentials` (the one style the previous release judged a
-/// `token_url` for).
 const STYLES: &[StyleDecl] = &[
-    style_decl(
-        style::JWT_BEARER,
-        ranked(3) | STYLE_ENDPOINT_FROM_CREDENTIAL,
-        AuthPoints::HEAD,
-    ),
-    style_decl(
-        style::OAUTH_CLIENT_CREDENTIALS,
-        ranked(4) | STYLE_ENDPOINT_TOKEN_URL,
-        AuthPoints::HEAD,
-    ),
+    style_decl(style::JWT_BEARER, 0, AuthPoints::HEAD),
+    style_decl(style::OAUTH_CLIENT_CREDENTIALS, 0, AuthPoints::HEAD),
     style_decl(style::OAUTH_TOKEN_EXCHANGE, 0, AuthPoints::HEAD),
 ];
 
 /// THE AUTH STATEMENT TAIL: outbound only, no login, no inbound carriers.
 const TAIL: &AuthTail = &outbound_tail(0, STYLES);
-
-const NO_STR: AbiStr = AbiStr {
-    ptr: ptr::null(),
-    len: 0,
-};
 
 /// One token endpoint's need: outbound, `operator-infrastructure`, over the http transport, its target the
 /// binding's setting `target_from` names. It reads no response field beyond the reply's code.
@@ -134,22 +114,9 @@ const fn token_need(target_from: &'static str) -> Need {
         direction: DIRECTION_OUTBOUND,
         egress_class: EGRESS_OPERATOR_INFRASTRUCTURE,
         transport: abi_str("http"),
-        auth: NO_STR,
         target_from: abi_str(target_from),
-        trust_from: NO_STR,
-        details: Blob {
-            ptr: ptr::null(),
-            len: 0,
-            fmt: BLOB_ABSENT,
-            flags: 0,
-        },
-        keep_response_headers: ptr::null(),
-        keep_response_headers_len: 0,
-        timeout_ms: 0,
         keep_mode: KEEP_NAMED,
-        _reserved: 0,
-        deny_response_headers: ptr::null(),
-        deny_response_headers_len: 0,
+        ..Need::EMPTY
     }
 }
 
@@ -170,13 +137,9 @@ const DIAG_IDS: &[AbiStr] = &[
 /// What the plugin states: its name, version, the concurrency it serves, its diagnostics, its own
 /// needs and its outbound styles.
 pub const STATEMENT: Statement = with_tail(
-    Statement {
-        diag_ids: DIAG_IDS.as_ptr(),
-        diag_ids_len: DIAG_IDS.len(),
-        needs: NEEDS.as_ptr(),
-        needs_len: NEEDS.len(),
-        ..statement("busbar-auth-oauth", env!("CARGO_PKG_VERSION"), 1024)
-    },
+    statement("busbar-auth-oauth", env!("CARGO_PKG_VERSION"), 1024)
+        .with_diag_ids(DIAG_IDS)
+        .with_needs(NEEDS),
     TAIL,
 );
 
@@ -209,7 +172,7 @@ fn judged(settings: &[u8]) -> Result<(), Refusal> {
     if settings_ok(settings) {
         Ok(())
     } else {
-        Err(Refusal::refused(SETTINGS_NOT_OBJECT))
+        Err(Refusal::failed(SETTINGS_NOT_OBJECT))
     }
 }
 
@@ -270,7 +233,10 @@ impl Oauth {
         };
         let ticket = ask.ticket;
         if !ticket.is_none() && self.exchange_failed(ticket) {
-            return Poll::Ready(FieldsAnswer::Failed(Cow::Borrowed("")));
+            return Poll::Ready(FieldsAnswer::Failed(Cow::Borrowed(
+                "the RFC 8693 token exchange for this call's scope failed; the call is refused \
+                 rather than made unauthenticated (see diagnostics BUSBAR-4014/4015/4016)",
+            )));
         }
         let scope = ask.scope.unwrap_or_default();
         let key = x.scope_key(scope);
@@ -324,13 +290,9 @@ impl Oauth {
         match self.bound(handle) {
             Some(style::Binding::Minted(cell)) => cell.presents(self.wall_secs()),
             // A token exchange is ready unless its last settled exchange failed (its authorization
-            // server is refusing, so `fields` would fail). One not asked yet IS ready (coordinator
-            // ruling on u29 auth-oauth #24): it mints lazily, per request, so reading it unready
-            // until it minted would keep its lane from ever being tried and so from ever minting.
-            // 1.5.5 had no token exchange; its minted styles' readiness (v1.5.5
-            // egress_auth/bearer_token.rs `is_ready`, read by the health prober) was false only
-            // until the first mint, which 1.5.5 ran EAGERLY in the background at boot. A lazy mint
-            // has no such window: the first request is its first mint.
+            // server is refusing, so `fields` would fail). One not asked yet IS ready: it mints
+            // lazily, per request, so reading it unready until it minted would keep its lane from
+            // ever being tried and so from ever minting.
             Some(style::Binding::Exchange(b)) => !b.failing(),
             None => false,
         }
