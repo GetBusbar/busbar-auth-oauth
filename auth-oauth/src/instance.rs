@@ -421,6 +421,9 @@ impl Oauth {
             }
         };
         if let Some(failed) = failure {
+            if let Some(exchange) = cell.exchange() {
+                exchange.settled(failed);
+            }
             let woken = lock(&self.exchange_waiters)
                 .remove(&key)
                 .unwrap_or_default();

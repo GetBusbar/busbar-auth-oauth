@@ -34,8 +34,11 @@ pub(crate) struct Signer {
     key: Cred,
     /// JWT `iss` — the service account's `client_email`.
     issuer: String,
-    /// JWT `aud` AND the POST target — the SA JSON `token_uri`.
+    /// JWT `aud` — the SA JSON `token_uri`, as the credential spells it (1.5.5's claim).
     token_uri: String,
+    /// The POST target: the host's judged copy of the endpoint (the `token_uri` setting, its
+    /// userinfo stripped, the one the token need is pinned to), else the SA JSON's own.
+    endpoint: String,
     scope: String,
     /// JWT `sub` (RFC 7523 §3), emitted ONLY when the operator explicitly configures it
     /// (`ProviderCfg::subject`). Left `None` — the default, and the only case that matters for a plain
@@ -64,6 +67,7 @@ pub(crate) fn build(
     Ok(Signer {
         key,
         issuer: sa.client_email,
+        endpoint: sa.token_uri.clone(),
         token_uri: sa.token_uri,
         scope: scope_override.unwrap_or(DEFAULT_SCOPE).to_string(),
         subject: subject.map(str::to_string),
@@ -107,6 +111,15 @@ pub(crate) fn private_key(json: &str) -> Result<Zeroizing<String>, String> {
 }
 
 impl Signer {
+
+    /// This signer POSTing to `endpoint`, the host's judged copy of the token endpoint (the
+    /// `token_uri` setting its need is pinned to); the assertion's `aud` stays the service
+    /// account's own `token_uri`.
+    #[must_use]
+    pub(crate) fn dialling(mut self, endpoint: String) -> Self {
+        self.endpoint = endpoint;
+        self
+    }
     /// The JWT-bearer assertion's signing input for `now` (epoch seconds): the url-safe unpadded
     /// base64 of the fixed header and the claim set, `.`-joined (RFC 7523). The chip signs it
     /// (RS256) as the form is written; the assertion is accepted by the token endpoint for an hour.
@@ -145,7 +158,8 @@ impl Signer {
     }
 
     /// The token request for `now`: the assertion, form-encoded byte for byte as reqwest's `.form()`
-    /// (`serde_urlencoded`) wrote it ([`super::form`]), POSTed to the SA's `token_uri` (RFC 7523).
+    /// (`serde_urlencoded`) wrote it ([`super::form`]), POSTed to the judged endpoint (RFC 7523;
+    /// [`Signer::dialling`]).
     pub(crate) fn request(&self, now: u64) -> Result<TokenRequest, String> {
         let form = FormBody::new()
             .public("grant_type", "urn:ietf:params:oauth:grant-type:jwt-bearer")
@@ -158,7 +172,7 @@ impl Signer {
             );
         Ok(TokenRequest::form(
             super::need::TOKEN_URI,
-            self.token_uri.clone(),
+            self.endpoint.clone(),
             form,
         ))
     }

@@ -75,8 +75,8 @@ fn split_credential(credential: &str) -> Result<(&str, &str), String> {
 }
 
 /// Validate an `oauth-client-credentials` credential WITHOUT constructing the provider — the config
-/// `--validate` dry-run entry point (mirrors `jwt_bearer::validate_credential`, so a malformed
-/// credential is caught at validate time for BOTH OAuth mechanisms, not only jwt-bearer).
+/// `--validate` dry-run entry point (as [`super::jwt_bearer::build`] parses a jwt-bearer service
+/// account, so a malformed credential is caught at validate time for BOTH OAuth mechanisms).
 pub(crate) fn validate_credential(credential: &str) -> Result<(), String> {
     split_credential(credential).map(|_| ())
 }

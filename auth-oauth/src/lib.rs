@@ -289,8 +289,11 @@ impl Oauth {
     pub(crate) fn ready(&self, handle: u64) -> bool {
         match self.bound(handle) {
             Some(style::Binding::Minted(cell)) => cell.presents(self.wall_secs()),
-            // A token exchange is ready whenever asked: each request's exchange is its own.
-            Some(style::Binding::Exchange(_)) => true,
+            // A token exchange is ready unless its last settled exchange failed (its authorization
+            // server is refusing, so `fields` would fail). One not asked yet IS ready: it mints
+            // lazily, per request, so reading it unready until it minted would keep its lane from
+            // ever being tried and so from ever minting.
+            Some(style::Binding::Exchange(b)) => !b.failing(),
             None => false,
         }
     }
