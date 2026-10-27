@@ -9,6 +9,15 @@ use super::*;
 use crate::held::Own;
 use std::collections::VecDeque;
 
+/// The unit tests' wall clock (epoch seconds): their doubles stand in for the host's `clock.now`.
+/// The plugin itself reads no clock (THE DESIGN §1: "one clock"); see [`HostClock`].
+pub(crate) fn now_epoch() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
 /// One scripted read.
 #[derive(Clone)]
 pub(crate) enum Step {
