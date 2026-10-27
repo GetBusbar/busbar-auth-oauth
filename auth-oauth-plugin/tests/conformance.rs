@@ -35,7 +35,7 @@ use busbar_contract::abi::auth::{
 use busbar_contract::abi::mechanism::call::{
     AbiStr, Blob, Op, Outcome, RawOutcome, BLOB_JSON, BLOB_OCTETS, BLOB_SECRET,
 };
-use busbar_contract::abi::mechanism::door::{Door, DoorFn};
+use busbar_contract::abi::mechanism::door::{Door, DoorFn, DoorParts};
 use busbar_contract::abi::mechanism::lifecycle::{
     slot as life, CancelIn, CancelOut, GenIn, OpenIn, OpenOut, RefreshIn, TickIn, TickOut,
     ValidateIn,
@@ -421,22 +421,26 @@ fn compiled_in_and_dropped_in_answer_every_op_identically() {
 fn door_with_fields(op: Op) -> &'static Door {
     // SAFETY: the plugin's `'static` door and its auth table.
     let (d, ops) = unsafe {
-        let d = &*busbar_auth_oauth::door();
-        (d, *d.ops.cast::<auth::Ops>())
+        let d = busbar_auth_oauth::door();
+        (d, *d.ops().cast::<auth::Ops>())
     };
     let mut ops = ops;
     ops.fields = Some(op);
     let ops: &'static auth::Ops = Box::leak(Box::new(ops));
-    Box::leak(Box::new(Door {
-        ops: std::ptr::from_ref(ops).cast(),
-        ..*d
+    // SAFETY: the plugin's own door parts, with `ops` at a `'static` auth table whose every slot is
+    // the plugin's or one of this file's call-convention ops.
+    Box::leak(Box::new(unsafe {
+        Door::__from_parts(DoorParts {
+            ops: std::ptr::from_ref(ops).cast(),
+            ..d.parts()
+        })
     }))
 }
 
 fn real_fields() -> Op {
     // SAFETY: the plugin's `'static` door and its auth table.
     unsafe {
-        (*(*busbar_auth_oauth::door()).ops.cast::<auth::Ops>())
+        (*busbar_auth_oauth::door().ops().cast::<auth::Ops>())
             .fields
             .unwrap()
     }
@@ -456,7 +460,7 @@ extern "C" fn sensitive_fields(inst: *mut c_void, i: *const c_void, o: *mut c_vo
     r
 }
 
-extern "C" fn sensitive_door() -> *const Door {
+extern "C" fn sensitive_door() -> &'static Door {
     door_with_fields(sensitive_fields)
 }
 
@@ -506,7 +510,7 @@ extern "C" fn overrunning_fields(_: *mut c_void, i: *const c_void, o: *mut c_voi
     RawOutcome::of(Outcome::Ready)
 }
 
-extern "C" fn overrunning_door() -> *const Door {
+extern "C" fn overrunning_door() -> &'static Door {
     door_with_fields(overrunning_fields)
 }
 
