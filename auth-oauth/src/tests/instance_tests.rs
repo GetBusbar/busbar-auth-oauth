@@ -17,7 +17,7 @@
 
 use super::*;
 use crate::mint;
-use crate::mint::tests::{Scripted, Step};
+use crate::mint::tests::{now_epoch, Scripted, Step};
 use crate::mint::TokenRequest;
 use crate::style;
 use crate::test_support::{self, TestHost};
@@ -410,7 +410,7 @@ fn a_mint_landing_between_the_read_and_the_park_is_not_a_lost_wake() {
         // THE MINT LANDS: its token is stored, and its drain finds no one parked.
         w.ok(r#"{"access_token":"tok-2","expires_in":3600}"#);
         let wire = Shared(Arc::clone(&w));
-        let (_, report) = cell.tick(u64::MAX / 2, mint::now_epoch(), Some(&wire as &dyn Wire));
+        let (_, report) = cell.tick(u64::MAX / 2, now_epoch(), Some(&wire as &dyn Wire));
         assert_eq!(report, Some(Report::Minted), "the mint landed");
         assert!(held.is_empty(), "the drain finds no one parked yet");
         drop(held);
