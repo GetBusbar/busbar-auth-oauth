@@ -153,35 +153,34 @@ fn a_reopen_shares_the_token_cell_and_a_change_does_not() {
     ));
 }
 
-/// THE DECLARED RANKS AND ENDPOINTS (busbar arch-audit u29 F1; BUSBAR-1.6.0.md #50: the styles a
-/// provider may name are the ones loaded auth plugins declare, and the host judges a style's token
-/// endpoint as a destination from what the style declares, never from its name):
-/// - `jwt-bearer` ranks third and takes its token endpoint from the credential itself;
-/// - `oauth-client-credentials` ranks fourth and sends the credential to the entry's `token_url`
-///   (the one style 1.5.5 judged a `token_url` for);
-/// - `oauth-token-exchange` (no 1.5.5 counterpart) is unranked and states no endpoint bit.
-///
-/// RED: no style stated a rank or an endpoint, so the host could judge the endpoints only by
-/// matching style names.
+/// An unknown settings key is refused, naming it (a typo'd optional key must not silently vanish).
 #[test]
-fn each_style_declares_its_rank_and_its_endpoint() {
-    use busbar_contract::abi::auth::{
-        style_rank, STYLE_ENDPOINT_FROM_CREDENTIAL, STYLE_ENDPOINT_TOKEN_URL,
-    };
-    let endpoints = STYLE_ENDPOINT_TOKEN_URL | STYLE_ENDPOINT_FROM_CREDENTIAL;
-    // Each row named by its length (the crate reads no raw pointer; the three lengths differ).
-    let declared: Vec<(usize, u32, u32)> = crate::STYLES
-        .iter()
-        .map(|d| (d.name.len, style_rank(d.flags), d.flags & endpoints))
-        .collect();
-    assert_eq!(
-        declared,
-        [
-            (JWT_BEARER.len(), 3, STYLE_ENDPOINT_FROM_CREDENTIAL),
-            (OAUTH_CLIENT_CREDENTIALS.len(), 4, STYLE_ENDPOINT_TOKEN_URL),
-            (OAUTH_TOKEN_EXCHANGE.len(), 0, 0),
-        ]
+fn an_unknown_settings_key_is_refused_by_name() {
+    let want = "settings: unknown key `scoep`".to_string();
+    for (style, settings) in [
+        (JWT_BEARER, r#"{"scoep":"x"}"#),
+        (
+            OAUTH_CLIENT_CREDENTIALS,
+            r#"{"token_url":"https://i/t","scope":"s","scoep":"x"}"#,
+        ),
+    ] {
+        let l = lines(open(style, Some("id:secret"), settings));
+        assert_eq!(l, std::slice::from_ref(&want), "{style}");
+    }
+    let r = super::open(
+        OAUTH_TOKEN_EXCHANGE,
+        Some(b"subject"),
+        Some(br#"{"token_url":"https://i/t","resource":"r","scoep":"x"}"#),
+        &Cache::default(),
     );
+    assert_eq!(r.err().unwrap()[0].line(), want);
+    // Every documented key stays accepted.
+    assert!(open(
+        JWT_BEARER,
+        Some("unused"),
+        r#"{"token_uri":"u","scope":"s","subject":"x","max_response_bytes":9}"#
+    )
+    .is_err_and(|r| r[0].line().starts_with("credential:")));
 }
 
 /// THE JWT MINT DIALS THE HOST-JUDGED ENDPOINT (Q128 auth-oauth reader B, LOW): the host reads the

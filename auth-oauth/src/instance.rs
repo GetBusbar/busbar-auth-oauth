@@ -160,8 +160,12 @@ impl Oauth {
 
     /// Forget `ticket` as waiting on the on-demand cell `key` (its call answered after all).
     pub(crate) fn unpark_exchange(&self, key: [u8; 32], ticket: Ticket) {
-        if let Some(waiting) = lock(&self.exchange_waiters).get_mut(&key) {
+        let mut w = lock(&self.exchange_waiters);
+        if let Some(waiting) = w.get_mut(&key) {
             waiting.retain(|t| *t != ticket);
+            if waiting.is_empty() {
+                w.remove(&key);
+            }
         }
     }
 
@@ -191,21 +195,6 @@ impl Oauth {
         });
     }
 
-    /// A SCHEDULED cell `retire` kept because its mint was in flight, dropped once that mint has
-    /// settled: idle, held by no handle (the cache's reference and the caller's `cell` are the only
-    /// two), and still the cache's cell for `key`. Judged under the cache lock, which every new
-    /// holder takes to clone it, so a re-open racing this keeps its cell. A cell a handle holds, or
-    /// one still minting, stays.
-    fn drop_orphan(&self, key: [u8; 32], cell: &Arc<Minted>) {
-        let mut cache = lock(&self.cache);
-        let orphan = cache.get(&key).is_some_and(|c| Arc::ptr_eq(c, cell))
-            && Arc::strong_count(cell) == 2
-            && cell.idle();
-        if orphan {
-            cache.remove(&key);
-        }
-    }
-
     /// Park `ticket` until a mint lands.
     pub(crate) fn park(&self, ticket: Ticket) {
         let mut w = lock(&self.waiters);
@@ -222,9 +211,11 @@ impl Oauth {
     /// `cancel`: forget `ticket`.
     pub(crate) fn unpark(&self, ticket: Ticket) {
         lock(&self.waiters).retain(|t| *t != ticket);
-        for waiting in lock(&self.exchange_waiters).values_mut() {
+        // An emptied list is dropped with its key: no entry outlives the waiters it served.
+        lock(&self.exchange_waiters).retain(|_, waiting| {
             waiting.retain(|t| *t != ticket);
-        }
+            !waiting.is_empty()
+        });
         lock(&self.exchange_failed).retain(|t| *t != ticket);
     }
 
@@ -239,7 +230,8 @@ impl Oauth {
     }
 
     /// `tick` at tick-clock `now_ns` on the driver ticket `ticket`: a new cycle (its handle count
-    /// starts again), the refresh ahead of expiry, the wakes. Answers the next tick; an instance
+    /// carries on: the host may still keep the last cycle's answers), the refresh ahead of expiry,
+    /// the wakes. Answers the next tick; an instance
     /// with no binding yet still asks for one ([`MIN_SLEEP_SECS`] on), never ending its schedule.
     pub(crate) fn tick(
         &self,
@@ -251,7 +243,6 @@ impl Oauth {
         if !ticket.is_none() {
             *lock(&self.driver) = ticket;
         }
-        self.issued.store(0, Ordering::Release);
         self.advance(Some(now_ns), ticket, host, diags)
             .unwrap_or(now_ns.saturating_add(MIN_SLEEP_SECS * crate::mint::NS))
     }
@@ -326,8 +317,8 @@ impl Oauth {
         let mut minted = false;
         for (key, cell) in cells {
             let (due, report) = cell.tick(now_ns, wall, wire);
-            next = next.min(due);
             if cell.on_demand() {
+                next = next.min(due);
                 self.settle_exchange(key, &cell, report, host, diags);
                 continue;
             }
@@ -355,7 +346,9 @@ impl Oauth {
                 ),
                 None => {}
             }
-            self.drop_orphan(key, &cell);
+            if !self.reap(key, &cell) {
+                next = next.min(due);
+            }
         }
         if minted {
             // The token is stored before this drain: a call that parks after the drain reads it
@@ -368,6 +361,20 @@ impl Oauth {
             }
         }
         (next != u64::MAX).then_some(next)
+    }
+
+    /// A scheduled cell no handle holds leaves the cache once it is idle (what `retire`'s doc
+    /// promises of a cell it kept for its mint): the cache's Arc and the tick's own are the only
+    /// two, judged under the cache's lock. Whether it was dropped.
+    fn reap(&self, key: [u8; 32], cell: &Arc<Minted>) -> bool {
+        let mut cache = lock(&self.cache);
+        let orphan = Arc::strong_count(cell) == 2
+            && cell.idle()
+            && cache.get(&key).is_some_and(|c| Arc::ptr_eq(c, cell));
+        if orphan {
+            cache.remove(&key);
+        }
+        orphan
     }
 
     /// AN ON-DEMAND CELL'S TICK, settled: a landed exchange wakes the tickets waiting on it; a

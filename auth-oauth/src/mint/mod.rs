@@ -55,16 +55,6 @@ pub(crate) const IN_FLIGHT_POLL_NS: u64 = 5_000_000;
 /// Nanoseconds in a second, on the tick clock.
 pub(crate) const NS: u64 = 1_000_000_000;
 
-/// The unit tests' wall clock (epoch seconds): their doubles stand in for the host's `clock.now`.
-/// The plugin itself reads no clock (THE DESIGN §1: "one clock"); see [`HostClock`].
-#[cfg(test)]
-pub(crate) fn now_epoch() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-}
-
 /// THE PLUGIN'S OWN NEEDS, by their index in the Statement (`crate::NEEDS`): the token endpoint
 /// each style POSTs to, its target the binding's own setting (THE DESIGN §5: egress class
 /// `operator-infrastructure`, "auth mint endpoints (`token_url`, `token_uri`)").
@@ -291,25 +281,57 @@ pub(crate) fn access_token(json: &str) -> Result<Zeroizing<String>, String> {
     })
 }
 
-/// Parse a finished token response: a non-2xx status is the endpoint's refusal, named with a short
-/// snippet of its body; otherwise the JSON token. Verbatim from the two mint bodies.
+/// `body` as text, bytes that are not UTF-8 replaced as `String::from_utf8_lossy` does, built into
+/// ONE wiped string sized exactly first, so it never reallocates and frees an unwiped copy.
+fn lossy_wiped(b: &[u8]) -> Zeroizing<String> {
+    let len: usize = b
+        .utf8_chunks()
+        .map(|c| c.valid().len() + if c.invalid().is_empty() { 0 } else { 3 })
+        .sum();
+    let mut out = Zeroizing::new(String::with_capacity(len));
+    for c in b.utf8_chunks() {
+        out.push_str(c.valid());
+        if !c.invalid().is_empty() {
+            out.push('\u{FFFD}');
+        }
+    }
+    out
+}
+
+/// The RFC 6749 section 5.2 `error` code of a JSON error body: a string member of at most 64 chars
+/// from `%x20-21 / %x23-5B / %x5D-7E`; `None` for anything else (never other body text).
+fn oauth_error_code(body: &str) -> Option<Zeroizing<String>> {
+    // Well-formed only (`IgnoredAny` copies nothing); `wiped_member` answers none unless the
+    // top level is an object holding a string `error`.
+    serde_json::from_str::<serde::de::IgnoredAny>(body).ok()?;
+    let code = crate::token_response::wiped_member(body, b"error")?;
+    let ok = code.len() <= 64
+        && code
+            .bytes()
+            .all(|b| matches!(b, 0x20..=0x21 | 0x23..=0x5B | 0x5D..=0x7E));
+    ok.then_some(code)
+}
+
+/// Parse a finished token response: a non-2xx status is the endpoint's refusal, named with its
+/// status and error code only; otherwise the JSON token. Verbatim from the two mint bodies.
 pub(crate) fn parse_response(
     status: u16,
     body: &[u8],
     now: u64,
 ) -> Result<(CachedToken, bool), String> {
     // The body carries the access token: a lossy copy (bytes that are not UTF-8) is wiped too.
-    let body = Zeroizing::new(String::from_utf8_lossy(body).into_owned());
+    let body = lossy_wiped(body);
     if !(200..300).contains(&status) {
-        // Never log the request/assertion wholesale (may echo claims or the client secret); status +
-        // a short snippet only. Diagnostic-only: the request has already failed on `status`.
+        // Never put body text in the error: a server may reflect the request (client secret,
+        // assertion) and the error reaches the diag channel. Status plus the RFC 6749 section 5.2
+        // `error` code, only when the body proves it is one.
         let status = http::StatusCode::from_u16(status)
             .map(|s| s.to_string())
             .unwrap_or_else(|_| status.to_string());
-        return Err(format!(
-            "token endpoint returned {status}: {}",
-            body.chars().take(200).collect::<String>()
-        ));
+        return Err(match oauth_error_code(&body) {
+            Some(code) => format!("token endpoint returned {status}: {}", code.as_str()),
+            None => format!("token endpoint returned {status}"),
+        });
     }
     // A decode failure is described without the decoder's text, which can quote the token.
     let tok: TokenResponse =
@@ -435,17 +457,17 @@ impl Minted {
         }
     }
 
+    /// Minted on demand (the token-exchange style's per-scope cell).
+    pub(crate) fn on_demand(&self) -> bool {
+        self.on_demand
+    }
+
     /// The binding's exchange material, for a token-exchange cell; `None` for a scheduled one.
     pub(crate) fn exchange(&self) -> Option<&token_exchange::Exchange> {
         match &self.minter {
             Minter::TokenExchange(scoped) => Some(scoped.exchange()),
             _ => None,
         }
-    }
-
-    /// Minted on demand (the token-exchange style's per-scope cell).
-    pub(crate) fn on_demand(&self) -> bool {
-        self.on_demand
     }
 
     /// No exchange is in flight.
@@ -491,7 +513,6 @@ impl Minted {
     /// Present the cached token for a request at wall-clock `now` (epoch seconds), through `f`
     /// (so the borrow of the cached value never escapes the read).
     pub(crate) fn read<T>(&self, now: u64, f: impl FnOnce(Read<'_>) -> T) -> T {
-        let tok = self.current();
         // ON DEMAND: a token past its use is not presented; the request arms the next exchange
         // (due at once, when none is in flight) and waits for it.
         if self.on_demand && !self.usable(now) {
@@ -504,6 +525,10 @@ impl Minted {
             }
             return f(Read::Wait);
         }
+        // The snapshot comes AFTER the usable check: `tick` stores the token before it stores
+        // `usable_until`, so a read that finds the cell usable snapshots the stored token, never
+        // an older (empty or expired) one an exchange landing in between has replaced.
+        let tok = self.current();
         // BEFORE THE FIRST MINT a scheduled cell presents nothing: READY with no fields, so the
         // upstream answers 401, as 1.5.5 did (THE DESIGN §11.11; contract `abi/auth` `fields`).
         if tok.token.expose_own(&Own::here()).is_empty() {
@@ -538,7 +563,7 @@ impl Minted {
             let Some(wire) = wire else {
                 // No need was granted: nothing can mint. Say so once per retry period.
                 *ex = Exchange::Idle {
-                    due_ns: now_ns + MIN_SLEEP_SECS * NS,
+                    due_ns: now_ns.saturating_add(MIN_SLEEP_SECS * NS),
                 };
                 return self.failed(
                     &mut ex,
@@ -572,7 +597,7 @@ impl Minted {
             }
         }
         let Some(wire) = wire else {
-            return (now_ns + IN_FLIGHT_POLL_NS, None);
+            return (now_ns.saturating_add(IN_FLIGHT_POLL_NS), None);
         };
         let Exchange::InFlight {
             conn,
@@ -581,7 +606,7 @@ impl Minted {
             body,
         } = &mut *ex
         else {
-            return (now_ns + IN_FLIGHT_POLL_NS, None);
+            return (now_ns.saturating_add(IN_FLIGHT_POLL_NS), None);
         };
         let conn = *conn;
         let mut buf = Zeroizing::new([0_u8; READ_BUF_BYTES]);
@@ -616,7 +641,7 @@ impl Minted {
                         break Ok((status.unwrap_or(0), std::mem::take(body)));
                     }
                 }
-                Err(ConnError::Pending) => return (now_ns + IN_FLIGHT_POLL_NS, None),
+                Err(ConnError::Pending) => return (now_ns.saturating_add(IN_FLIGHT_POLL_NS), None),
                 Err(ConnError::Closed) if status.is_some() && !body.is_empty() => {
                     break Ok((status.unwrap_or(0), std::mem::take(body)))
                 }
@@ -631,7 +656,9 @@ impl Minted {
             }
         };
         wire.close(conn);
-        match finished.and_then(|(status, body)| parse_response(status as u16, &body, wall)) {
+        match finished.and_then(|(status, body)| {
+            parse_response(u16::try_from(status).unwrap_or(0), &body, wall)
+        }) {
             // A 200 with an EMPTY access_token must be treated as a (retryable) failure, not stored:
             // an empty token collides with the pre-first-mint sentinel, so `ready` would stay false
             // forever AND the per-request call would emit no auth header — a permanent wedge with no
@@ -641,7 +668,7 @@ impl Minted {
                 let due = if self.on_demand {
                     u64::MAX
                 } else {
-                    now_ns + MIN_SLEEP_SECS * NS
+                    now_ns.saturating_add(MIN_SLEEP_SECS * NS)
                 };
                 *ex = Exchange::Idle { due_ns: due };
                 (due, Some(Report::EmptyToken))
@@ -663,7 +690,7 @@ impl Minted {
                 let due = if self.on_demand {
                     u64::MAX
                 } else {
-                    now_ns + ahead * NS
+                    now_ns.saturating_add(ahead.saturating_mul(NS))
                 };
                 *self
                     .token
@@ -695,7 +722,7 @@ impl Minted {
         let due = if self.on_demand {
             u64::MAX
         } else {
-            now_ns + MIN_SLEEP_SECS * NS
+            now_ns.saturating_add(MIN_SLEEP_SECS * NS)
         };
         *ex = Exchange::Idle { due_ns: due };
         (due, Some(Report::MintFailed(e)))
