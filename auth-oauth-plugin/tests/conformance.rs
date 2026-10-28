@@ -17,7 +17,7 @@
 // auth kind's OUTBOUND script over this crate's linked door and its dropped-in cdylib (built with
 // `dropped-in`), driven by `conformance.json`; the hand-written both-ways proof below stays beside
 // it. `plugin-ci.yml` runs the suite under `--release` once the crate lives in its own repo.
-busbar_plugin_loader::conformance_suite! {
+busbar_test_kit::conformance_suite! {
     door: busbar_auth_oauth::door,
     cdylib: "busbar_auth_oauth_plugin",
     inputs: include_str!("conformance.json"),
@@ -117,7 +117,7 @@ fn linked(folds: &Arc<Folds>, d: &Dispatcher) -> Plugin<Auth> {
 }
 
 fn dropped(folds: &Arc<Folds>, d: &Dispatcher) -> Option<Plugin<Auth>> {
-    let path = busbar_plugin_loader::conformance::cdylib_of("busbar_auth_oauth_plugin");
+    let path = busbar_test_kit::conformance::cdylib_of("busbar_auth_oauth_plugin");
     let stated = rendering_of(busbar_auth_oauth::door).expect("the door renders its Statement");
     Some(load_dropped::<Auth>(&path, &stated, bind(folds, d)).expect("the dropped door loads"))
 }
@@ -420,11 +420,15 @@ fn compiled_in_and_dropped_in_answer_every_op_identically() {
 
 fn door_with_fields(op: Op) -> &'static Door {
     // SAFETY: the plugin's `'static` door and its auth table.
-    let d = busbar_auth_oauth::door();
-    let mut ops = unsafe { *d.ops().cast::<auth::Ops>() };
+    let (d, ops) = unsafe {
+        let d = busbar_auth_oauth::door();
+        (d, *d.ops().cast::<auth::Ops>())
+    };
+    let mut ops = ops;
     ops.fields = Some(op);
     let ops: &'static auth::Ops = Box::leak(Box::new(ops));
-    // SAFETY: the plugin's own door's parts, its ops table swapped for a copy that outlives it.
+    // SAFETY: the plugin's own door parts, with `ops` at a `'static` auth table whose every slot is
+    // the plugin's or one of this file's call-convention ops.
     Box::leak(Box::new(unsafe {
         Door::__from_parts(DoorParts {
             ops: std::ptr::from_ref(ops).cast(),

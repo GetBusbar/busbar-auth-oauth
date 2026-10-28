@@ -68,6 +68,7 @@ dependencies = [
  "busbar-auth-oauth",
  "busbar-contract",
  "busbar-plugin-loader",
+ "busbar-test-kit",
  "serde_json",
  "tokio",
 ]
@@ -75,7 +76,7 @@ dependencies = [
 [[package]]
 name = "busbar-contract"
 version = "1.6.0"
-source = "git+https://www.github.com/GetBusbar/busbar?rev=429989762dc0c2bd4e55c4605d82fb2d1c54bb59#429989762dc0c2bd4e55c4605d82fb2d1c54bb59"
+source = "git+https://www.github.com/GetBusbar/busbar?rev=91af6001dad844b8a441e41c397034a874ccb52f#91af6001dad844b8a441e41c397034a874ccb52f"
 dependencies = [
  "async-trait",
  "base64",
@@ -102,9 +103,8 @@ dependencies = [
 [[package]]
 name = "busbar-plugin-loader"
 version = "1.5.0"
-source = "git+https://github.com/GetBusbar/busbar?rev=429989762dc0c2bd4e55c4605d82fb2d1c54bb59#429989762dc0c2bd4e55c4605d82fb2d1c54bb59"
+source = "git+https://github.com/GetBusbar/busbar?rev=91af6001dad844b8a441e41c397034a874ccb52f#91af6001dad844b8a441e41c397034a874ccb52f"
 dependencies = [
- "base64",
  "busbar-contract",
  "ed25519-dalek",
  "flate2",
@@ -118,6 +118,21 @@ dependencies = [
  "tar",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "busbar-test-kit"
+version = "1.6.0"
+source = "git+https://github.com/GetBusbar/busbar?rev=91af6001dad844b8a441e41c397034a874ccb52f#91af6001dad844b8a441e41c397034a874ccb52f"
+dependencies = [
+ "base64",
+ "busbar-contract",
+ "busbar-plugin-loader",
+ "hex",
+ "ring",
+ "serde",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]
