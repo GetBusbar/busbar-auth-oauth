@@ -111,7 +111,6 @@ pub(crate) fn private_key(json: &str) -> Result<Zeroizing<String>, String> {
 }
 
 impl Signer {
-
     /// This signer POSTing to `endpoint`, the host's judged copy of the token endpoint (the
     /// `token_uri` setting its need is pinned to); the assertion's `aud` stays the service
     /// account's own `token_uri`.
