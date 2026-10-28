@@ -258,8 +258,8 @@ pub(crate) fn next_refresh_secs(expires_at: u64, now: u64) -> u64 {
 #[derive(serde::Deserialize)]
 struct TokenResponse {
     /// Required, and skipped by the decoder; [`access_token`] reads it.
-    #[allow(dead_code)]
-    access_token: serde::de::IgnoredAny,
+    #[serde(rename = "access_token")]
+    _access_token: serde::de::IgnoredAny,
     #[serde(
         default = "default_expires_in",
         deserialize_with = "deserialize_expires_in"
