@@ -3,7 +3,6 @@
 
 //! # busbar-auth-oauth — the OAuth self-minting auth styles, one auth-kind plugin
 //!
-//! BUSBAR-1.6.0.md THE DESIGN, §6 (OWNER-LOCKED 2026-09-27, split by mechanism per ARCHITECT ruling 2026-09-29):
 //! `jwt-bearer` (RFC 7523) and `oauth-client-credentials` (RFC 6749 §4.4) are ONE mechanism —
 //! each obtains a short-lived bearer from a token endpoint and presents it as
 //! `authorization: Bearer <token>`, differing only in the token request — and live in one plugin,
@@ -12,36 +11,33 @@
 //!
 //! * `open_outbound` binds one style to its credential and settings and answers a handle
 //!   (generation data). It never touches the network.
-//! * `fields` is called by the binding's transport at the style's auth point (`Head`, THE DESIGN
-//!   §6 "Auth points and guest lists"): the auth fields for this request, staged into the SDK's
+//! * `fields` is called by the binding's transport at the style's auth point (`Head`): the auth fields for this request, staged into the SDK's
 //!   writer, which the transport adds to the head before it encodes it.
 //!   Neither style serves the caller's credential — an OAuth token is always minted from the
 //!   OPERATOR's own configured credential, never a per-request one — so neither style declares
-//!   [`busbar_contract::abi::auth::STYLE_CALLER_CREDENTIAL`] (ARCHITECT ruling 2026-09-29).
+//!   [`busbar_contract::abi::auth::STYLE_CALLER_CREDENTIAL`].
 //! * `outbound_ready` is the handle's `ready` fact for the health prober.
 //! * `tick` refreshes minted tokens ahead of expiry.
 //!
-//! `oauth-token-exchange` (RFC 8693; ARCHITECT round 5 Q-L3B-EXCHANGE (B), BUSBAR-1.6.0.md B.3 item
-//! 12) is the same mechanism minted ON DEMAND: its credential is busbar's own subject token, its
+//! `oauth-token-exchange` (RFC 8693) is the same mechanism minted ON DEMAND: its credential is busbar's own subject token, its
 //! settings `{token_url, resource, subject_token_type?}`, and the scope each exchange asks for is
 //! the per-call down-scope the request states in `fields`' extensions blob
 //! (`busbar_contract::abi::auth::EXT_SCOPE`). Each scope is its own exchange and its own cached token;
 //! a request that finds none usable waits (PENDING on its ticket) while the exchange runs on the
 //! instance's driver ticket, and fails (FAILED) when the exchange does.
 //!
-//! EACH STYLE MINTS THROUGH THE PLUGIN'S OWN NEED and refreshes ahead of expiry on `tick`
+//! Each style mints through the plugin's own need and refreshes ahead of expiry on `tick`
 //! ([`mint`]). The kernel holds no auth cache and does no per-plugin branching.
 //!
-//! THE DOOR is the SDK's safe outbound-auth kit (`busbar_contract::abi::sdk::auth_outbound`,
+//! The door is the SDK's safe outbound-auth kit (`busbar_contract::abi::sdk::auth_outbound`,
 //! `auth_outbound_door!`): [`Oauth`](instance::Oauth) is its [`OutboundPlugin`], and the crate
-//! holds no `unsafe` (THE DESIGN §2: an auth plugin is `#![forbid(unsafe_code)]`). The inbound
+//! holds no `unsafe` (`#![forbid(unsafe_code)]`). The inbound
 //! operations (`verify`, the login pair) are not served and answer REFUSED (the tail declares only
 //! the outbound capability).
 //!
-//! THE NEEDS ([`NEEDS`]; THE DESIGN §5, egress class `operator-infrastructure`, as ARCHITECT ruled
-//! for D1 2026-10-05 (1.5.5 minted over plaintext to a private or loopback endpoint; the ONE
-//! destination guard still applies on top): "auth mint endpoints (`token_url`,
-//! `token_uri`)"): one outbound need per token endpoint, over the http transport, its target the
+//! The needs ([`NEEDS`]; egress class `operator-infrastructure`: minting may go over plaintext to
+//! a private or loopback endpoint, and the ONE destination guard still applies on top): one
+//! outbound need per token endpoint, over the http transport, its target the
 //! binding's own setting (`target_from`), so the host declares it pinned to that endpoint when it
 //! opens the instance with the binding's settings. The token exchange is ONE framed request and its
 //! reply over that need, through the host's connector table (`mint::host_wire`), on the instance's
@@ -92,20 +88,19 @@ use busbar_contract::abi::sdk::life::Refusal;
 use crate::instance::Oauth;
 use crate::mint::Read;
 
-/// The flags every field this plugin writes carries: NONE. 1.5.5 sent its credential headers
-/// indexable, and an h2 encoder that honoured `FIELD_SENSITIVE` would send them never-indexed —
-/// different bytes (ARCHITECT ruling 2026-09-28, Q4: the 1.5.5 bytes win; TODO item 583's
-/// sensitive marking is a behaviour change not taken without the owner).
+/// The flags every field this plugin writes carries: NONE. Credential headers go out
+/// indexable, and an h2 encoder that honoured `FIELD_SENSITIVE` would send them never-indexed,
+/// which is different bytes on the wire.
 const FIELD_FLAGS: u32 = 0;
 
 /// The styles this plugin serves, each at `Head` (a bearer token reads nothing past the head).
 /// None carries [`busbar_contract::abi::auth::STYLE_CALLER_CREDENTIAL`] (an OAuth token is always
 /// minted from the operator's own credential). Each provider-entry grant STATES where its token
-/// endpoint is, so the host judges it by the bit, never by the style's name (busbar arch-audit u29
-/// F1): `jwt-bearer` the service account's `token_uri` its credential names, read and judged by the
+/// endpoint is, so the host judges it by the bit, never by the style's name:
+/// `jwt-bearer` the service account's `token_uri` its credential names, read and judged by the
 /// host and handed back as the `token_uri` setting; `oauth-client-credentials` the entry's
-/// `token_url`. Both rank after 1.5.5's two header styles, in 1.5.5's order, so the host's list of
-/// the words a provider's `auth:` may name keeps 1.5.5's as its prefix. The token exchange is a
+/// `token_url`. Both rank after the two header styles, so the host's list of the words a
+/// provider's `auth:` may name keeps those as its prefix. The token exchange is a
 /// plane need's style (its `resource` is no provider key): unranked, its endpoint judged as its
 /// need's target.
 const STYLES: &[StyleDecl] = &[
@@ -145,7 +140,7 @@ pub const NEEDS: &[Need] = &[
     token_need("settings.token_uri"),
 ];
 
-/// The diagnostic ids, in [`instance::diag`] order: 1.5.5's catalog codes where the line had one.
+/// The diagnostic ids, in [`instance::diag`] order.
 const DIAG_IDS: &[AbiStr] = &[
     abi_str("BUSBAR-4014"),
     abi_str("BUSBAR-4015"),
@@ -317,7 +312,7 @@ impl Oauth {
     }
 
     /// `open_outbound`'s body: bind a style; a refusal carries one `credential: …` /
-    /// `settings: …` line per finding (ARCHITECT ruling 2026-09-28).
+    /// `settings: …` line per finding.
     pub(crate) fn bind(
         &self,
         style: &str,
@@ -407,8 +402,8 @@ impl OutboundPlugin for Oauth {
 
     /// The driver ticket was woken (a read of the token exchange that pended, or a mint wanted at
     /// once): the exchange goes on. PENDING with `wake_at_ns` at the instant a cell is next due, so
-    /// a token minted between ticks is refreshed ahead of its expiry on the host's timer (THE
-    /// DESIGN §11: every call is Ready or Pending(wake); no plugin timer, no plugin thread).
+    /// a token minted between ticks is refreshed ahead of its expiry on the host's timer (every call
+    /// is Ready or Pending(wake); no plugin timer, no plugin thread).
     fn drive(&self, host: Option<&Host>, driver: Ticket, diags: &mut Diags) -> Driven {
         match Oauth::drive(self, driver, host, diags) {
             Some(at) => Driven::Pending { wake_at_ns: at },

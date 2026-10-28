@@ -10,14 +10,12 @@
 //! `https://cognitiveservices.azure.com/.default`), but any client-credentials backend works by
 //! config.
 //!
-//! MOVED VERBATIM from the kernel's `egress_auth/oauth_client_credentials.rs` (KERNEL<>PLUGINS
-//! step 22). This module owns only the token request; the exchange runs over the plugin's own need,
+//! This module owns only the token request; the exchange runs over the plugin's own need,
 //! and the token cache, the per-request read and the refresh ahead of expiry on `tick` live in
 //! [`super`], shared with `jwt-bearer`.
 //!
-//! The `token_url` https / cloud-metadata vetting (`validate_token_url`) did NOT move: the kernel
-//! judges an auth plugin's need target at seal and at `--validate` and renders those 1.5.5 texts
-//! itself (ARCHITECT ruling 2026-09-28, Q2 (a)).
+//! The `token_url` https / cloud-metadata vetting is not done here: the kernel judges an auth
+//! plugin's need target at seal and at `--validate`.
 
 use super::TokenRequest;
 use crate::held::Own;
@@ -69,8 +67,8 @@ pub(crate) fn validate_credential(credential: &str) -> Result<(), String> {
 }
 
 impl ClientCreds {
-    /// The token request (RFC 6749 §4.4): the form byte for byte as reqwest's `.form()`
-    /// (`serde_urlencoded`) wrote it, built once and wiped on drop ([`super::form`]: it carries the
+    /// The token request (RFC 6749 §4.4): the form as `serde_urlencoded` writes it,
+    /// built once and wiped on drop ([`super::form`]: it carries the
     /// client secret), POSTed to `token_url`.
     pub(crate) fn request(&self) -> Result<TokenRequest, String> {
         let form = super::form(&[

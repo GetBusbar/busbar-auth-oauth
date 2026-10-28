@@ -7,9 +7,9 @@
 //! `tick`, on that tick). Neither serves a caller-credential passthrough mode: an OAuth token is always minted
 //! from the OPERATOR's own configured credential (a service-account key, a client id/secret), never
 //! from a per-request caller credential, so this mechanism declares no
-//! [`busbar_contract::abi::auth::STYLE_CALLER_CREDENTIAL`] (ARCHITECT ruling 2026-09-29).
+//! [`busbar_contract::abi::auth::STYLE_CALLER_CREDENTIAL`].
 //!
-//! THE SETTINGS SCHEMA (ARCHITECT ruling 2026-09-28):
+//! The settings schema:
 //!
 //! | style | settings |
 //! |---|---|
@@ -20,14 +20,14 @@
 //! A key outside a style's row is refused (`settings: unknown key `<k>``), so a typo never
 //! silently falls back to a default.
 //!
-//! `oauth-token-exchange` (RFC 8693, ARCHITECT round 5 Q-L3B-EXCHANGE (B)) binds busbar's own
+//! `oauth-token-exchange` (RFC 8693) binds busbar's own
 //! subject token (the credential) and mints nothing at open: each request's scope (the call's
 //! extensions blob) is its own exchange, on demand, cached per scope ([`ExchangeBinding`]).
 //!
-//! THE REFUSALS (ARCHITECT ruling 2026-09-28): a binding that cannot open answers FAILED with one
-//! line per finding, each `credential: <text>` or `settings: <text>`. The kernel composes the 1.5.5
+//! The refusals: a binding that cannot open answers FAILED with one
+//! line per finding, each `credential: <text>` or `settings: <text>`. The kernel composes the
 //! sentence — `provider '<p>' <style> credential (from <src>) is invalid: <text>`, or
-//! `provider '<p>' <text>` — so every `<text>` below is 1.5.5's own words.
+//! `provider '<p>' <text>`.
 
 use std::sync::Arc;
 
@@ -289,7 +289,7 @@ fn open_token_exchange(
 ///
 /// # Errors
 ///
-/// Every finding that refuses the binding, in 1.5.5's check order.
+/// Every finding that refuses the binding, in check order.
 pub fn open_binding(
     style: &str,
     credential: Option<&[u8]>,
@@ -322,7 +322,7 @@ pub fn open_binding(
     }
 }
 
-/// `oauth-client-credentials`: 1.5.5's `config_validate` checks, in its order (the keyless
+/// `oauth-client-credentials`: the checks, in order (the keyless
 /// contradiction, `token_url`, `scope`, the credential shape), then the binding.
 fn open_client_credentials(
     m: &Map<String, Value>,

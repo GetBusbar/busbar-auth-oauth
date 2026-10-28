@@ -2,9 +2,8 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! `oauth-token-exchange` egress auth — OAuth 2.0 Token Exchange (RFC 8693), audience-bound by an
-//! RFC 8707 `resource` (ARCHITECT round 5 Q-L3B-EXCHANGE (B); BUSBAR-1.6.0.md B.3 item 12: an
-//! outbound style whose one per-request call runs the exchange inside the auth plugin, the
-//! provider's target as the audience).
+//! RFC 8707 `resource` (an outbound style whose one per-request call runs the exchange inside the
+//! auth plugin, the provider's target as the audience).
 //!
 //! The credential is BUSBAR'S OWN subject token, never a caller's; the settings name the
 //! authorization server's `token_url`, the `subject_token_type` (default: an access token) and the

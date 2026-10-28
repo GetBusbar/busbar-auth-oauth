@@ -10,15 +10,13 @@
 //! (`client_email` → JWT `iss`, `private_key` → the RS256 key, `token_uri` → JWT `aud`); the scope
 //! defaults to `cloud-platform`. Vertex AI is the first provider to select `auth: jwt-bearer`.
 //!
-//! MOVED VERBATIM from the kernel's `egress_auth/jwt_bearer.rs` (KERNEL<>PLUGINS step 22).
 //! This module owns only the JWT signing and the token request it is exchanged in; the exchange
 //! runs over the plugin's own need and the token cache, the per-request read and the refresh ahead
 //! of expiry on `tick` live in [`super`], shared with `oauth-client-credentials`.
 //!
-//! The SA JSON's `token_uri` https / cloud-metadata vetting (`validate_token_uri`) did NOT move: the
-//! kernel judges an auth plugin's need target at seal and at `--validate` and renders those 1.5.5
-//! texts itself (ARCHITECT ruling 2026-09-28, Q2 (a); the allow-list and metadata posture are the
-//! kernel's, BUSBAR-1.6.0.md THE DESIGN, §5).
+//! The SA JSON's `token_uri` https / cloud-metadata vetting is not done here: the kernel judges an
+//! auth plugin's need target at seal and at `--validate` (the allow-list and metadata posture are
+//! the kernel's).
 
 use super::TokenRequest;
 use base64::Engine as _;
@@ -33,7 +31,7 @@ pub(crate) struct Signer {
     rng: ring::rand::SystemRandom,
     /// JWT `iss` — the service account's `client_email`.
     issuer: String,
-    /// JWT `aud` — the SA JSON `token_uri`, as the credential spells it (1.5.5's claim).
+    /// JWT `aud` — the SA JSON `token_uri`, as the credential spells it.
     token_uri: String,
     /// The POST target: the host's judged copy of the endpoint (the `token_uri` setting, its
     /// userinfo stripped, the one the token need is pinned to), else the SA JSON's own.
@@ -41,8 +39,7 @@ pub(crate) struct Signer {
     scope: String,
     /// JWT `sub` (RFC 7523 §3), emitted ONLY when the operator explicitly configures it
     /// (`ProviderCfg::subject`). Left `None` — the default, and the only case that matters for a plain
-    /// (non-delegated) Google service account — the assertion carries no `sub` at all, UNCHANGED from
-    /// pre-fix behavior: for a Google service account, the mere PRESENCE of `sub` (not its value)
+    /// (non-delegated) Google service account — the assertion carries no `sub` at all: for a Google service account, the mere PRESENCE of `sub` (not its value)
     /// switches the grant into domain-wide-delegation/impersonation semantics, so it must never be
     /// defaulted (e.g. to `iss`) or every plain SA (the shipped Vertex AI setup) starts failing
     /// `unauthorized_client`/`invalid_grant`. Mirrors `google-auth-python`'s own opt-in `subject=`.
@@ -52,8 +49,8 @@ pub(crate) struct Signer {
 /// Build a `jwt-bearer` signer: PARSES the key material (failing loud on a malformed
 /// service-account JSON / PKCS#8 key, the common misconfig). It never touches the network: the first
 /// mint runs on the instance's driver ticket. `credential` is the SA JSON's bytes, never a path: a key file is read by
-/// the host's secret file source (`api_key: {file: <path>}`) and its JSON delivered here (THE
-/// DESIGN §11.11 R4, §6 trust boundary; ruling 11). `scope_override` replaces the default
+/// the host's secret file source (`api_key: {file: <path>}`) and its JSON delivered here.
+/// `scope_override` replaces the default
 /// `cloud-platform` scope when set. `subject` is the operator-configured RFC 7523 `sub` — `None`
 /// (the default) omits the claim entirely; `Some` emits it verbatim, for Google
 /// domain-wide-delegation impersonation or a third-party IdP that requires `sub`.
@@ -82,7 +79,7 @@ pub(crate) fn build(
 /// The JSON decoder never decodes the private key: a PEM in JSON always carries `\n` escapes, and a
 /// decoder unescapes a string into a scratch buffer of its own that it frees unwiped. The decode
 /// skips the key's value (skipping copies nothing) and [`private_key`] unescapes it straight into a
-/// buffer sized once and wiped on drop (THE DESIGN §6: "auth material is zeroised").
+/// buffer sized once and wiped on drop (auth material is zeroised).
 fn parse_service_account(
     credential: &str,
 ) -> Result<(ServiceAccount, ring::signature::RsaKeyPair), String> {
@@ -213,10 +210,9 @@ fn jwt_claims_json(
 
 /// SA-JSON credential material: the service-account JSON itself, never a path.
 ///
-/// THE PLUGIN OPENS NO FILE (Q128 oauth M4, ruling (a)): a key-file credential is resolved by the
-/// host at config time (the secret kind's file source, `api_key: {file: <path>}`; THE DESIGN
-/// §11.11 R4 l.1464-1469), so a credential that is not inline JSON is refused here unread, naming
-/// that form (1.5.5 took a path here and read it itself). The
+/// The plugin opens no file: a key-file credential is resolved by the host at config time (the
+/// secret kind's file source, `api_key: {file: <path>}`), so a credential that is not inline JSON is
+/// refused here unread, naming that form. The
 /// refusal deliberately does NOT render `credential`: the only thing that tells JSON from anything
 /// else is a leading `{`, so an operator who pasted the key body, or a secret ref that resolved to
 /// key material, lands here holding the SIGNING KEY. This error reaches the `--validate` report and
@@ -225,7 +221,7 @@ fn jwt_claims_json(
 /// lane and the secret's configured source.
 ///
 /// The JSON (it holds the private key) is held in a buffer wiped on drop, so no copy of it is left
-/// behind (THE DESIGN §6: "auth material is zeroised").
+/// behind (auth material is zeroised).
 fn read_credential(credential: &str) -> Result<Zeroizing<String>, String> {
     if credential.trim_start().starts_with('{') {
         return Ok(Zeroizing::new(credential.to_string()));
