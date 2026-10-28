@@ -434,3 +434,67 @@ fn an_exchanged_token_with_invalid_header_bytes_fails_the_calls_that_waited() {
         "the next call arms a fresh exchange; the un-encodable token is not served"
     );
 }
+
+/// THE `ready` FACT FOLLOWS THE EXCHANGES (Q128 auth-oauth reader A, LOW; contract
+/// `abi/auth/outbound.rs` `OutboundReadyOut::ready`: "`1` = `fields` would answer with a credential
+/// now"): a token-exchange binding whose last settled exchange FAILED is not ready (its authorization
+/// server is refusing, so `fields` would fail), and is ready again once an exchange lands. RED: the
+/// binding read ready whatever its authorization server answered.
+#[test]
+fn a_token_exchange_binding_is_not_ready_while_its_last_exchange_failed() {
+    let host = TestHost::new();
+    let w = Arc::new(Scripted::default());
+    let o = instance(&w);
+    let h = open(&o);
+    assert_eq!(
+        fields(&o, &host, h, ticket(301), Some("s")).0,
+        Outcome::Pending
+    );
+    w.push(vec![
+        Step::Head(401),
+        Step::Body(b"{\"error\":\"invalid_grant\"}".to_vec(), true),
+    ]);
+    let mut diags = Diags::default();
+    o.tick(1_000, Ticket::NONE, Some(&host.host), &mut diags);
+    assert_eq!(
+        fields(&o, &host, h, ticket(301), Some("s")).0,
+        Outcome::Failed,
+        "positive control: the exchange failed"
+    );
+    assert!(!o.ready(h), "its last exchange failed: not ready");
+    assert_eq!(
+        fields(&o, &host, h, ticket(302), Some("s")).0,
+        Outcome::Pending
+    );
+    w.ok(r#"{"access_token":"tok-s","expires_in":3600}"#);
+    o.tick(2_000, Ticket::NONE, Some(&host.host), &mut diags);
+    assert!(o.ready(h), "an exchange landed: ready again");
+}
+
+/// A NEVER-USED EXCHANGE LANE IS TRIED ON ITS FIRST REQUEST: before any request the binding reads
+/// ready, so the prober and the router try it, and that first request starts its first exchange.
+/// A reading of "not ready until minted" would keep it untried forever (it mints only when asked).
+#[test]
+fn a_never_used_exchange_lane_is_tried_on_its_first_request() {
+    let host = TestHost::new();
+    let w = Arc::new(Scripted::default());
+    let o = instance(&w);
+    let h = open(&o);
+    assert!(o.ready(h), "never used: ready, so it is tried");
+    assert!(w.sent.lock().unwrap().is_empty(), "nothing minted yet");
+    assert_eq!(
+        fields(&o, &host, h, ticket(401), Some("s")).0,
+        Outcome::Pending
+    );
+    w.ok(r#"{"access_token":"tok-first","expires_in":3600}"#);
+    o.tick(1_000, Ticket::NONE, Some(&host.host), &mut Diags::default());
+    assert_eq!(
+        w.sent.lock().unwrap().len(),
+        1,
+        "the first request's exchange went out"
+    );
+    assert_eq!(
+        fields(&o, &host, h, ticket(401), Some("s")).1,
+        "authorization: Bearer tok-first"
+    );
+}
