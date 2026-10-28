@@ -7,8 +7,8 @@
 //!
 //! They are held as `Secret<T, Own>`, wrapped with `Secret::held` and read with
 //! `Secret::expose_own(&Own::here())`. No other crate can name or construct `Own` or this
-//! `Secret`, so no other crate can read them. The hygiene is the contract `Secret`'s (BUSBAR-1.6.0.md
-//! Part 2 #54): `Debug`/`Display` print `"[REDACTED]"`, nothing serializes or deserializes (a secret
+//! `Secret`, so no other crate can read them. The hygiene is the contract `Secret`'s:
+//! `Debug`/`Display` print `"[REDACTED]"`, nothing serializes or deserializes (a secret
 //! member of a decoded document is read by [`wiped_member`](crate::token_response::wiped_member)
 //! and moved into one), the backing memory is zeroized on drop, and equality is constant-time
 //! (the contract's [`busbar_contract::constant_time_eq`]). Every `expose_own` call site is an

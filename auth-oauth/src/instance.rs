@@ -19,11 +19,11 @@ use crate::style::Binding;
 
 /// The index of each diagnostic id in the Statement (`crate::DIAG_IDS`).
 pub(crate) mod diag {
-    /// A minted token holds bytes invalid in a header value (1.5.5 `EGRESS_OAUTH_TOKEN_INVALID_BYTES`).
+    /// A minted token holds bytes invalid in a header value.
     pub const OAUTH_TOKEN_INVALID_BYTES: u32 = 0;
-    /// A 200 with an empty access token (1.5.5 `EGRESS_OAUTH_EMPTY_TOKEN`).
+    /// A 200 with an empty access token.
     pub const OAUTH_EMPTY_TOKEN: u32 = 1;
-    /// A mint failed (1.5.5 `EGRESS_OAUTH_MINT_FAILED`).
+    /// A mint failed.
     pub const OAUTH_MINT_FAILED: u32 = 2;
 }
 
@@ -45,8 +45,8 @@ pub struct Oauth {
     /// on through each `drive`.
     issued: AtomicU32,
     /// The last `tick`'s clock (`TickIn::now_ns`) and the host's monotonic clock as it read then:
-    /// a `drive` reads the tick clock from them (THE DESIGN §1: "one clock"; the plugin reads none
-    /// of its own).
+    /// a `drive` reads the tick clock from them (one host clock; the plugin reads none of its
+    /// own).
     clock: Mutex<Option<(u64, Option<u64>)>>,
     /// The host's wall clock (epoch seconds) as it last read (`clock.now` at a `tick` or `drive`,
     /// or a call's own timestamp); `0` before the first reading.
