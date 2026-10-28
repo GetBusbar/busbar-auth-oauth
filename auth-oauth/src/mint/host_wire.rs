@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
-//! THE PLUGIN'S OWN NEED, OVER THE HOST'S CONNECTOR (THE DESIGN §5, the connections section;
-//! §6.5: the minting styles "mint through the plugin's own `operator-infrastructure` need"): [`HostWire`] is the
+//! The plugin's own need, over the host's connector (the minting styles mint through the plugin's
+//! own `operator-infrastructure` need): [`HostWire`] is the
 //! [`Wire`] the token exchange runs over in production. The token request goes out on the framed
 //! need its style names (`ESTABLISH`, then `WRITE_REQUEST` head, body, end: the framer writes its
 //! own wire head and its client defaults), and the reply is read piece by piece (`READ_REPLY`: its

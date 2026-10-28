@@ -2,11 +2,10 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! Reading an OAuth token endpoint's `expires_in`: the default a response that omits it gets, and
-//! the tolerant parse the self-minting styles (JWT bearer, client credentials) read it with. MOVED
-//! VERBATIM from the identity unit's `egress_auth/token_response.rs` in the kernel (KERNEL<>PLUGINS step
-//! 22); the minting that reads it moved with it, into [`crate::mint`].
+//! the tolerant parse the self-minting styles (JWT bearer, client credentials) read it with. The minting
+//! that reads it is [`crate::mint`].
 //!
-//! Beside it, the two secret-hygiene (#53) helpers the minters decode with: [`wiped_member`]
+//! Beside it, the two secret-hygiene helpers the minters decode with: [`wiped_member`]
 //! reads a secret member of a decoded document (the access token, the service-account key) into a
 //! buffer wiped on drop, and [`json_err`] describes a decode failure without the decoder's text,
 //! which can quote the secret it was decoding.
@@ -124,8 +123,7 @@ fn unescape(raw: &[u8]) -> Option<Zeroizing<String>> {
 /// a token response. `serde_json::Error`'s own `Display` is withheld: a data error quotes the
 /// offending value (`invalid type: string "<the value>"`), which here can be the secret itself, and
 /// these messages reach `--validate` output, read-scope admin callers and logs. What survives is
-/// `what` failed, the CLASS of failure and WHERE (secret-hygiene #53, Check 3: redact at the format
-/// site). The one decoder text kept verbatim is a MISSING FIELD: serde spells it from the type's own
+/// `what` failed, the CLASS of failure and WHERE (redact at the format site). The one decoder text kept verbatim is a MISSING FIELD: serde spells it from the type's own
 /// schema (``missing field `private_key` ``), never from the input.
 pub fn json_err(what: &'static str) -> impl FnOnce(serde_json::Error) -> String {
     move |e: serde_json::Error| {
