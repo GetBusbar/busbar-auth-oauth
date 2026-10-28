@@ -28,7 +28,7 @@ jobs:
       contents: write
       id-token: write
       attestations: write
-    uses: GetBusbar/busbar/.github/workflows/plugin-release.yml@71b70e487bebe5ae2feb1fabf32d8906edf4ccad
+    uses: GetBusbar/busbar/.github/workflows/plugin-release.yml@73144544317df83682690d5c45d3bee5033a7ef4
     with:
       plugin_crate: busbar-auth-oauth-plugin
       manifest_name: busbar-auth-oauth
@@ -49,7 +49,7 @@ jobs:
     permissions:
       contents: read
       actions: read
-    uses: GetBusbar/busbar/.github/workflows/plugin-consumer-verify.yml@71b70e487bebe5ae2feb1fabf32d8906edf4ccad
+    uses: GetBusbar/busbar/.github/workflows/plugin-consumer-verify.yml@73144544317df83682690d5c45d3bee5033a7ef4
     with:
       version: ${{ github.ref_name }}
       asset_prefix: busbar-auth-oauth
