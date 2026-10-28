@@ -7,9 +7,9 @@
 //! `tick`, on that tick). Neither serves a caller-credential passthrough mode: an OAuth token is always minted
 //! from the OPERATOR's own configured credential (a service-account key, a client id/secret), never
 //! from a per-request caller credential, so this mechanism declares no
-//! [`busbar_contract::abi::auth::STYLE_CALLER_CREDENTIAL`] (ARCHITECT ruling 2026-09-29).
+//! [`busbar_contract::abi::auth::STYLE_CALLER_CREDENTIAL`].
 //!
-//! THE SETTINGS SCHEMA (ARCHITECT ruling 2026-09-28):
+//! The settings schema:
 //!
 //! | style | settings |
 //! |---|---|
@@ -20,14 +20,14 @@
 //! A key outside a style's row is refused (`settings: unknown key `<k>``), so a typo never
 //! silently falls back to a default.
 //!
-//! `oauth-token-exchange` (RFC 8693, ARCHITECT round 5 Q-L3B-EXCHANGE (B)) binds busbar's own
+//! `oauth-token-exchange` (RFC 8693) binds busbar's own
 //! subject token (the credential) and mints nothing at open: each request's scope (the call's
 //! extensions blob) is its own exchange, on demand, cached per scope ([`ExchangeBinding`]).
 //!
-//! THE REFUSALS (ARCHITECT ruling 2026-09-28): a binding that cannot open answers FAILED with one
-//! line per finding, each `credential: <text>` or `settings: <text>`. The kernel composes the 1.5.5
+//! The refusals: a binding that cannot open answers FAILED with one
+//! line per finding, each `credential: <text>` or `settings: <text>`. The kernel composes the
 //! sentence — `provider '<p>' <style> credential (from <src>) is invalid: <text>`, or
-//! `provider '<p>' <text>` — so every `<text>` below is 1.5.5's own words.
+//! `provider '<p>' <text>`.
 
 use std::sync::Arc;
 
@@ -62,6 +62,11 @@ pub struct ExchangeBinding {
 }
 
 impl ExchangeBinding {
+    /// Whether this binding's last settled exchange failed (its `ready` fact reads `0`).
+    pub(crate) fn failing(&self) -> bool {
+        self.exchange.failing()
+    }
+
     /// The cache key of this binding's cell for `scope`: SHA-256 over the binding's own key and the
     /// scope, so two scopes never share a token and two bindings never share a scope's.
     pub fn scope_key(&self, scope: &[u8]) -> [u8; 32] {
@@ -107,8 +112,8 @@ impl Refusal {
 }
 
 /// The keys each style documents (the schema table above). `jwt-bearer`'s `token_uri` is the host's
-/// judged copy of the service account's endpoint: accepted, and read past (the credential's own is
-/// what signs).
+/// judged copy of the service account's endpoint: the mint dials it (the credential's own stays the
+/// assertion's `aud`).
 const JWT_BEARER_KEYS: &[&str] = &["token_uri", "scope", "subject", "max_response_bytes"];
 const OAUTH_CLIENT_CREDENTIALS_KEYS: &[&str] = &["token_url", "scope", "max_response_bytes"];
 const OAUTH_TOKEN_EXCHANGE_KEYS: &[&str] = &[
@@ -284,7 +289,7 @@ fn open_token_exchange(
 ///
 /// # Errors
 ///
-/// Every finding that refuses the binding, in 1.5.5's check order.
+/// Every finding that refuses the binding, in check order.
 pub fn open_binding(
     style: &str,
     credential: Option<&[u8]>,
@@ -317,7 +322,7 @@ pub fn open_binding(
     }
 }
 
-/// `oauth-client-credentials`: 1.5.5's `config_validate` checks, in its order (the keyless
+/// `oauth-client-credentials`: the checks, in order (the keyless
 /// contradiction, `token_url`, `scope`, the credential shape), then the binding.
 fn open_client_credentials(
     m: &Map<String, Value>,
@@ -395,8 +400,15 @@ fn open_jwt_bearer(
     let scope = text(m, "scope").map_err(|r| vec![r])?;
     let subject = text(m, "subject").map_err(|r| vec![r])?;
     let max = max_response_bytes(m).map_err(|r| vec![r])?;
+    // The host's judged copy of the service account's endpoint, when it hands one: the mint dials
+    // it (the need is pinned to it), never the credential's raw spelling.
+    let judged = text(m, "token_uri").map_err(|r| vec![r])?;
     let signer = mint::jwt_bearer::build(cred, scope.as_deref(), subject.as_deref())
         .map_err(|e| vec![Refusal::Credential(e)])?;
+    let signer = match judged {
+        Some(endpoint) => signer.dialling(endpoint),
+        None => signer,
+    };
     let key = cache_key(
         JWT_BEARER,
         raw.unwrap_or_default(),

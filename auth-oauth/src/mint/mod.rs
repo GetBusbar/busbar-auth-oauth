@@ -1,21 +1,19 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
-//! THE SELF-MINTING STYLES' SHARED MACHINERY: `jwt-bearer` (RFC 7523) and `oauth-client-credentials`
+//! The self-minting styles' shared machinery: `jwt-bearer` (RFC 7523) and `oauth-client-credentials`
 //! (RFC 6749 §4.4) each obtain a short-lived bearer from a token endpoint and present it as
 //! `authorization: Bearer <token>`. They differ ONLY in the token request ([`jwt_bearer`],
 //! [`oauth_client_credentials`]). This module owns everything else: the cached token, the
 //! per-request read, and the refresh ahead of expiry.
 //!
-//! MOVED from the kernel's `egress_auth/bearer_token.rs` and the two mint bodies (KERNEL<>PLUGINS
-//! step 22). The cached token, the header built once at mint, the empty-token-is-a-failure rule, the
-//! refresh schedule ([`next_refresh_secs`]) and every failure text are verbatim. What changed is the
-//! DRIVER, as BUSBAR-1.6.0.md THE DESIGN, §6.5 requires: the old background tokio task becomes a state machine
-//! advanced on `tick` ([`Minted::tick`]), and the old engine client becomes the plugin's own need
-//! ([`Wire`], the host's connection table). Nothing here blocks: an exchange whose reply is not
-//! ready yet is read again by the next `drive` its wake brings, or the next `tick`.
+//! The cached token, the header built once at mint, the empty-token-is-a-failure rule and the
+//! refresh schedule ([`next_refresh_secs`]) live here. The driver is a state machine advanced on
+//! `tick` ([`Minted::tick`]) over the plugin's own need ([`Wire`], the host's connection table).
+//! Nothing here blocks: an exchange whose reply is not ready yet is read again by the next `drive`
+//! its wake brings, or the next `tick`.
 //!
-//! THE EXPIRED-TOKEN RULE (BUSBAR-1.6.0.md THE DESIGN, §6.5, Q-EXPIRED): when the cached token has expired AND its
+//! The expired-token rule: when the cached token has expired AND its
 //! refresh has failed, the per-request call answers not-ready ([`Read::Wait`]) and the ticket is
 //! woken when a mint lands; the host bounds the wait by the attempt's deadline.
 
@@ -42,10 +40,10 @@ const REFRESH_SKEW_SECS: u64 = 300;
 /// and the retry delay after a mint failure.
 pub(crate) const MIN_SLEEP_SECS: u64 = 30;
 /// The whole-mint deadline — send plus capped body read under ONE absolute instant, the
-/// client-level 30s total the retired reqwest builder carried.
+/// client-level 30s total.
 pub(crate) const MINT_DEADLINE_SECS: u64 = 30;
 /// The cap on a token response body when the binding's settings state none (`max_response_bytes`):
-/// 1.5.5's `limits.upstream_error_body_max_bytes` default (256 KiB).
+/// 256 KiB.
 pub(crate) const DEFAULT_MAX_RESPONSE_BYTES: usize = 256 * 1024;
 /// One read of a token response, in bytes.
 const READ_BUF_BYTES: usize = 16 * 1024;
@@ -55,9 +53,9 @@ pub(crate) const IN_FLIGHT_POLL_NS: u64 = 5_000_000;
 /// Nanoseconds in a second, on the tick clock.
 pub(crate) const NS: u64 = 1_000_000_000;
 
-/// THE PLUGIN'S OWN NEEDS, by their index in the Statement (`crate::NEEDS`): the token endpoint
-/// each style POSTs to, its target the binding's own setting (THE DESIGN §5: egress class
-/// `operator-infrastructure`, "auth mint endpoints (`token_url`, `token_uri`)").
+/// The plugin's own needs, by their index in the Statement (`crate::NEEDS`): the token endpoint
+/// each style POSTs to, its target the binding's own setting (egress class
+/// `operator-infrastructure`).
 pub(crate) mod need {
     /// `oauth-client-credentials`: `settings.token_url`.
     pub const TOKEN_URL: u32 = 0;
@@ -79,10 +77,9 @@ pub(crate) struct TokenRequest {
 }
 
 impl TokenRequest {
-    /// A form POST of `body` to `target`, over the need `need`. Its fields are 1.5.5's, in 1.5.5's
-    /// order: the form's `content-type`, then reqwest's client-default `accept: */*`, which the
-    /// request carries itself (the http door writes no field the caller did not: transport
-    /// neutrality, SEAM-4i).
+    /// A form POST of `body` to `target`, over the need `need`. Its fields are, in order,
+    /// the form's `content-type`, then the client-default `accept: */*`, which the request carries
+    /// itself (the http door writes no field the caller did not).
     pub(crate) fn form(need: u32, target: String, body: Secret<String, Own>) -> Self {
         Self {
             need,
@@ -109,11 +106,11 @@ fn form_len(v: &str) -> usize {
         .sum()
 }
 
-/// THE TOKEN REQUEST FORM: `pairs` as `name=value&...`, byte for byte what
+/// The token request form: `pairs` as `name=value&...`, byte for byte what
 /// `serde_urlencoded::to_string` wrote for them (space as `+`, every byte but ASCII alphanumerics
 /// and `*-._` as an upper-case `%XX`), built in ONE buffer sized to the exact length first, so no
-/// growth frees a partial copy of the credential the form carries; held wiped on drop (THE DESIGN
-/// §6: "auth material is zeroised").
+/// growth frees a partial copy of the credential the form carries; held wiped on drop (auth material is
+/// zeroised).
 pub(crate) fn form(pairs: &[(&str, &str)]) -> Secret<String, Own> {
     const HEX: &[u8; 16] = b"0123456789ABCDEF";
     let len = pairs
@@ -159,7 +156,7 @@ pub(crate) enum Minter {
 }
 
 impl Minter {
-    fn request(&self, now: u64) -> Result<TokenRequest, String> {
+    pub(crate) fn request(&self, now: u64) -> Result<TokenRequest, String> {
         match self {
             Minter::JwtBearer(s) => s.request(now),
             Minter::ClientCredentials(c) => c.request(),
@@ -253,13 +250,13 @@ pub(crate) fn next_refresh_secs(expires_at: u64, now: u64) -> u64 {
 /// An OAuth token endpoint's success body (RFC 6749 section 5.1), as far as a minter reads it.
 /// Deserialize-only. The decoder never decodes the access token: it unescapes a string that
 /// carries an escape into a scratch buffer of its own that it frees unwiped, so the decode skips
-/// the token's value (skipping copies nothing) and [`access_token`] reads it (THE DESIGN §6: "auth
-/// material is zeroised"; secret-hygiene #53).
+/// the token's value (skipping copies nothing) and [`access_token`] reads it (auth
+/// material is zeroised).
 #[derive(serde::Deserialize)]
 struct TokenResponse {
     /// Required, and skipped by the decoder; [`access_token`] reads it.
-    #[allow(dead_code)]
-    access_token: serde::de::IgnoredAny,
+    #[serde(rename = "access_token")]
+    _access_token: serde::de::IgnoredAny,
     #[serde(
         default = "default_expires_in",
         deserialize_with = "deserialize_expires_in"
@@ -369,8 +366,8 @@ pub(crate) trait Wire: Send + Sync {
     fn read(&self, conn: ConnId, buf: &mut [u8]) -> Result<Got, ConnError>;
     /// Close the connection.
     fn close(&self, conn: ConnId);
-    /// THE HOST'S CLOCK (`clock.now`: THE DESIGN §1 "one clock, which also drives every plugin's
-    /// `tick`"; §11.12), one reading; `None` when the host could not answer it.
+    /// The host's clock (`clock.now`; one clock, which also drives every plugin's `tick`), one
+    /// reading; `None` when the host could not answer it.
     fn clock(&self) -> Option<HostClock> {
         None
     }
@@ -462,6 +459,14 @@ impl Minted {
         self.on_demand
     }
 
+    /// The binding's exchange material, for a token-exchange cell; `None` for a scheduled one.
+    pub(crate) fn exchange(&self) -> Option<&token_exchange::Exchange> {
+        match &self.minter {
+            Minter::TokenExchange(scoped) => Some(scoped.exchange()),
+            _ => None,
+        }
+    }
+
     /// No exchange is in flight.
     pub(crate) fn idle(&self) -> bool {
         matches!(
@@ -521,8 +526,8 @@ impl Minted {
         // `usable_until`, so a read that finds the cell usable snapshots the stored token, never
         // an older (empty or expired) one an exchange landing in between has replaced.
         let tok = self.current();
-        // BEFORE THE FIRST MINT a scheduled cell presents nothing: READY with no fields, so the
-        // upstream answers 401, as 1.5.5 did (THE DESIGN §11.11; contract `abi/auth` `fields`).
+        // Before the first mint a scheduled cell presents nothing: READY with no fields, so the
+        // upstream answers 401 (contract `abi/auth` `fields`).
         if tok.token.expose_own(&Own::here()).is_empty() {
             return f(Read::Nothing);
         }
@@ -665,10 +670,10 @@ impl Minted {
                 *ex = Exchange::Idle { due_ns: due };
                 (due, Some(Report::EmptyToken))
             }
-            // AN ON-DEMAND TOKEN THAT CANNOT BE PRESENTED (bytes invalid in a header value) is a
+            // An on-demand token that cannot be presented (bytes invalid in a header value) is a
             // failed exchange, as an empty one is: it is not stored, and the calls that waited on
-            // it fail rather than go out unauthenticated (a scheduled style keeps 1.5.5's: no
-            // header, the upstream answers 401).
+            // it fail rather than go out unauthenticated (a scheduled style sends no header, and
+            // the upstream answers 401).
             Ok((_, true)) if self.on_demand => {
                 self.refresh_failed.store(true, Ordering::Release);
                 *ex = Exchange::Idle { due_ns: u64::MAX };
