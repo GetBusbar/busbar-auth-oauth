@@ -69,7 +69,10 @@ mod tests;
 use std::borrow::Cow;
 use std::task::Poll;
 
-use busbar_contract::abi::auth::{AuthPoints, AuthTail, StyleDecl, CANCEL_CONTINUES};
+use busbar_contract::abi::auth::{
+    ranked, AuthPoints, AuthTail, StyleDecl, CANCEL_CONTINUES, STYLE_ENDPOINT_FROM_CREDENTIAL,
+    STYLE_ENDPOINT_TOKEN_URL,
+};
 use busbar_contract::abi::host::conn::connector::{
     Need, DIRECTION_OUTBOUND, EGRESS_OPERATOR_INFRASTRUCTURE, KEEP_NAMED,
 };
@@ -97,10 +100,25 @@ const FIELD_FLAGS: u32 = 0;
 
 /// The styles this plugin serves, each at `Head` (a bearer token reads nothing past the head).
 /// None carries [`busbar_contract::abi::auth::STYLE_CALLER_CREDENTIAL`] (an OAuth token is always
-/// minted from the operator's own credential).
+/// minted from the operator's own credential). Each provider-entry grant STATES where its token
+/// endpoint is, so the host judges it by the bit, never by the style's name (busbar arch-audit u29
+/// F1): `jwt-bearer` the service account's `token_uri` its credential names, read and judged by the
+/// host and handed back as the `token_uri` setting; `oauth-client-credentials` the entry's
+/// `token_url`. Both rank after 1.5.5's two header styles, in 1.5.5's order, so the host's list of
+/// the words a provider's `auth:` may name keeps 1.5.5's as its prefix. The token exchange is a
+/// plane need's style (its `resource` is no provider key): unranked, its endpoint judged as its
+/// need's target.
 const STYLES: &[StyleDecl] = &[
-    style_decl(style::JWT_BEARER, 0, AuthPoints::HEAD),
-    style_decl(style::OAUTH_CLIENT_CREDENTIALS, 0, AuthPoints::HEAD),
+    style_decl(
+        style::JWT_BEARER,
+        STYLE_ENDPOINT_FROM_CREDENTIAL | ranked(3),
+        AuthPoints::HEAD,
+    ),
+    style_decl(
+        style::OAUTH_CLIENT_CREDENTIALS,
+        STYLE_ENDPOINT_TOKEN_URL | ranked(4),
+        AuthPoints::HEAD,
+    ),
     style_decl(style::OAUTH_TOKEN_EXCHANGE, 0, AuthPoints::HEAD),
 ];
 
