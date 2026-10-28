@@ -457,7 +457,7 @@ fn a_cell_settled_between_the_lookup_and_the_park_is_not_a_lost_wake() {
         std::thread::sleep(std::time::Duration::from_millis(500));
         // THE SETTLING TICK, where the cache lets it: the cell is idle, holds no usable token and
         // no one waits on it yet, so it is dropped.
-        if let Ok(mut cache) = o.cache.try_lock() {
+        if let Ok(mut cache) = o.cache.try_write() {
             cache.remove(&key);
         }
         drop(held);
@@ -720,14 +720,14 @@ fn a_retired_scheduled_cell_kept_for_its_mint_leaves_the_cache_when_it_lands() {
     assert_eq!(w.sent.lock().unwrap().len(), 1, "the mint is in flight");
     o.retire(1);
     assert_eq!(
-        o.cache.lock().unwrap().len(),
+        o.cache.read().unwrap().len(),
         1,
         "kept: its mint is in flight"
     );
     o.tick(2_000, Ticket::NONE, Some(&host.host), &mut diags);
     let sent = w.sent.lock().unwrap().len();
     o.tick(10_000 * NS, Ticket::NONE, Some(&host.host), &mut diags);
-    assert!(o.cache.lock().unwrap().is_empty(), "the idle orphan left");
+    assert!(o.cache.read().unwrap().is_empty(), "the idle orphan left");
     assert_eq!(
         w.sent.lock().unwrap().len(),
         sent,
@@ -758,5 +758,5 @@ fn a_retired_generation_leaves_a_cell_the_new_generation_holds() {
         "authorization: Bearer tok-1"
     );
     assert_eq!(w.sent.lock().unwrap().len(), 1, "no new exchange");
-    assert_eq!(o.cache.lock().unwrap().len(), 1, "one cell");
+    assert_eq!(o.cache.read().unwrap().len(), 1, "one cell");
 }

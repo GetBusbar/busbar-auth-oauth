@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock, RwLockWriteGuard};
 
 use busbar_contract::abi::mechanism::ticket::Ticket;
 use busbar_contract::abi::sdk::auth_outbound::Diags;
@@ -54,7 +54,9 @@ pub struct Oauth {
     generation: AtomicU64,
     next_handle: AtomicU64,
     handles: RwLock<HashMap<u64, (u64, Binding)>>,
-    cache: Mutex<HashMap<[u8; 32], Arc<Minted>>>,
+    /// The token cells, by cache key: a call that finds its cell usable reads it under the read
+    /// lock; every change (and every park) takes the write lock.
+    cache: RwLock<HashMap<[u8; 32], Arc<Minted>>>,
     waiters: Mutex<Vec<Ticket>>,
     /// The tickets waiting on each on-demand cell's exchange (a token-exchange scope), by its cache
     /// key: woken when it lands, or failed when it fails. Taken after `cache` wherever both are.
@@ -66,7 +68,7 @@ pub struct Oauth {
 
 impl crate::style::TokenCache for Oauth {
     fn cell(&self, key: [u8; 32], minter: Minter, max: usize) -> Arc<Minted> {
-        lock(&self.cache)
+        self.cache_mut()
             .entry(key)
             .or_insert_with(|| Arc::new(Minted::new(minter, max)))
             .clone()
@@ -74,6 +76,11 @@ impl crate::style::TokenCache for Oauth {
 }
 
 impl Oauth {
+    /// The token cache, to change.
+    fn cache_mut(&self) -> RwLockWriteGuard<'_, HashMap<[u8; 32], Arc<Minted>>> {
+        self.cache.write().unwrap_or_else(PoisonError::into_inner)
+    }
+
     /// An instance at `generation`; its need is the host's, reached through the tables each
     /// `tick` and `drive` is handed (none: no need was granted, and a minted style reports that
     /// no connection was).
@@ -92,7 +99,7 @@ impl Oauth {
             generation: AtomicU64::new(generation),
             next_handle: AtomicU64::new(1),
             handles: RwLock::new(HashMap::new()),
-            cache: Mutex::new(HashMap::new()),
+            cache: RwLock::new(HashMap::new()),
             waiters: Mutex::new(Vec::new()),
             exchange_waiters: Mutex::new(HashMap::new()),
             exchange_failed: Mutex::new(Vec::new()),
@@ -140,9 +147,20 @@ impl Oauth {
         key: [u8; 32],
         make: impl FnOnce() -> (Minter, usize),
         ticket: Ticket,
-        usable: impl FnOnce(&Minted) -> bool,
+        usable: impl Fn(&Minted) -> bool,
     ) -> Arc<Minted> {
-        let mut cache = lock(&self.cache);
+        // THE HIT: a cell that exists, for a call that will not park on it (no ticket, or a token
+        // it presents now), under the read lock only.
+        if let Some(cell) = self
+            .cache
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&key)
+            .filter(|c| ticket.is_none() || usable(c))
+        {
+            return Arc::clone(cell);
+        }
+        let mut cache = self.cache_mut();
         let cell = Arc::clone(cache.entry(key).or_insert_with(|| {
             let (minter, max) = make();
             Arc::new(Minted::new(minter, max))
@@ -160,6 +178,10 @@ impl Oauth {
 
     /// Forget `ticket` as waiting on the on-demand cell `key` (its call answered after all).
     pub(crate) fn unpark_exchange(&self, key: [u8; 32], ticket: Ticket) {
+        // A call on no ticket is never parked.
+        if ticket.is_none() {
+            return;
+        }
         let mut w = lock(&self.exchange_waiters);
         if let Some(waiting) = w.get_mut(&key) {
             waiting.retain(|t| *t != ticket);
@@ -188,7 +210,7 @@ impl Oauth {
             .unwrap_or_else(PoisonError::into_inner)
             .retain(|_, (g, _)| *g != generation);
         // The cache's lock first, then the waiters', as `exchange_cell` takes them.
-        let mut cache = lock(&self.cache);
+        let mut cache = self.cache_mut();
         let waiting = lock(&self.exchange_waiters);
         cache.retain(|key, c| {
             Arc::strong_count(c) > 1 || !c.idle() || waiting.get(key).is_some_and(|w| !w.is_empty())
@@ -309,7 +331,10 @@ impl Oauth {
             }
         };
         let wall = self.wall_secs();
-        let cells: Vec<([u8; 32], Arc<Minted>)> = lock(&self.cache)
+        let cells: Vec<([u8; 32], Arc<Minted>)> = self
+            .cache
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
             .iter()
             .map(|(k, c)| (*k, Arc::clone(c)))
             .collect();
@@ -367,7 +392,7 @@ impl Oauth {
     /// promises of a cell it kept for its mint): the cache's Arc and the tick's own are the only
     /// two, judged under the cache's lock. Whether it was dropped.
     fn reap(&self, key: [u8; 32], cell: &Arc<Minted>) -> bool {
-        let mut cache = lock(&self.cache);
+        let mut cache = self.cache_mut();
         let orphan = Arc::strong_count(cell) == 2
             && cell.idle()
             && cache.get(&key).is_some_and(|c| Arc::ptr_eq(c, cell));
@@ -436,7 +461,7 @@ impl Oauth {
                 }
             }
         }
-        let mut cache = lock(&self.cache);
+        let mut cache = self.cache_mut();
         let waited = lock(&self.exchange_waiters)
             .get(&key)
             .is_some_and(|w| !w.is_empty());
