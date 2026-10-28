@@ -309,8 +309,8 @@ struct ServiceAccount {
     client_email: String,
     /// The RSA signing key: required, and skipped by the decoder (skipping copies nothing);
     /// [`private_key`] reads it.
-    #[allow(dead_code)]
-    private_key: serde::de::IgnoredAny,
+    #[serde(rename = "private_key")]
+    _private_key: serde::de::IgnoredAny,
     #[serde(default = "default_token_uri")]
     token_uri: String,
 }
