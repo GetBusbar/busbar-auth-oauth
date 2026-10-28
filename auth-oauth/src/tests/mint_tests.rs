@@ -253,9 +253,9 @@ fn an_escaped_access_token_is_read_into_one_wiped_buffer_never_by_the_decoder() 
     let body = r#"{"token_type":"Bearer","access_token":"ya29.a\/bAc","expires_in":60}"#;
     let tok: TokenResponse = serde_json::from_str(body).expect("a well-formed response");
     assert!(
-        held_as(&tok.access_token).contains("IgnoredAny"),
+        held_as(&tok._access_token).contains("IgnoredAny"),
         "the decoder skips the token, it never unescapes it: {}",
-        held_as(&tok.access_token)
+        held_as(&tok._access_token)
     );
     let read = access_token(body).expect("the token");
     assert!(held_as(&read).contains("Zeroizing"), "{}", held_as(&read));
