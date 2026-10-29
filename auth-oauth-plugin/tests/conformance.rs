@@ -17,7 +17,7 @@
 // auth kind's OUTBOUND script over this crate's linked door and its dropped-in cdylib (built with
 // `dropped-in`), driven by `conformance.json`; the hand-written both-ways proof below stays beside
 // it. `plugin-ci.yml` runs the suite under `--release` once the crate lives in its own repo.
-busbar_plugin_loader::conformance_suite! {
+busbar_test_kit::conformance_suite! {
     door: busbar_auth_oauth::door,
     cdylib: "busbar_auth_oauth_plugin",
     inputs: include_str!("conformance.json"),
@@ -35,7 +35,7 @@ use busbar_contract::abi::auth::{
 use busbar_contract::abi::mechanism::call::{
     AbiStr, Blob, Op, Outcome, RawOutcome, BLOB_JSON, BLOB_OCTETS, BLOB_SECRET,
 };
-use busbar_contract::abi::mechanism::door::{Door, DoorFn};
+use busbar_contract::abi::mechanism::door::{Door, DoorFn, DoorParts};
 use busbar_contract::abi::mechanism::lifecycle::{
     slot as life, CancelIn, CancelOut, GenIn, OpenIn, OpenOut, RefreshIn, TickIn, TickOut,
     ValidateIn,
@@ -117,7 +117,7 @@ fn linked(folds: &Arc<Folds>, d: &Dispatcher) -> Plugin<Auth> {
 }
 
 fn dropped(folds: &Arc<Folds>, d: &Dispatcher) -> Option<Plugin<Auth>> {
-    let path = busbar_plugin_loader::conformance::cdylib_of("busbar_auth_oauth_plugin");
+    let path = busbar_test_kit::conformance::cdylib_of("busbar_auth_oauth_plugin");
     let stated = rendering_of(busbar_auth_oauth::door).expect("the door renders its Statement");
     Some(load_dropped::<Auth>(&path, &stated, bind(folds, d)).expect("the dropped door loads"))
 }
@@ -421,22 +421,26 @@ fn compiled_in_and_dropped_in_answer_every_op_identically() {
 fn door_with_fields(op: Op) -> &'static Door {
     // SAFETY: the plugin's `'static` door and its auth table.
     let (d, ops) = unsafe {
-        let d = &*busbar_auth_oauth::door();
-        (d, *d.ops.cast::<auth::Ops>())
+        let d = busbar_auth_oauth::door();
+        (d, *d.ops().cast::<auth::Ops>())
     };
     let mut ops = ops;
     ops.fields = Some(op);
     let ops: &'static auth::Ops = Box::leak(Box::new(ops));
-    Box::leak(Box::new(Door {
-        ops: std::ptr::from_ref(ops).cast(),
-        ..*d
+    // SAFETY: the plugin's own door parts, with `ops` at a `'static` auth table whose every slot is
+    // the plugin's or one of this file's call-convention ops.
+    Box::leak(Box::new(unsafe {
+        Door::__from_parts(DoorParts {
+            ops: std::ptr::from_ref(ops).cast(),
+            ..d.parts()
+        })
     }))
 }
 
 fn real_fields() -> Op {
     // SAFETY: the plugin's `'static` door and its auth table.
     unsafe {
-        (*(*busbar_auth_oauth::door()).ops.cast::<auth::Ops>())
+        (*busbar_auth_oauth::door().ops().cast::<auth::Ops>())
             .fields
             .unwrap()
     }
@@ -456,7 +460,7 @@ extern "C" fn sensitive_fields(inst: *mut c_void, i: *const c_void, o: *mut c_vo
     r
 }
 
-extern "C" fn sensitive_door() -> *const Door {
+extern "C" fn sensitive_door() -> &'static Door {
     door_with_fields(sensitive_fields)
 }
 
@@ -506,7 +510,7 @@ extern "C" fn overrunning_fields(_: *mut c_void, i: *const c_void, o: *mut c_voi
     RawOutcome::of(Outcome::Ready)
 }
 
-extern "C" fn overrunning_door() -> *const Door {
+extern "C" fn overrunning_door() -> &'static Door {
     door_with_fields(overrunning_fields)
 }
 
@@ -633,7 +637,7 @@ mod mint_door {
                     .iter()
                     .map(|(n, v)| ((*n).to_owned(), String::from_utf8_lossy(v).into_owned()))
                     .collect(),
-                String::from_utf8_lossy(desc.body).into_owned(),
+                String::from_utf8_lossy(&desc.body).into_owned(),
             ));
             let n = opened.len();
             let body = format!(
