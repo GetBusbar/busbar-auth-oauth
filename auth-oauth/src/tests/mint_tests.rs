@@ -523,21 +523,70 @@ fn no_granted_need_mints_nothing() {
     assert_eq!(m.tick(1, now_epoch(), None), (due, None));
 }
 
-/// THE MINT ENDPOINTS ARE `operator-infrastructure` (ARCHITECT D1 2026-10-05, MINT CLASS (B),
-/// re-measured against v1.5.5 2026-10-07): 1.5.5's config_validate/mod.rs:436-476 accepted a
-/// `token_url` that is https, or http to a PRIVATE or LOOPBACK host, and refused http only to a
-/// public host (plus the metadata denylist) — plaintext to a private token endpoint is the
-/// operator-infrastructure class, not loopback-allowed. Every token need the Statement declares
-/// states that class. RED on busbar-auth-oauth dev 44341ab, which declared them loopback-allowed.
+/// RED: A TOKEN ENDPOINT ON A PRIVATE HOST IS REFUSED UNLESS ALLOWLISTED (security.md, "The
+/// destination guard": provider upstreams, "their `base_url` and `token_url` included", and an
+/// identity provider are refused a private, loopback, link-local, CGNAT or unique-local address
+/// unless `advanced.allow_destinations` names it; BUSBAR-3025 warns of exactly that at
+/// `--validate`). Every mint need states the `provider` class: the destination guard's default
+/// policy at the busbar pin (busbar-core-connector `guard.rs` `PRIVATE_REFUSED_IN`,
+/// `LIFTED_WHEN_CONFIGURED`) refuses a private address in it unless allowlisted, and keeps the class
+/// when the need's config names its target (`target_from`, as every mint need's does); the default
+/// class would be lifted to operator infrastructure, and `open-web` would refuse 1.5.5's plaintext
+/// to an allowlisted private token endpoint (the provider class takes the target's own scheme).
+/// The provider's own `allow_metadata_hosts` carve-out (1.5.5) reads `token_url` in this class.
+/// Before: every mint need was `operator-infrastructure` (ARCHITECT D1 2026-10-05), which admits a
+/// private address with no entry, so BUSBAR-3025's warning was false for `token_url`.
 #[test]
-fn every_mint_need_is_declared_operator_infrastructure() {
-    use busbar_contract::abi::host::conn::connector::EGRESS_OPERATOR_INFRASTRUCTURE;
+fn a_token_url_on_a_private_host_is_refused_unless_allowlisted() {
+    use busbar_contract::abi::host::conn::connector::{
+        EGRESS_DEFAULT, EGRESS_OPEN_WEB, EGRESS_PROVIDER,
+    };
+    const PRIVATE_REFUSED_IN: [u32; 3] = [EGRESS_DEFAULT, EGRESS_PROVIDER, EGRESS_OPEN_WEB];
     assert_eq!(crate::NEEDS.len(), 2, "token_url and token_uri");
     for (i, n) in crate::NEEDS.iter().enumerate() {
-        assert_eq!(
-            n.egress_class, EGRESS_OPERATOR_INFRASTRUCTURE,
-            "need {i}: an auth mint endpoint is operator-infrastructure"
+        assert_ne!(n.target_from.len, 0, "need {i} is pinned to its setting");
+        let lifted = n.egress_class == EGRESS_DEFAULT && n.target_from.len != 0;
+        assert!(
+            PRIVATE_REFUSED_IN.contains(&n.egress_class) && !lifted,
+            "need {i}: class {} admits a private token endpoint with no allow entry",
+            n.egress_class
         );
+        assert_ne!(
+            n.egress_class, EGRESS_OPEN_WEB,
+            "need {i}: an allowlisted private token endpoint over http (1.5.5) still mints"
+        );
+        assert_eq!(n.egress_class, EGRESS_PROVIDER, "need {i}");
+    }
+}
+
+/// W7: A REDIRECTING TOKEN ENDPOINT FAILS THE MINT (security.md:308: redirects are refused on the
+/// OAuth token surface). A 3xx is the endpoint's answer, never followed: the mint fails naming the
+/// status, ONE request went out (no second request to the `location`), and no token is presented.
+#[test]
+fn a_redirecting_token_endpoint_fails_the_mint() {
+    for (status, named) in [
+        (301, "301 Moved Permanently"),
+        (302, "302 Found"),
+        (307, "307 Temporary Redirect"),
+        (308, "308 Permanent Redirect"),
+    ] {
+        let w = Scripted::default();
+        w.push(vec![
+            Step::Head(status),
+            Step::Body(b"{\"access_token\":\"from-a-redirect\"}".to_vec(), true),
+        ]);
+        w.ok(r#"{"access_token":"never-asked-for","expires_in":3600}"#);
+        let m = Minted::new(client_credentials(), DEFAULT_MAX_RESPONSE_BYTES);
+        let (_, report) = m.tick(0, now_epoch(), Some(&w));
+        assert_eq!(
+            report,
+            Some(Report::MintFailed(format!(
+                "token endpoint returned {named}"
+            ))),
+            "{status}"
+        );
+        assert_eq!(w.sent.lock().unwrap().len(), 1, "{status}: never followed");
+        assert!(!m.is_ready(), "{status}: no token");
     }
 }
 
