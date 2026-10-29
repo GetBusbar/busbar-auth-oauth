@@ -4,7 +4,7 @@
   ],
   "diagnostics": [
     {
-      "code": 4032,
+      "code": 4014,
       "slug": "egress-oauth-token-invalid-bytes",
       "title": "Minted OAuth token contains invalid header bytes (auth header omitted)",
       "severity": "actionable",
@@ -13,7 +13,7 @@
       "since": "1.6.0"
     },
     {
-      "code": 4033,
+      "code": 4015,
       "slug": "egress-oauth-empty-token",
       "title": "OAuth token endpoint returned a 200 with an empty access_token",
       "severity": "actionable",
@@ -22,7 +22,7 @@
       "since": "1.6.0"
     },
     {
-      "code": 4034,
+      "code": 4016,
       "slug": "egress-oauth-mint-failed",
       "title": "OAuth token mint failed; retrying",
       "severity": "actionable",
