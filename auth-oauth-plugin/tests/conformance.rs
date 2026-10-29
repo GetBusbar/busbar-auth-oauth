@@ -639,7 +639,7 @@ mod mint_door {
                     .iter()
                     .map(|(n, v)| ((*n).to_owned(), String::from_utf8_lossy(v).into_owned()))
                     .collect(),
-                String::from_utf8_lossy(desc.body).into_owned(),
+                String::from_utf8_lossy(&desc.body).into_owned(),
             ));
             let n = opened.len();
             let body = format!(

@@ -83,7 +83,7 @@ use busbar_contract::abi::sdk::auth_outbound::{
 use busbar_contract::abi::sdk::conn::Host;
 use busbar_contract::abi::sdk::door::{abi_str, statement};
 use busbar_contract::abi::sdk::exchange::Op;
-use busbar_contract::abi::sdk::life::Refusal;
+use busbar_contract::abi::sdk::life::{self, Refusal};
 
 use crate::instance::Oauth;
 use crate::mint::Read;
@@ -170,19 +170,11 @@ pub mod compiled_in {
     }
 }
 
-/// The plugin's own settings: none are read; present settings must be a JSON object.
-fn settings_ok(b: &[u8]) -> bool {
-    b.is_empty()
-        || matches!(
-            serde_json::from_slice::<serde_json::Value>(b),
-            Ok(serde_json::Value::Object(_))
-        )
-}
-
 const SETTINGS_NOT_OBJECT: &str = "busbar-auth-oauth settings must be a JSON object";
 
+/// The plugin's own settings: none are read; present settings must be a JSON object.
 fn judged(settings: &[u8]) -> Result<(), Refusal> {
-    if settings_ok(settings) {
+    if life::settings_object(settings).is_ok() {
         Ok(())
     } else {
         Err(Refusal::failed(SETTINGS_NOT_OBJECT))
