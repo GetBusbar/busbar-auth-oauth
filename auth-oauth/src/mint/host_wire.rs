@@ -2,7 +2,7 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! The plugin's own need, over the host's connector (the minting styles mint through the plugin's
-//! own `operator-infrastructure` need): [`HostWire`] is the
+//! own `provider`-class need): [`HostWire`] is the
 //! [`Wire`] the token exchange runs over in production. The token request goes out on the framed
 //! need its style names (`ESTABLISH`, then `WRITE_REQUEST` head, body, end: the framer writes its
 //! own wire head and its client defaults), and the reply is read piece by piece (`READ_REPLY`: its
