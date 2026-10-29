@@ -62,6 +62,10 @@ mod test_support;
 #[path = "tests/lib_tests.rs"]
 mod tests;
 
+#[cfg(test)]
+#[path = "tests/catalogue_tests.rs"]
+mod catalogue_tests;
+
 use std::borrow::Cow;
 use std::task::Poll;
 
