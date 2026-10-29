@@ -533,9 +533,7 @@ mod mint_door {
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
-    use busbar_contract::abi::host::conn::connector::{
-        DIRECTION_OUTBOUND, EGRESS_OPERATOR_INFRASTRUCTURE,
-    };
+    use busbar_contract::abi::host::conn::connector::{DIRECTION_OUTBOUND, EGRESS_PROVIDER};
     use busbar_contract::abi::mechanism::rendering::ReadNeed;
     use busbar_contract::auth_calls::{Fields, FieldsRequest, OutboundAuth};
     use busbar_contract::conn::{
@@ -735,7 +733,8 @@ mod mint_door {
         );
 
         // THE INSTANCE, OPENED OVER THE BINDING'S SETTINGS: its token_url need is declared pinned to
-        // the binding's endpoint, `operator-infrastructure`, over the http transport.
+        // the binding's endpoint, `provider` (a private endpoint refused unless allowlisted), over
+        // the http transport.
         let settings = serde_json::json!({ "token_url": TOKEN_URL, "scope": SCOPE });
         let instance = Arc::new(
             OutboundInstance::open_with(
@@ -753,7 +752,7 @@ mod mint_door {
                 .find(|(need, _, _)| *need == 0)
                 .expect("the token_url need is declared");
             assert_eq!(token_url.1.direction, DIRECTION_OUTBOUND);
-            assert_eq!(token_url.1.egress_class, EGRESS_OPERATOR_INFRASTRUCTURE);
+            assert_eq!(token_url.1.egress_class, EGRESS_PROVIDER);
             assert_eq!(token_url.1.transport, "http");
             assert_eq!(token_url.1.target_from, "settings.token_url");
             assert_eq!(token_url.2.as_deref(), Some(TOKEN_URL), "pinned to it");
