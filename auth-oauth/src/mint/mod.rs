@@ -54,8 +54,8 @@ pub(crate) const IN_FLIGHT_POLL_NS: u64 = 5_000_000;
 pub(crate) const NS: u64 = 1_000_000_000;
 
 /// The plugin's own needs, by their index in the Statement (`crate::NEEDS`): the token endpoint
-/// each style POSTs to, its target the binding's own setting (egress class
-/// `operator-infrastructure`).
+/// each style POSTs to, its target the binding's own setting (egress class `provider`: a private
+/// endpoint refused unless allowlisted).
 pub(crate) mod need {
     /// `oauth-client-credentials`: `settings.token_url`.
     pub const TOKEN_URL: u32 = 0;
