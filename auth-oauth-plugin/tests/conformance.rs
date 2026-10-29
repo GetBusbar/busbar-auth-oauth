@@ -477,7 +477,7 @@ fn the_diag_indices_name_their_catalog_codes() {
         .collect();
     assert_eq!(
         ids,
-        ["BUSBAR-4014", "BUSBAR-4015", "BUSBAR-4016"],
+        ["BUSBAR-4032", "BUSBAR-4033", "BUSBAR-4034"],
         "OAUTH_TOKEN_INVALID_BYTES, OAUTH_EMPTY_TOKEN, OAUTH_MINT_FAILED"
     );
 }

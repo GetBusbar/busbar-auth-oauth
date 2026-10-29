@@ -146,9 +146,9 @@ pub const NEEDS: &[Need] = &[
 
 /// The diagnostic ids, in [`instance::diag`] order.
 const DIAG_IDS: &[AbiStr] = &[
-    abi_str("BUSBAR-4014"),
-    abi_str("BUSBAR-4015"),
-    abi_str("BUSBAR-4016"),
+    abi_str("BUSBAR-4032"),
+    abi_str("BUSBAR-4033"),
+    abi_str("BUSBAR-4034"),
 ];
 
 /// What the plugin states: its name, version, the concurrency it serves, its diagnostics, its own
@@ -252,7 +252,7 @@ impl Oauth {
         if !ticket.is_none() && self.exchange_failed(ticket) {
             return Poll::Ready(FieldsAnswer::Failed(Cow::Borrowed(
                 "the RFC 8693 token exchange for this call's scope failed; the call is refused \
-                 rather than made unauthenticated (see diagnostics BUSBAR-4014/4015/4016)",
+                 rather than made unauthenticated (see diagnostics BUSBAR-4032/4033/4034)",
             )));
         }
         let scope = ask.scope.unwrap_or_default();
