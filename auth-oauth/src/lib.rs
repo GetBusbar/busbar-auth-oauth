@@ -180,15 +180,15 @@ pub mod compiled_in {
     }
 }
 
-const SETTINGS_NOT_OBJECT: &str = "busbar-auth-oauth settings must be a JSON object";
-
-/// The plugin's own settings: none are read; present settings must be a JSON object.
+/// The instance's own settings: the host opens it over a binding's settings, so a JSON object
+/// holding only keys some style reads ([`style::instance_keys`]); every other key is refused by
+/// name, one `settings: ` line each.
 fn judged(settings: &[u8]) -> Result<(), Refusal> {
-    if life::settings_object(settings).is_ok() {
-        Ok(())
-    } else {
-        Err(Refusal::failed(SETTINGS_NOT_OBJECT))
-    }
+    let m = life::settings_object(settings)?;
+    style::instance_keys(&m).map_err(|refusals| {
+        let lines: Vec<String> = refusals.iter().map(style::Refusal::line).collect();
+        Refusal::failed(lines.join("\n"))
+    })
 }
 
 /// ONE `fields` REQUEST, as the instance answers it (the SDK's view, read once).

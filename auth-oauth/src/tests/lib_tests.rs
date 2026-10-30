@@ -90,7 +90,7 @@ fn an_unknown_instance_setting_is_refused_by_name_at_validate_open_and_refresh()
     use busbar_contract::abi::mechanism::call::Outcome;
     use busbar_contract::abi::mechanism::lifecycle::check_validate_refusal;
     let bad: &[u8] = br#"{"token_url":"https://i/t","scoep":"x","extra":1}"#;
-    let want = "settings: unknown key `scoep`\nsettings: unknown key `extra`";
+    let want = "settings: unknown key `extra`\nsettings: unknown key `scoep`";
     let v = Oauth::validate(bad).unwrap_err();
     assert_eq!((v.outcome(), v.text()), (Outcome::Failed, Some(want)));
     assert!(check_validate_refusal(want.as_bytes()).is_ok());
