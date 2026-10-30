@@ -35,8 +35,11 @@
 //! operations (`verify`, the login pair) are not served and answer REFUSED (the tail declares only
 //! the outbound capability).
 //!
-//! The needs ([`NEEDS`]; egress class `operator-infrastructure`: minting may go over plaintext to
-//! a private or loopback endpoint, and the ONE destination guard still applies on top): one
+//! The needs ([`NEEDS`]; egress class `provider`: a token endpoint is a provider upstream's own URL
+//! (security.md: provider upstreams, "their `base_url` and `token_url` included"), refused a
+//! private, loopback or link-local address unless `advanced.allow_destinations` names it, the
+//! provider's 1.5.5 metadata carve-outs read in it, and the target's own scheme kept, so 1.5.5's
+//! plaintext to an allowlisted private token endpoint still mints): one
 //! outbound need per token endpoint, over the http transport, its target the
 //! binding's own setting (`target_from`), so the host declares it pinned to that endpoint when it
 //! opens the instance with the binding's settings. The token exchange is ONE framed request and its
@@ -74,7 +77,7 @@ use busbar_contract::abi::auth::{
     STYLE_ENDPOINT_TOKEN_URL,
 };
 use busbar_contract::abi::host::conn::connector::{
-    Need, DIRECTION_OUTBOUND, EGRESS_OPERATOR_INFRASTRUCTURE, KEEP_NAMED,
+    Need, DIRECTION_OUTBOUND, EGRESS_PROVIDER, KEEP_NAMED,
 };
 use busbar_contract::abi::mechanism::call::AbiStr;
 use busbar_contract::abi::mechanism::door::Statement;
@@ -87,7 +90,7 @@ use busbar_contract::abi::sdk::auth_outbound::{
 use busbar_contract::abi::sdk::conn::Host;
 use busbar_contract::abi::sdk::door::{abi_str, statement};
 use busbar_contract::abi::sdk::exchange::Op;
-use busbar_contract::abi::sdk::life::Refusal;
+use busbar_contract::abi::sdk::life::{self, Refusal};
 
 use crate::instance::Oauth;
 use crate::mint::Read;
@@ -124,12 +127,15 @@ const STYLES: &[StyleDecl] = &[
 /// THE AUTH STATEMENT TAIL: outbound only, no login, no inbound carriers.
 const TAIL: &AuthTail = &outbound_tail(0, STYLES);
 
-/// One token endpoint's need: outbound, `operator-infrastructure`, over the http transport, its target the
-/// binding's setting `target_from` names. It reads no response field beyond the reply's code.
+/// One token endpoint's need: outbound, `provider` (refused a private address unless
+/// allowlisted, kept in its class though its config names the target; never
+/// `operator-infrastructure`, which admits a private address with no entry), over the http
+/// transport, its target the binding's setting `target_from` names. It reads no response field
+/// beyond the reply's code.
 const fn token_need(target_from: &'static str) -> Need {
     Need {
         direction: DIRECTION_OUTBOUND,
-        egress_class: EGRESS_OPERATOR_INFRASTRUCTURE,
+        egress_class: EGRESS_PROVIDER,
         transport: abi_str("http"),
         target_from: abi_str(target_from),
         keep_mode: KEEP_NAMED,
@@ -174,19 +180,11 @@ pub mod compiled_in {
     }
 }
 
-/// The plugin's own settings: none are read; present settings must be a JSON object.
-fn settings_ok(b: &[u8]) -> bool {
-    b.is_empty()
-        || matches!(
-            serde_json::from_slice::<serde_json::Value>(b),
-            Ok(serde_json::Value::Object(_))
-        )
-}
-
 const SETTINGS_NOT_OBJECT: &str = "busbar-auth-oauth settings must be a JSON object";
 
+/// The plugin's own settings: none are read; present settings must be a JSON object.
 fn judged(settings: &[u8]) -> Result<(), Refusal> {
-    if settings_ok(settings) {
+    if life::settings_object(settings).is_ok() {
         Ok(())
     } else {
         Err(Refusal::failed(SETTINGS_NOT_OBJECT))
