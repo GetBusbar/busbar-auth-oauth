@@ -31,6 +31,7 @@
 
 use std::sync::Arc;
 
+use busbar_contract::abi::sdk::auth_kit::json_error;
 use serde::Deserialize;
 use serde_json::{Map, Value};
 
@@ -148,31 +149,39 @@ fn object(settings: Option<&[u8]>) -> Result<Map<String, Value>, Refusal> {
         Ok(_) => Err(Refusal::Settings(
             "outbound auth settings must be a JSON object".to_string(),
         )),
-        Err(e) => Err(Refusal::Settings(format!(
-            "outbound auth settings are not JSON: {e}"
-        ))),
+        Err(e) => Err(Refusal::Settings(json_error(
+            "outbound auth settings are not JSON",
+        )(e))),
     }
 }
 
+/// The setting `key` read as `T`; a value of another type is refused naming the key and `want`
+/// (what it must be), never with the decoder's text, which quotes the value.
 fn field<T: for<'de> Deserialize<'de>>(
     m: &Map<String, Value>,
     key: &str,
+    want: &str,
 ) -> Result<Option<T>, Refusal> {
     match m.get(key) {
         None | Some(Value::Null) => Ok(None),
-        Some(v) => serde_json::from_value(v.clone()).map(Some).map_err(|e| {
-            Refusal::Settings(format!("outbound auth setting `{key}` is invalid: {e}"))
+        Some(v) => T::deserialize(v).map(Some).map_err(|_| {
+            Refusal::Settings(format!(
+                "outbound auth setting `{key}` is invalid: it must be {want}"
+            ))
         }),
     }
 }
 
 /// A non-blank string setting.
 fn text(m: &Map<String, Value>, key: &str) -> Result<Option<String>, Refusal> {
-    Ok(field::<String>(m, key)?.filter(|s| !s.trim().is_empty()))
+    Ok(field::<String>(m, key, "a string")?.filter(|s| !s.trim().is_empty()))
 }
 
 fn max_response_bytes(m: &Map<String, Value>) -> Result<usize, Refusal> {
-    Ok(field::<usize>(m, "max_response_bytes")?.unwrap_or(mint::DEFAULT_MAX_RESPONSE_BYTES))
+    Ok(
+        field::<usize>(m, "max_response_bytes", "a non-negative integer")?
+            .unwrap_or(mint::DEFAULT_MAX_RESPONSE_BYTES),
+    )
 }
 
 /// What opening a style needs from the instance: the token cache, keyed by (style, credential,
