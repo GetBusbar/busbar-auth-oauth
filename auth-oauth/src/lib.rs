@@ -183,11 +183,20 @@ pub mod compiled_in {
 /// holding only keys some style reads ([`style::instance_keys`]); every other key is refused by
 /// name, one `settings: ` line each.
 fn judged(settings: &[u8]) -> Result<(), Refusal> {
-    let m = life::settings_object(settings)?;
-    style::instance_keys(&m).map_err(|refusals| {
-        let lines: Vec<String> = refusals.iter().map(style::Refusal::line).collect();
-        Refusal::failed(lines.join("\n"))
-    })
+    let checked = life::settings_object(settings).and_then(|m| {
+        style::instance_keys(&m).map_err(|refusals| {
+            let lines: Vec<String> = refusals.iter().map(style::Refusal::line).collect();
+            Refusal::failed(lines.join("\n"))
+        })
+    });
+    if let Err(r) = &checked {
+        tracing::info!(
+            module = "oauth",
+            reason = r.text().unwrap_or_default(),
+            "instance settings refused"
+        );
+    }
+    checked
 }
 
 /// ONE `fields` REQUEST, as the instance answers it (the SDK's view, read once).
@@ -341,6 +350,13 @@ impl Oauth {
             // A token exchange mints nothing at open: each request's scope is its own exchange.
             Ok(binding) => Ok(self.keep_binding(binding)),
             Err(refusals) => {
+                let all: Vec<String> = refusals.iter().map(style::Refusal::line).collect();
+                tracing::info!(
+                    module = "oauth",
+                    style,
+                    reason = all.join(" | "),
+                    "outbound binding refused"
+                );
                 let mut lines = refusals.iter().map(style::Refusal::line);
                 let first = lines.next().unwrap_or_default();
                 Err(lines.fold(OpenRefusal::new(first), |r, l| r.and(l)))
@@ -383,9 +399,24 @@ impl OutboundPlugin for Oauth {
             ticket: op.ticket(),
             timestamp: request.timestamp(),
         };
-        self.answer(&ask, op.host(), &mut |h| {
+        let answer = self.answer(&ask, op.host(), &mut |h| {
             out.push(b"authorization", h.as_bytes(), FIELD_FLAGS);
-        })
+        });
+        match &answer {
+            Poll::Ready(FieldsAnswer::Refused) => tracing::info!(
+                module = "oauth",
+                reason =
+                    "not the operator's own credential, or a handle this generation does not hold",
+                "fields refused"
+            ),
+            Poll::Ready(FieldsAnswer::Failed(why)) => tracing::info!(
+                module = "oauth",
+                reason = why.as_ref(),
+                "fields failed: no token to present"
+            ),
+            _ => {}
+        }
+        answer
     }
 
     fn outbound_ready(&self, handle: u64) -> bool {
