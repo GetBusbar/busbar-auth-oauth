@@ -22,10 +22,7 @@
           "body": "{}"
         },
         "expect_fields": [
-          [
-            "authorization",
-            "Bearer conformance-token-1"
-          ]
+          ["authorization", "Bearer conformance-token-1", 1]
         ],
         "token_endpoint": [
           {
@@ -65,10 +62,7 @@
         ],
         "expires_in": 3600,
         "refreshed_fields": [
-          [
-            "authorization",
-            "Bearer conformance-token-2"
-          ]
+          ["authorization", "Bearer conformance-token-2", 1]
         ],
         "refusal": "Ready"
       },
@@ -93,10 +87,7 @@
           "body": "{}"
         },
         "expect_fields": [
-          [
-            "authorization",
-            "Bearer conformance-token-1"
-          ]
+          ["authorization", "Bearer conformance-token-1", 1]
         ],
         "token_endpoint": [
           {
@@ -136,10 +127,7 @@
         ],
         "expires_in": 3600,
         "refreshed_fields": [
-          [
-            "authorization",
-            "Bearer conformance-token-2"
-          ]
+          ["authorization", "Bearer conformance-token-2", 1]
         ],
         "refusal": "Ready"
       },
@@ -169,10 +157,7 @@
         },
         "second_scope": "read:things write:things",
         "expect_fields": [
-          [
-            "authorization",
-            "Bearer conformance-token-1"
-          ]
+          ["authorization", "Bearer conformance-token-1", 1]
         ],
         "token_endpoint": [
           {
@@ -229,16 +214,10 @@
         ],
         "expires_in": 3600,
         "second_scope_fields": [
-          [
-            "authorization",
-            "Bearer conformance-token-2"
-          ]
+          ["authorization", "Bearer conformance-token-2", 1]
         ],
         "expired_fields": [
-          [
-            "authorization",
-            "Bearer conformance-token-3"
-          ]
+          ["authorization", "Bearer conformance-token-3", 1]
         ],
         "refusal": "Failed"
       }
