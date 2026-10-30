@@ -73,8 +73,8 @@ use std::borrow::Cow;
 use std::task::Poll;
 
 use busbar_contract::abi::auth::{
-    ranked, AuthPoints, AuthTail, StyleDecl, CANCEL_CONTINUES, STYLE_ENDPOINT_FROM_CREDENTIAL,
-    STYLE_ENDPOINT_TOKEN_URL,
+    ranked, AuthPoints, AuthTail, StyleDecl, CANCEL_CONTINUES, FIELD_SENSITIVE,
+    STYLE_ENDPOINT_FROM_CREDENTIAL, STYLE_ENDPOINT_TOKEN_URL,
 };
 use busbar_contract::abi::host::conn::connector::{
     Need, DIRECTION_OUTBOUND, EGRESS_PROVIDER, KEEP_NAMED,
@@ -95,10 +95,9 @@ use busbar_contract::abi::sdk::life::{self, Refusal};
 use crate::instance::Oauth;
 use crate::mint::Read;
 
-/// The flags every field this plugin writes carries: NONE. Credential headers go out
-/// indexable, and an h2 encoder that honoured `FIELD_SENSITIVE` would send them never-indexed,
-/// which is different bytes on the wire.
-const FIELD_FLAGS: u32 = 0;
+/// The flags every field this plugin writes carries: [`FIELD_SENSITIVE`]. The field is the
+/// bearer, so an h2/h3 encoder sends it never-indexed and no header table keeps it.
+const FIELD_FLAGS: u32 = FIELD_SENSITIVE;
 
 /// The styles this plugin serves, each at `Head` (a bearer token reads nothing past the head).
 /// None carries [`busbar_contract::abi::auth::STYLE_CALLER_CREDENTIAL`] (an OAuth token is always

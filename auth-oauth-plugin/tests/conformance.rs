@@ -10,7 +10,7 @@
 //!
 //! ## The RED arms stay in the file
 //!
-//! * [`red_a_sensitive_field_flag_is_not_the_1_5_5_bytes`]
+//! * [`red_a_field_without_the_sensitive_flag`]
 //! * [`red_a_writer_that_ignores_the_host_capacity_faults`]
 
 // THE PUBLISHED CONFORMANCE SUITE (busbar-plugin-loader's `conformance` feature, TODO ABI-b4): the
@@ -356,7 +356,7 @@ fn script(p: &Plugin<Auth>) -> Vec<String> {
 }
 
 const EXPECTED: &[&str] = &[
-    "validate [1] Failed busbar-auth-oauth settings must be a JSON object",
+    "validate [1] Failed settings: must be a JSON object",
     "validate Ready",
     "open Ready",
     "open_outbound oauth-client-credentials Ready ",
@@ -446,22 +446,26 @@ fn real_fields() -> Op {
     }
 }
 
-extern "C" fn sensitive_fields(inst: *mut c_void, i: *const c_void, o: *mut c_void) -> RawOutcome {
+extern "C" fn insensitive_fields(
+    inst: *mut c_void,
+    i: *const c_void,
+    o: *mut c_void,
+) -> RawOutcome {
     let r = real_fields()(inst, i, o);
     // SAFETY: the host's live `FieldsIn`/`FieldsOut` for this call.
     unsafe {
         let (i, o) = (&*i.cast::<FieldsIn>(), &*o.cast::<FieldsOut>());
         if r.outcome() == Outcome::Ready {
             for k in 0..o.fields_len as usize {
-                (*i.fields.add(k)).flags = FIELD_SENSITIVE;
+                (*i.fields.add(k)).flags &= !FIELD_SENSITIVE;
             }
         }
     }
     r
 }
 
-extern "C" fn sensitive_door() -> &'static Door {
-    door_with_fields(sensitive_fields)
+extern "C" fn insensitive_door() -> &'static Door {
+    door_with_fields(insensitive_fields)
 }
 
 /// THE DIAGNOSTIC TABLE: each `diag` index names its 1.5.5 catalog code (the indices are
@@ -487,10 +491,11 @@ fn the_diag_indices_name_their_catalog_codes() {
 }
 
 #[test]
-fn red_a_sensitive_field_flag_is_not_the_1_5_5_bytes() {
+fn red_a_field_without_the_sensitive_flag() {
     let d = Dispatcher::new(DispatchConfig::default());
     let folds = Arc::new(Folds::default());
-    let red = load_linked::<Auth>(&row(sensitive_door), bind(&folds, &d)).expect("the door loads");
+    let red =
+        load_linked::<Auth>(&row(insensitive_door), bind(&folds, &d)).expect("the door loads");
     let t = script(&red);
     assert_eq!(
         t, EXPECTED,
