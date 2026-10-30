@@ -111,3 +111,29 @@ fn an_unknown_instance_setting_is_refused_by_name_at_validate_open_and_refresh()
         assert!(<Oauth as OutboundPlugin>::open(good, &[], 1).is_ok());
     }
 }
+
+/// A REFUSED BINDING IS LOGGED ONCE AT INFO (S5), `module = "oauth"`, with its reason and never the
+/// credential. RED: the refusal was answered and logged nowhere.
+#[test]
+fn a_refused_binding_is_logged_once_at_info() {
+    use busbar_test_kit::warn_capture::WarnCapture;
+    let cap = WarnCapture::capturing_debug();
+    tracing::subscriber::with_default(cap.clone(), || {
+        let o = Oauth::new(1);
+        assert!(o
+            .bind(
+                style::OAUTH_CLIENT_CREDENTIALS,
+                Some(b"no-colon-s3cr3t"),
+                Some(br#"{"token_url":"https://i/t","scope":"s"}"#),
+                None,
+            )
+            .is_err());
+    });
+    let m = cap.messages();
+    assert_eq!(cap.count("module=oauth"), 1, "{m:?}");
+    assert!(
+        m[0].contains("INFO") && m[0].contains("client_id:client_secret"),
+        "{m:?}"
+    );
+    assert!(!m[0].contains("s3cr3t"), "{m:?}");
+}
