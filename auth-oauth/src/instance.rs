@@ -390,7 +390,8 @@ impl Oauth {
             .map(|(k, c)| (*k, Arc::clone(c)))
             .collect();
         let mut next = u64::MAX;
-        let mut minted = false;
+        // A mint landed or failed: the calls waiting on a token are woken to read the outcome.
+        let mut settled = false;
         for (key, cell) in cells {
             let (due, report) = cell.tick(now_ns, wall, wire);
             if cell.on_demand() {
@@ -398,15 +399,16 @@ impl Oauth {
                 self.settle_exchange(key, &cell, report, host, diags);
                 continue;
             }
+            settled |= report.is_some();
             match report {
-                Some(Report::Minted) => minted = true,
+                Some(Report::Minted) => {}
                 Some(Report::TokenInvalidBytes) => {
-                    minted = true;
                     diags.push(
                         diag::OAUTH_TOKEN_INVALID_BYTES,
                         WARN,
-                        "minted an OAuth token with bytes invalid for an HTTP header value; \
-                         omitting the auth header — upstream will reject with 401",
+                        "minted an OAuth token with bytes invalid for an HTTP header value; it is \
+                         not stored, a call with no token to present is refused rather than sent \
+                         unauthenticated, and the mint retries",
                     );
                 }
                 Some(Report::EmptyToken) => diags.push(
@@ -426,8 +428,8 @@ impl Oauth {
                 next = next.min(due);
             }
         }
-        if minted {
-            // The token is stored before this drain: a call that parks after the drain reads it
+        if settled {
+            // The outcome is stored before this drain: a call that parks after the drain reads it
             // (it parks before it reads), and one that parked before is woken here.
             let woken: Vec<Ticket> = std::mem::take(&mut *lock(&self.waiters));
             if let Some(h) = host {

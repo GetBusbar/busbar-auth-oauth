@@ -213,16 +213,19 @@ fn ready_answer(r: Read<'_>, present: &mut dyn FnMut(&str)) -> Option<FieldsAnsw
             Some(FieldsAnswer::Ready)
         }
         Read::Nothing => Some(FieldsAnswer::Ready),
+        Read::Refuse(why) => Some(FieldsAnswer::Failed(Cow::Borrowed(why))),
         Read::Wait => None,
     }
 }
 
 impl Oauth {
-    /// THE ANSWER TO ONE `fields`: the cached bearer, handed to `present` (READY with it); no field
-    /// (READY with none, an un-encodable token); PENDING on a ticket while the call waits for a
-    /// token (an expired one whose refresh failed, or a token exchange in flight), woken when one
-    /// lands; REFUSED for a passthrough or a handle this generation does not hold; FAILED when the
-    /// call's exchange failed.
+    /// THE ANSWER TO ONE `fields`: the cached bearer, handed to `present` (READY with it); READY
+    /// with no field only in the boot window before a scheduled style's first mint is attempted
+    /// (the contract's rule at this pin); PENDING on a ticket while the call waits for a token (an
+    /// expired one whose refresh failed, or a token exchange in flight), woken when one lands or
+    /// the mint fails; REFUSED for a passthrough or a handle this generation does not hold; FAILED,
+    /// saying why, when there is no token to present after a mint (it failed, or its token cannot
+    /// be a header value) or the call's exchange failed.
     ///
     /// NO LOST WAKE: a call that would wait parks its ticket BEFORE it reads the token, and reads
     /// again once parked. A mint stores its token before it wakes the parked tickets, so the call
@@ -262,9 +265,14 @@ impl Oauth {
                 present(h);
                 Poll::Ready(FieldsAnswer::Ready)
             }
+            Read::Refuse(why) => {
+                self.unpark_exchange(key, ticket);
+                Poll::Ready(FieldsAnswer::Failed(Cow::Borrowed(why)))
+            }
+            // An on-demand cell presents only a usable token: unreachable, refused all the same.
             Read::Nothing => {
                 self.unpark_exchange(key, ticket);
-                Poll::Ready(FieldsAnswer::Ready)
+                Poll::Ready(FieldsAnswer::Failed(Cow::Borrowed(mint::NO_TOKEN)))
             }
             Read::Wait => {
                 self.mint_soon(host);

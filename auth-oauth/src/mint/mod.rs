@@ -412,13 +412,27 @@ pub(crate) enum Report {
     Minted,
 }
 
+/// Why a call is refused when its binding has no token to present: never sent unauthenticated.
+pub(crate) const NO_TOKEN: &str = "no OAuth token could be minted for this binding (see \
+     diagnostics BUSBAR-4014/4015/4016); the call is refused rather than sent unauthenticated, and \
+     the mint retries on its schedule";
+
+/// Why a call is refused when its token cannot be a header value.
+pub(crate) const UNPRESENTABLE: &str = "the minted OAuth token holds bytes invalid in a header \
+     value (see diagnostic BUSBAR-4014); the call is refused rather than sent unauthenticated";
+
 /// The answer the per-request call reads.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Read<'a> {
     /// Present this header value (`Bearer <token>`).
     Header(&'a str),
-    /// No header (before the first mint, or an un-encodable token): the upstream answers 401.
+    /// No header: the boot window before the first mint is attempted (READY with no fields, the
+    /// contract's rule at this pin: `busbar-test-kit` outbound script, "fields before the first
+    /// mint").
     Nothing,
+    /// Nothing can be presented after a mint: the call is FAILED, saying why (never sent
+    /// unauthenticated).
+    Refuse(&'static str),
     /// Not ready: the token has expired and its refresh failed (Q-EXPIRED), or an on-demand
     /// exchange is due.
     Wait,
@@ -527,17 +541,22 @@ impl Minted {
         // `usable_until`, so a read that finds the cell usable snapshots the stored token, never
         // an older (empty or expired) one an exchange landing in between has replaced.
         let tok = self.current();
-        // Before the first mint a scheduled cell presents nothing: READY with no fields, so the
-        // upstream answers 401 (contract `abi/auth` `fields`).
+        // Before the first mint is attempted a scheduled cell presents nothing (the contract's
+        // boot window); once a mint has failed with no token held, the call is refused, saying
+        // why, never sent unauthenticated.
         if tok.token.expose_own(&Own::here()).is_empty() {
-            return f(Read::Nothing);
+            return if self.refresh_failed.load(Ordering::Acquire) {
+                f(Read::Refuse(NO_TOKEN))
+            } else {
+                f(Read::Nothing)
+            };
         }
         if now >= tok.expires_at && self.refresh_failed.load(Ordering::Acquire) {
             return f(Read::Wait);
         }
         match tok.header() {
             Some(h) => f(Read::Header(h)),
-            None => f(Read::Nothing),
+            None => f(Read::Refuse(UNPRESENTABLE)),
         }
     }
 
@@ -671,16 +690,20 @@ impl Minted {
                 *ex = Exchange::Idle { due_ns: due };
                 (due, Some(Report::EmptyToken))
             }
-            // An on-demand token that cannot be presented (bytes invalid in a header value) is a
-            // failed exchange, as an empty one is: it is not stored, and the calls that waited on
-            // it fail rather than go out unauthenticated (a scheduled style sends no header, and
-            // the upstream answers 401).
-            Ok((_, true)) if self.on_demand => {
+            // A token that cannot be presented (bytes invalid in a header value) is a failed mint,
+            // as an empty one is: it is not stored (a token held before keeps serving), and the
+            // calls with nothing to present fail rather than go out unauthenticated.
+            Ok((_, true)) => {
                 self.refresh_failed.store(true, Ordering::Release);
-                *ex = Exchange::Idle { due_ns: u64::MAX };
-                (u64::MAX, Some(Report::TokenInvalidBytes))
+                let due = if self.on_demand {
+                    u64::MAX
+                } else {
+                    now_ns.saturating_add(MIN_SLEEP_SECS * NS)
+                };
+                *ex = Exchange::Idle { due_ns: due };
+                (due, Some(Report::TokenInvalidBytes))
             }
-            Ok((fresh, invalid)) => {
+            Ok((fresh, _)) => {
                 let now = wall;
                 let ahead = next_refresh_secs(fresh.expires_at, now);
                 // An on-demand token is presented until a scheduled style would refresh it, and no
@@ -700,14 +723,7 @@ impl Minted {
                 }
                 self.refresh_failed.store(false, Ordering::Release);
                 *ex = Exchange::Idle { due_ns: due };
-                (
-                    due,
-                    Some(if invalid {
-                        Report::TokenInvalidBytes
-                    } else {
-                        Report::Minted
-                    }),
-                )
+                (due, Some(Report::Minted))
             }
             Err(e) => self.failed(&mut ex, now_ns, e),
         }
