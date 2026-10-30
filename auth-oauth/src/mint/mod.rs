@@ -30,7 +30,8 @@ use zeroize::{Zeroize, Zeroizing};
 
 use crate::held::Own;
 use crate::held::Secret;
-use crate::token_response::{default_expires_in, deserialize_expires_in, json_err, wiped_member};
+use crate::token_response::{default_expires_in, deserialize_expires_in, wiped_member};
+use busbar_contract::abi::sdk::auth_kit::json_error;
 use busbar_contract::header::{is_legal_header_value, token_value};
 
 /// Refresh this many seconds BEFORE the token's stated expiry, so a request never races an expired
@@ -332,7 +333,7 @@ pub(crate) fn parse_response(
     }
     // A decode failure is described without the decoder's text, which can quote the token.
     let tok: TokenResponse =
-        serde_json::from_str(&body).map_err(json_err("token response JSON invalid"))?;
+        serde_json::from_str(&body).map_err(json_error("token response JSON invalid"))?;
     // The token's buffer moves into the held secret whole (no copy): the emptied wrapper drops.
     let mut read = access_token(&body)?;
     let token = Secret::held(std::mem::take(&mut *read));
@@ -411,13 +412,27 @@ pub(crate) enum Report {
     Minted,
 }
 
+/// Why a call is refused when its binding has no token to present: never sent unauthenticated.
+pub(crate) const NO_TOKEN: &str = "no OAuth token could be minted for this binding (see \
+     diagnostics BUSBAR-4014/4015/4016); the call is refused rather than sent unauthenticated, and \
+     the mint retries on its schedule";
+
+/// Why a call is refused when its token cannot be a header value.
+pub(crate) const UNPRESENTABLE: &str = "the minted OAuth token holds bytes invalid in a header \
+     value (see diagnostic BUSBAR-4014); the call is refused rather than sent unauthenticated";
+
 /// The answer the per-request call reads.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Read<'a> {
     /// Present this header value (`Bearer <token>`).
     Header(&'a str),
-    /// No header (before the first mint, or an un-encodable token): the upstream answers 401.
+    /// No header: the boot window before the first mint is attempted (READY with no fields, the
+    /// contract's rule at this pin: `busbar-test-kit` outbound script, "fields before the first
+    /// mint").
     Nothing,
+    /// Nothing can be presented after a mint: the call is FAILED, saying why (never sent
+    /// unauthenticated).
+    Refuse(&'static str),
     /// Not ready: the token has expired and its refresh failed (Q-EXPIRED), or an on-demand
     /// exchange is due.
     Wait,
@@ -437,6 +452,8 @@ pub(crate) struct Minted {
     /// An on-demand cell's token is presented until this wall-clock epoch second: the instant a
     /// scheduled style would refresh it ([`next_refresh_secs`] from its mint).
     usable_until: AtomicU64,
+    /// The last failed mint was an outage of the token endpoint ([`Minted::outage`]).
+    outage: AtomicBool,
 }
 
 impl Minted {
@@ -451,6 +468,7 @@ impl Minted {
             exchange: Mutex::new(Exchange::Idle { due_ns: 0 }),
             refresh_failed: AtomicBool::new(false),
             usable_until: AtomicU64::new(0),
+            outage: AtomicBool::new(false),
         }
     }
 
@@ -526,17 +544,22 @@ impl Minted {
         // `usable_until`, so a read that finds the cell usable snapshots the stored token, never
         // an older (empty or expired) one an exchange landing in between has replaced.
         let tok = self.current();
-        // Before the first mint a scheduled cell presents nothing: READY with no fields, so the
-        // upstream answers 401 (contract `abi/auth` `fields`).
+        // Before the first mint is attempted a scheduled cell presents nothing (the contract's
+        // boot window); once a mint has failed with no token held, the call is refused, saying
+        // why, never sent unauthenticated.
         if tok.token.expose_own(&Own::here()).is_empty() {
-            return f(Read::Nothing);
+            return if self.refresh_failed.load(Ordering::Acquire) {
+                f(Read::Refuse(NO_TOKEN))
+            } else {
+                f(Read::Nothing)
+            };
         }
         if now >= tok.expires_at && self.refresh_failed.load(Ordering::Acquire) {
             return f(Read::Wait);
         }
         match tok.header() {
             Some(h) => f(Read::Header(h)),
-            None => f(Read::Nothing),
+            None => f(Read::Refuse(UNPRESENTABLE)),
         }
     }
 
@@ -567,11 +590,12 @@ impl Minted {
                     now_ns,
                     "token endpoint request failed: no connection was granted for the token endpoint"
                         .to_string(),
+                    false,
                 );
             };
             let req = match self.minter.request(wall) {
                 Ok(r) => r,
-                Err(e) => return self.failed(&mut ex, now_ns, e),
+                Err(e) => return self.failed(&mut ex, now_ns, e, false),
             };
             match wire.open(&req, MINT_DEADLINE_SECS * 1000) {
                 Ok(conn) => {
@@ -589,6 +613,7 @@ impl Minted {
                         &mut ex,
                         now_ns,
                         format!("token endpoint request failed: {}", conn_cause(e)),
+                        unreachable(e),
                     )
                 }
             }
@@ -609,11 +634,12 @@ impl Minted {
         let mut buf = Zeroizing::new([0_u8; READ_BUF_BYTES]);
         let finished = loop {
             if now_ns.saturating_sub(*started_ns) >= MINT_DEADLINE_SECS * NS {
-                break Err(
+                break Err((
                     "token endpoint response was not read before the mint deadline; refusing to \
                      parse a partial token response"
                         .to_string(),
-                );
+                    true,
+                ));
             }
             match wire.read(conn, &mut buf[..]) {
                 Ok(got) => {
@@ -623,13 +649,16 @@ impl Minted {
                     if got.kind == PieceKind::Body {
                         if let Err(e) = append_wiped(body, &buf[..got.len], self.max_response_bytes)
                         {
-                            break Err(e);
+                            break Err((e, false));
                         }
                         if body.len() > self.max_response_bytes {
-                            break Err(format!(
-                                "token endpoint response exceeded the {}-byte cap; refusing to \
-                                 parse a truncated token response",
-                                self.max_response_bytes
+                            break Err((
+                                format!(
+                                    "token endpoint response exceeded the {}-byte cap; refusing \
+                                     to parse a truncated token response",
+                                    self.max_response_bytes
+                                ),
+                                false,
                             ));
                         }
                     }
@@ -643,18 +672,25 @@ impl Minted {
                     break Ok((status.unwrap_or(0), std::mem::take(body)))
                 }
                 Err(ConnError::Closed) => {
-                    break Err(
+                    break Err((
                         "token endpoint connection failed mid-response; refusing to parse \
                                a partial token response"
                             .to_string(),
-                    )
+                        true,
+                    ))
                 }
-                Err(e) => break Err(format!("token endpoint request failed: {}", conn_cause(e))),
+                Err(e) => {
+                    break Err((
+                        format!("token endpoint request failed: {}", conn_cause(e)),
+                        unreachable(e),
+                    ))
+                }
             }
         };
         wire.close(conn);
         match finished.and_then(|(status, body)| {
             parse_response(u16::try_from(status).unwrap_or(0), &body, wall)
+                .map_err(|e| (e, outage_status(status)))
         }) {
             // A 200 with an EMPTY access_token must be treated as a (retryable) failure, not stored:
             // an empty token collides with the pre-first-mint sentinel, so `ready` would stay false
@@ -670,16 +706,20 @@ impl Minted {
                 *ex = Exchange::Idle { due_ns: due };
                 (due, Some(Report::EmptyToken))
             }
-            // An on-demand token that cannot be presented (bytes invalid in a header value) is a
-            // failed exchange, as an empty one is: it is not stored, and the calls that waited on
-            // it fail rather than go out unauthenticated (a scheduled style sends no header, and
-            // the upstream answers 401).
-            Ok((_, true)) if self.on_demand => {
+            // A token that cannot be presented (bytes invalid in a header value) is a failed mint,
+            // as an empty one is: it is not stored (a token held before keeps serving), and the
+            // calls with nothing to present fail rather than go out unauthenticated.
+            Ok((_, true)) => {
                 self.refresh_failed.store(true, Ordering::Release);
-                *ex = Exchange::Idle { due_ns: u64::MAX };
-                (u64::MAX, Some(Report::TokenInvalidBytes))
+                let due = if self.on_demand {
+                    u64::MAX
+                } else {
+                    now_ns.saturating_add(MIN_SLEEP_SECS * NS)
+                };
+                *ex = Exchange::Idle { due_ns: due };
+                (due, Some(Report::TokenInvalidBytes))
             }
-            Ok((fresh, invalid)) => {
+            Ok((fresh, _)) => {
                 let now = wall;
                 let ahead = next_refresh_secs(fresh.expires_at, now);
                 // An on-demand token is presented until a scheduled style would refresh it, and no
@@ -699,23 +739,29 @@ impl Minted {
                 }
                 self.refresh_failed.store(false, Ordering::Release);
                 *ex = Exchange::Idle { due_ns: due };
-                (
-                    due,
-                    Some(if invalid {
-                        Report::TokenInvalidBytes
-                    } else {
-                        Report::Minted
-                    }),
-                )
+                (due, Some(Report::Minted))
             }
-            Err(e) => self.failed(&mut ex, now_ns, e),
+            Err((e, outage)) => self.failed(&mut ex, now_ns, e, outage),
         }
+    }
+
+    /// Whether this cell's last failed mint was an OUTAGE of its token endpoint (a 5xx or 429, a
+    /// timeout, a connection lost), not a refusal of its credential or its configuration.
+    pub(crate) fn outage(&self) -> bool {
+        self.outage.load(Ordering::Acquire)
     }
 
     /// A failed mint: keep serving whatever token is current, and retry at `MIN_SLEEP_SECS` (an
     /// on-demand cell retries when a request next arms it).
-    fn failed(&self, ex: &mut Exchange, now_ns: u64, e: String) -> (u64, Option<Report>) {
+    fn failed(
+        &self,
+        ex: &mut Exchange,
+        now_ns: u64,
+        e: String,
+        outage: bool,
+    ) -> (u64, Option<Report>) {
         self.refresh_failed.store(true, Ordering::Release);
+        self.outage.store(outage, Ordering::Release);
         let due = if self.on_demand {
             u64::MAX
         } else {
@@ -750,6 +796,21 @@ fn append_wiped(body: &mut Zeroizing<Vec<u8>>, bytes: &[u8], cap: usize) -> Resu
     }
     body.extend_from_slice(bytes);
     Ok(())
+}
+
+/// Whether a token endpoint's reply `status` is an OUTAGE (S4): a 5xx or a 429, the endpoint down
+/// or shedding load, never a refusal of the credential.
+pub(crate) const fn outage_status(status: u32) -> bool {
+    status == 429 || (status >= 500 && status <= 599)
+}
+
+/// Whether a connection error is the token endpoint being unreachable (an outage): a timeout, a
+/// lost connection or a fault, never a refusal the host made by its own rules.
+const fn unreachable(e: ConnError) -> bool {
+    matches!(
+        e,
+        ConnError::Timeout | ConnError::Closed | ConnError::Fault | ConnError::Pending
+    )
 }
 
 /// The cause a connection refusal names — never the URL (it can carry query/secret material).

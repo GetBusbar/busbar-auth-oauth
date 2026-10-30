@@ -31,6 +31,7 @@
 
 use std::sync::Arc;
 
+use busbar_contract::abi::sdk::auth_kit::json_error;
 use serde::Deserialize;
 use serde_json::{Map, Value};
 
@@ -123,6 +124,32 @@ const OAUTH_TOKEN_EXCHANGE_KEYS: &[&str] = &[
     "max_response_bytes",
 ];
 
+/// Every key the instance's own settings may hold: the keys of every style's row (the host opens
+/// the instance over a binding's settings).
+const INSTANCE_KEYS: &[&[&str]] = &[
+    JWT_BEARER_KEYS,
+    OAUTH_CLIENT_CREDENTIALS_KEYS,
+    OAUTH_TOKEN_EXCHANGE_KEYS,
+];
+
+/// The instance's own settings `m`: every key some style reads is accepted; any other is refused,
+/// naming it.
+///
+/// # Errors
+/// One finding per unknown key.
+pub(crate) fn instance_keys(m: &Map<String, Value>) -> Result<(), Vec<Refusal>> {
+    let unknown: Vec<Refusal> = m
+        .keys()
+        .filter(|k| !INSTANCE_KEYS.iter().any(|row| row.contains(&k.as_str())))
+        .map(|k| Refusal::Settings(format!("unknown key `{k}`")))
+        .collect();
+    if unknown.is_empty() {
+        Ok(())
+    } else {
+        Err(unknown)
+    }
+}
+
 /// Refuse every key the style does not document, naming it: a typo'd optional key must not
 /// silently fall back to its default.
 fn deny_unknown(m: &Map<String, Value>, allowed: &[&str]) -> Result<(), Vec<Refusal>> {
@@ -148,31 +175,39 @@ fn object(settings: Option<&[u8]>) -> Result<Map<String, Value>, Refusal> {
         Ok(_) => Err(Refusal::Settings(
             "outbound auth settings must be a JSON object".to_string(),
         )),
-        Err(e) => Err(Refusal::Settings(format!(
-            "outbound auth settings are not JSON: {e}"
-        ))),
+        Err(e) => Err(Refusal::Settings(json_error(
+            "outbound auth settings are not JSON",
+        )(e))),
     }
 }
 
+/// The setting `key` read as `T`; a value of another type is refused naming the key and `want`
+/// (what it must be), never with the decoder's text, which quotes the value.
 fn field<T: for<'de> Deserialize<'de>>(
     m: &Map<String, Value>,
     key: &str,
+    want: &str,
 ) -> Result<Option<T>, Refusal> {
     match m.get(key) {
         None | Some(Value::Null) => Ok(None),
-        Some(v) => serde_json::from_value(v.clone()).map(Some).map_err(|e| {
-            Refusal::Settings(format!("outbound auth setting `{key}` is invalid: {e}"))
+        Some(v) => T::deserialize(v).map(Some).map_err(|_| {
+            Refusal::Settings(format!(
+                "outbound auth setting `{key}` is invalid: it must be {want}"
+            ))
         }),
     }
 }
 
 /// A non-blank string setting.
 fn text(m: &Map<String, Value>, key: &str) -> Result<Option<String>, Refusal> {
-    Ok(field::<String>(m, key)?.filter(|s| !s.trim().is_empty()))
+    Ok(field::<String>(m, key, "a string")?.filter(|s| !s.trim().is_empty()))
 }
 
 fn max_response_bytes(m: &Map<String, Value>) -> Result<usize, Refusal> {
-    Ok(field::<usize>(m, "max_response_bytes")?.unwrap_or(mint::DEFAULT_MAX_RESPONSE_BYTES))
+    Ok(
+        field::<usize>(m, "max_response_bytes", "a non-negative integer")?
+            .unwrap_or(mint::DEFAULT_MAX_RESPONSE_BYTES),
+    )
 }
 
 /// What opening a style needs from the instance: the token cache, keyed by (style, credential,
@@ -180,18 +215,9 @@ fn max_response_bytes(m: &Map<String, Value>) -> Result<usize, Refusal> {
 pub trait TokenCache {
     /// The cell for `key`; `minter` makes it when absent (and is dropped when a cell is held).
     fn cell(&self, key: [u8; 32], minter: Minter, max: usize) -> Arc<Minted>;
-}
-
-/// The token cache key: SHA-256 over (style, credential, settings), NUL-separated.
-pub fn cache_key(style: &str, credential: &[u8], settings: &[u8]) -> [u8; 32] {
-    use sha2::{Digest, Sha256};
-    let mut h = Sha256::new();
-    h.update(style.as_bytes());
-    h.update([0]);
-    h.update(credential);
-    h.update([0]);
-    h.update(settings);
-    h.finalize().into()
+    /// The cache key of `parts` (style, credential, settings): a derivation keyed by the cache's
+    /// own secret, never a plain digest of the credential.
+    fn key(&self, parts: &[&[u8]]) -> [u8; 32];
 }
 
 /// Bind `style` to `credential` under `settings`, whichever this plugin serves — `open_outbound`'s
@@ -207,7 +233,8 @@ pub fn open(
     cache: &dyn TokenCache,
 ) -> Result<Binding, Vec<Refusal>> {
     if style == OAUTH_TOKEN_EXCHANGE {
-        return open_token_exchange(credential, settings).map(|b| Binding::Exchange(Arc::new(b)));
+        return open_token_exchange(credential, settings, cache)
+            .map(|b| Binding::Exchange(Arc::new(b)));
     }
     open_binding(style, credential, settings, cache).map(Binding::Minted)
 }
@@ -219,6 +246,7 @@ pub fn open(
 fn open_token_exchange(
     credential: Option<&[u8]>,
     settings: Option<&[u8]>,
+    cache: &dyn TokenCache,
 ) -> Result<ExchangeBinding, Vec<Refusal>> {
     let m = object(settings).map_err(|r| vec![r])?;
     deny_unknown(&m, OAUTH_TOKEN_EXCHANGE_KEYS)?;
@@ -266,11 +294,11 @@ fn open_token_exchange(
     else {
         return Err(refusals);
     };
-    let key = cache_key(
-        OAUTH_TOKEN_EXCHANGE,
+    let key = cache.key(&[
+        OAUTH_TOKEN_EXCHANGE.as_bytes(),
         credential.unwrap_or_default(),
         settings.unwrap_or_default(),
-    );
+    ]);
     Ok(ExchangeBinding {
         exchange: Arc::new(mint::token_exchange::build(
             subject,
@@ -371,11 +399,11 @@ fn open_client_credentials(
     };
     let built = mint::oauth_client_credentials::build(cred, &token_url, &scope)
         .map_err(|e| vec![Refusal::Credential(e)])?;
-    let key = cache_key(
-        OAUTH_CLIENT_CREDENTIALS,
+    let key = cache.key(&[
+        OAUTH_CLIENT_CREDENTIALS.as_bytes(),
         raw.unwrap_or_default(),
         settings.unwrap_or_default(),
-    );
+    ]);
     Ok(cache.cell(key, Minter::ClientCredentials(built), max))
 }
 
@@ -409,11 +437,11 @@ fn open_jwt_bearer(
         Some(endpoint) => signer.dialling(endpoint),
         None => signer,
     };
-    let key = cache_key(
-        JWT_BEARER,
+    let key = cache.key(&[
+        JWT_BEARER.as_bytes(),
         raw.unwrap_or_default(),
         settings.unwrap_or_default(),
-    );
+    ]);
     Ok(cache.cell(key, Minter::JwtBearer(Box::new(signer)), max))
 }
 

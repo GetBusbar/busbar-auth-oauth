@@ -8,16 +8,12 @@
 use super::*;
 use crate::instance::diag;
 
-/// THE FIELD FLAGS ARE NONE (ARCHITECT ruling 2026-09-28, Q4: the 1.5.5 bytes win). The `fields`
-/// door writes the authorization field with `FIELD_FLAGS`; 1.5.5 sent its credential headers
-/// indexable, so a sensitive (never-indexed) marking is different bytes. The SDK's `FieldsWriter`
-/// cannot be built outside its own door, so the constant the door passes is pinned directly.
+/// THE AUTHORIZATION FIELD IS SENSITIVE (KIND-auth lead ruling, 1.6.0): every credential field an
+/// outbound style presents carries `FIELD_SENSITIVE`, so an h2/h3 encoder sends it never-indexed
+/// and no header table keeps the bearer. RED: the flags were 0 (1.5.5's indexable bytes).
 #[test]
-fn the_authorization_field_is_written_with_no_flags() {
-    assert_eq!(
-        FIELD_FLAGS, 0,
-        "1.5.5 sent credential headers indexable: the flags stay 0 (ARCHITECT ruling Q4)"
-    );
+fn the_authorization_field_is_written_sensitive() {
+    assert_eq!(FIELD_FLAGS, busbar_contract::abi::auth::FIELD_SENSITIVE);
 }
 
 /// The diagnostic indices are the Statement's table positions, in `DIAG_IDS` order (the plugin
@@ -78,4 +74,63 @@ fn the_oauth_styles_state_their_token_endpoint_and_rank_after_the_header_styles(
     for d in STYLES {
         assert!(check_style_decl(d.flags, d.points).is_ok());
     }
+}
+
+/// THE INSTANCE'S OWN SETTINGS (S2): the host opens the instance over a binding's settings, so
+/// every key a style reads is accepted there, and any other key is refused BY NAME, FAILED, in the
+/// contract's instance-relative line form, at validate, open and refresh alike (`validate` refuses
+/// exactly what `open` refuses). RED: any JSON object was accepted, and the refusal line named the
+/// plugin instead of `settings`.
+#[test]
+fn an_unknown_instance_setting_is_refused_by_name_at_validate_open_and_refresh() {
+    use busbar_contract::abi::mechanism::call::Outcome;
+    use busbar_contract::abi::mechanism::lifecycle::check_validate_refusal;
+    let bad: &[u8] = br#"{"token_url":"https://i/t","scoep":"x","extra":1}"#;
+    let want = "settings: unknown key `extra`\nsettings: unknown key `scoep`";
+    let v = Oauth::validate(bad).unwrap_err();
+    assert_eq!((v.outcome(), v.text()), (Outcome::Failed, Some(want)));
+    assert!(check_validate_refusal(want.as_bytes()).is_ok());
+    let o = <Oauth as OutboundPlugin>::open(bad, &[], 1).err().unwrap();
+    assert_eq!((o.outcome(), o.text()), (Outcome::Failed, Some(want)));
+    let r = Oauth::new(1).refresh(bad, &[], 2).unwrap_err();
+    assert_eq!((r.outcome(), r.text()), (Outcome::Failed, Some(want)));
+    let not_object = Oauth::validate(b"[]").unwrap_err();
+    assert_eq!(not_object.text(), Some("settings: must be a JSON object"));
+    for good in [
+        &b""[..],
+        b"{}",
+        br#"{"token_url":"https://i/t","scope":"s","subject":"x","max_response_bytes":9}"#,
+        br#"{"token_uri":"https://i/t","scope":"s"}"#,
+        br#"{"token_url":"https://i/t","resource":"r","subject_token_type":"t"}"#,
+    ] {
+        assert!(
+            Oauth::validate(good).is_ok(),
+            "{}",
+            String::from_utf8_lossy(good)
+        );
+        assert!(<Oauth as OutboundPlugin>::open(good, &[], 1).is_ok());
+    }
+}
+
+/// A REFUSED BINDING IS LOGGED ONCE AT INFO (S5), `module = "oauth"`, with its reason and never the
+/// credential. RED: the refusal was answered and logged nowhere.
+#[test]
+fn a_refused_binding_is_logged_once_at_info() {
+    use busbar_test_kit::warn_capture::WarnCapture;
+    let cap = WarnCapture::capturing_debug();
+    tracing::subscriber::with_default(cap.clone(), || {
+        let o = Oauth::new(1);
+        assert!(o
+            .bind(
+                style::OAUTH_CLIENT_CREDENTIALS,
+                Some(b"no-colon-s3cr3t"),
+                Some(br#"{"token_url":"https://i/t","scope":"s"}"#),
+                None,
+            )
+            .is_err());
+    });
+    let m = cap.messages();
+    assert_eq!(cap.count("module=oauth"), 1, "{m:?}");
+    assert!(m[0].contains("client_id:client_secret"), "{m:?}");
+    assert!(!m[0].contains("s3cr3t"), "{m:?}");
 }

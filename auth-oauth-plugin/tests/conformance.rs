@@ -10,7 +10,7 @@
 //!
 //! ## The RED arms stay in the file
 //!
-//! * [`red_a_sensitive_field_flag_is_not_the_1_5_5_bytes`]
+//! * [`red_a_field_without_the_sensitive_flag`]
 //! * [`red_a_writer_that_ignores_the_host_capacity_faults`]
 
 // THE PUBLISHED CONFORMANCE SUITE (busbar-plugin-loader's `conformance` feature, TODO ABI-b4): the
@@ -356,7 +356,7 @@ fn script(p: &Plugin<Auth>) -> Vec<String> {
 }
 
 const EXPECTED: &[&str] = &[
-    "validate [1] Failed busbar-auth-oauth settings must be a JSON object",
+    "validate [1] Failed settings: must be a JSON object",
     "validate Ready",
     "open Ready",
     "open_outbound oauth-client-credentials Ready ",
@@ -382,14 +382,48 @@ const EXPECTED: &[&str] = &[
     "open_outbound oauth-client-credentials Ready ",
     "retire 1 Ready",
     "after retire fields Refused ",
-    "gen 2 fields Ready  ",
+    "gen 2 fields Failed no OAuth token could be minted for this binding (see diagnostics \
+     BUSBAR-4014/4015/4016); the call is refused rather than sent unauthenticated, and the mint \
+     retries on its schedule",
     "close Ready",
 ];
 
+/// The folds: the declared diagnostic, and each `tracing` event the SDK captured into the
+/// plugin's log (S5: every refusal logged once, `module = "oauth"`).
 const EXPECTED_FOLDS: &[&str] = &[
+    "diag 4294967295 sev=0 busbar_auth_oauth: instance settings refused module=\"oauth\" \
+     reason=\"settings: must be a JSON object\"",
+    "diag 4294967295 sev=0 busbar_auth_oauth: outbound binding refused module=\"oauth\" \
+     style=\"oauth-client-credentials\" reason=\"settings: uses auth: oauth-client-credentials \
+     but has no `token_url` (the OAuth token endpoint the client credentials are POSTed to) | \
+     credential: oauth-client-credentials key must be `client_id:client_secret`\"",
+    "diag 4294967295 sev=0 busbar_auth_oauth: outbound binding refused module=\"oauth\" \
+     style=\"jwt-bearer\" reason=\"settings: uses auth: jwt-bearer but declares `api_key: \
+     none`; that grant signs its assertion WITH the credential (the service-account JSON or key \
+     file), so there is nothing to declare keyless\"",
+    "diag 4294967295 sev=0 busbar_auth_oauth: outbound binding refused module=\"oauth\" \
+     style=\"bearer\" reason=\"settings: outbound auth style `bearer` is not served by this \
+     plugin\"",
+    "diag 4294967295 sev=0 busbar_auth_oauth: outbound binding refused module=\"oauth\" \
+     style=\"kerberos\" reason=\"settings: outbound auth style `kerberos` is not served by this \
+     plugin\"",
+    FIELDS_REFUSED,
+    FIELDS_REFUSED,
     "diag 2 sev=1 OAuth token mint failed; will retry error=token endpoint request failed: no \
      connection was granted for the token endpoint",
+    "diag 4294967295 sev=0 busbar_auth_oauth::instance: the OAuth mint was refused and will retry \
+     module=\"oauth\" reason=\"token endpoint request failed: no connection was granted for the \
+     token endpoint\"",
+    FIELDS_REFUSED,
+    "diag 4294967295 sev=0 busbar_auth_oauth: fields failed: no token to present \
+     module=\"oauth\" reason=\"no OAuth token could be minted for this binding (see diagnostics \
+     BUSBAR-4014/4015/4016); the call is refused rather than sent unauthenticated, and the mint \
+     retries on its schedule\"",
 ];
+
+const FIELDS_REFUSED: &str = "diag 4294967295 sev=0 busbar_auth_oauth: fields refused \
+     module=\"oauth\" reason=\"not the operator's own credential, or a handle this generation \
+     does not hold\"";
 
 fn run(p: &Plugin<Auth>, folds: &Folds) -> (Vec<String>, Vec<String>) {
     let t = script(p);
@@ -446,22 +480,26 @@ fn real_fields() -> Op {
     }
 }
 
-extern "C" fn sensitive_fields(inst: *mut c_void, i: *const c_void, o: *mut c_void) -> RawOutcome {
+extern "C" fn insensitive_fields(
+    inst: *mut c_void,
+    i: *const c_void,
+    o: *mut c_void,
+) -> RawOutcome {
     let r = real_fields()(inst, i, o);
     // SAFETY: the host's live `FieldsIn`/`FieldsOut` for this call.
     unsafe {
         let (i, o) = (&*i.cast::<FieldsIn>(), &*o.cast::<FieldsOut>());
         if r.outcome() == Outcome::Ready {
             for k in 0..o.fields_len as usize {
-                (*i.fields.add(k)).flags = FIELD_SENSITIVE;
+                (*i.fields.add(k)).flags &= !FIELD_SENSITIVE;
             }
         }
     }
     r
 }
 
-extern "C" fn sensitive_door() -> &'static Door {
-    door_with_fields(sensitive_fields)
+extern "C" fn insensitive_door() -> &'static Door {
+    door_with_fields(insensitive_fields)
 }
 
 /// THE DIAGNOSTIC TABLE: each `diag` index names its 1.5.5 catalog code (the indices are
@@ -487,10 +525,11 @@ fn the_diag_indices_name_their_catalog_codes() {
 }
 
 #[test]
-fn red_a_sensitive_field_flag_is_not_the_1_5_5_bytes() {
+fn red_a_field_without_the_sensitive_flag() {
     let d = Dispatcher::new(DispatchConfig::default());
     let folds = Arc::new(Folds::default());
-    let red = load_linked::<Auth>(&row(sensitive_door), bind(&folds, &d)).expect("the door loads");
+    let red =
+        load_linked::<Auth>(&row(insensitive_door), bind(&folds, &d)).expect("the door loads");
     let t = script(&red);
     assert_eq!(
         t, EXPECTED,

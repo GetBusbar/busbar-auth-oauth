@@ -34,8 +34,12 @@ serde_json = { workspace = true }
 # zeroised").
 zeroize = { workspace = true }
 sha2 = { workspace = true }
+# The plugin's log: the SDK captures each call's `tracing` events into the plugin's own log.
+tracing = { workspace = true }
 
 [dev-dependencies]
 # The token request forms are written by the crate's own encoder (`mint::form`, sized once and wiped
 # on drop); the tests read them back, and hold the encoder to `serde_urlencoded`'s bytes.
 serde_urlencoded = { workspace = true }
+# The log double (`warn_capture::WarnCapture`): the refusal and outage events are read back.
+busbar-test-kit = { workspace = true }

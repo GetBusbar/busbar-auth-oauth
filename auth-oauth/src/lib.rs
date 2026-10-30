@@ -73,8 +73,8 @@ use std::borrow::Cow;
 use std::task::Poll;
 
 use busbar_contract::abi::auth::{
-    ranked, AuthPoints, AuthTail, StyleDecl, CANCEL_CONTINUES, STYLE_ENDPOINT_FROM_CREDENTIAL,
-    STYLE_ENDPOINT_TOKEN_URL,
+    ranked, AuthPoints, AuthTail, StyleDecl, CANCEL_CONTINUES, FIELD_SENSITIVE,
+    STYLE_ENDPOINT_FROM_CREDENTIAL, STYLE_ENDPOINT_TOKEN_URL,
 };
 use busbar_contract::abi::host::conn::connector::{
     Need, DIRECTION_OUTBOUND, EGRESS_PROVIDER, KEEP_NAMED,
@@ -95,10 +95,9 @@ use busbar_contract::abi::sdk::life::{self, Refusal};
 use crate::instance::Oauth;
 use crate::mint::Read;
 
-/// The flags every field this plugin writes carries: NONE. Credential headers go out
-/// indexable, and an h2 encoder that honoured `FIELD_SENSITIVE` would send them never-indexed,
-/// which is different bytes on the wire.
-const FIELD_FLAGS: u32 = 0;
+/// The flags every field this plugin writes carries: [`FIELD_SENSITIVE`]. The field is the
+/// bearer, so an h2/h3 encoder sends it never-indexed and no header table keeps it.
+const FIELD_FLAGS: u32 = FIELD_SENSITIVE;
 
 /// The styles this plugin serves, each at `Head` (a bearer token reads nothing past the head).
 /// None carries [`busbar_contract::abi::auth::STYLE_CALLER_CREDENTIAL`] (an OAuth token is always
@@ -180,15 +179,24 @@ pub mod compiled_in {
     }
 }
 
-const SETTINGS_NOT_OBJECT: &str = "busbar-auth-oauth settings must be a JSON object";
-
-/// The plugin's own settings: none are read; present settings must be a JSON object.
+/// The instance's own settings: the host opens it over a binding's settings, so a JSON object
+/// holding only keys some style reads ([`style::instance_keys`]); every other key is refused by
+/// name, one `settings: ` line each.
 fn judged(settings: &[u8]) -> Result<(), Refusal> {
-    if life::settings_object(settings).is_ok() {
-        Ok(())
-    } else {
-        Err(Refusal::failed(SETTINGS_NOT_OBJECT))
+    let checked = life::settings_object(settings).and_then(|m| {
+        style::instance_keys(&m).map_err(|refusals| {
+            let lines: Vec<String> = refusals.iter().map(style::Refusal::line).collect();
+            Refusal::failed(lines.join("\n"))
+        })
+    });
+    if let Err(r) = &checked {
+        tracing::info!(
+            module = "oauth",
+            reason = r.text().unwrap_or_default(),
+            "instance settings refused"
+        );
     }
+    checked
 }
 
 /// ONE `fields` REQUEST, as the instance answers it (the SDK's view, read once).
@@ -214,16 +222,19 @@ fn ready_answer(r: Read<'_>, present: &mut dyn FnMut(&str)) -> Option<FieldsAnsw
             Some(FieldsAnswer::Ready)
         }
         Read::Nothing => Some(FieldsAnswer::Ready),
+        Read::Refuse(why) => Some(FieldsAnswer::Failed(Cow::Borrowed(why))),
         Read::Wait => None,
     }
 }
 
 impl Oauth {
-    /// THE ANSWER TO ONE `fields`: the cached bearer, handed to `present` (READY with it); no field
-    /// (READY with none, an un-encodable token); PENDING on a ticket while the call waits for a
-    /// token (an expired one whose refresh failed, or a token exchange in flight), woken when one
-    /// lands; REFUSED for a passthrough or a handle this generation does not hold; FAILED when the
-    /// call's exchange failed.
+    /// THE ANSWER TO ONE `fields`: the cached bearer, handed to `present` (READY with it); READY
+    /// with no field only in the boot window before a scheduled style's first mint is attempted
+    /// (the contract's rule at this pin); PENDING on a ticket while the call waits for a token (an
+    /// expired one whose refresh failed, or a token exchange in flight), woken when one lands or
+    /// the mint fails; REFUSED for a passthrough or a handle this generation does not hold; FAILED,
+    /// saying why, when there is no token to present after a mint (it failed, or its token cannot
+    /// be a header value) or the call's exchange failed.
     ///
     /// NO LOST WAKE: a call that would wait parks its ticket BEFORE it reads the token, and reads
     /// again once parked. A mint stores its token before it wakes the parked tickets, so the call
@@ -263,9 +274,14 @@ impl Oauth {
                 present(h);
                 Poll::Ready(FieldsAnswer::Ready)
             }
+            Read::Refuse(why) => {
+                self.unpark_exchange(key, ticket);
+                Poll::Ready(FieldsAnswer::Failed(Cow::Borrowed(why)))
+            }
+            // An on-demand cell presents only a usable token: unreachable, refused all the same.
             Read::Nothing => {
                 self.unpark_exchange(key, ticket);
-                Poll::Ready(FieldsAnswer::Ready)
+                Poll::Ready(FieldsAnswer::Failed(Cow::Borrowed(mint::NO_TOKEN)))
             }
             Read::Wait => {
                 self.mint_soon(host);
@@ -334,6 +350,13 @@ impl Oauth {
             // A token exchange mints nothing at open: each request's scope is its own exchange.
             Ok(binding) => Ok(self.keep_binding(binding)),
             Err(refusals) => {
+                let all: Vec<String> = refusals.iter().map(style::Refusal::line).collect();
+                tracing::info!(
+                    module = "oauth",
+                    style,
+                    reason = all.join(" | "),
+                    "outbound binding refused"
+                );
                 let mut lines = refusals.iter().map(style::Refusal::line);
                 let first = lines.next().unwrap_or_default();
                 Err(lines.fold(OpenRefusal::new(first), |r, l| r.and(l)))
@@ -349,7 +372,7 @@ impl OutboundPlugin for Oauth {
 
     fn open(settings: &[u8], _secrets: &[&[u8]], generation: u64) -> Result<Self, Refusal> {
         judged(settings)?;
-        Ok(Oauth::new(generation))
+        Oauth::opened(generation)
     }
 
     fn open_outbound(
@@ -376,9 +399,24 @@ impl OutboundPlugin for Oauth {
             ticket: op.ticket(),
             timestamp: request.timestamp(),
         };
-        self.answer(&ask, op.host(), &mut |h| {
+        let answer = self.answer(&ask, op.host(), &mut |h| {
             out.push(b"authorization", h.as_bytes(), FIELD_FLAGS);
-        })
+        });
+        match &answer {
+            Poll::Ready(FieldsAnswer::Refused) => tracing::info!(
+                module = "oauth",
+                reason =
+                    "not the operator's own credential, or a handle this generation does not hold",
+                "fields refused"
+            ),
+            Poll::Ready(FieldsAnswer::Failed(why)) => tracing::info!(
+                module = "oauth",
+                reason = why.as_ref(),
+                "fields failed: no token to present"
+            ),
+            _ => {}
+        }
+        answer
     }
 
     fn outbound_ready(&self, handle: u64) -> bool {

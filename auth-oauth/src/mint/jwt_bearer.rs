@@ -20,6 +20,7 @@
 
 use super::TokenRequest;
 use base64::Engine as _;
+use busbar_contract::abi::sdk::auth_kit::json_error;
 use zeroize::Zeroizing;
 
 /// Default OAuth scope when the provider does not override it — the Vertex/GCP common case.
@@ -84,11 +85,10 @@ fn parse_service_account(
     credential: &str,
 ) -> Result<(ServiceAccount, ring::signature::RsaKeyPair), String> {
     let sa_json = read_credential(credential)?;
-    // The decoder's own text is withheld (`json_err`): a data error quotes the offending value, and
-    // the value here may be the private key.
-    let sa: ServiceAccount = serde_json::from_str(&sa_json).map_err(
-        crate::token_response::json_err("service-account JSON is invalid"),
-    )?;
+    // The decoder's own text is withheld (`json_error`): a data error quotes the offending value,
+    // and the value here may be the private key.
+    let sa: ServiceAccount =
+        serde_json::from_str(&sa_json).map_err(json_error("service-account JSON is invalid"))?;
     let key = private_key(&sa_json)?;
     let der = pem_to_pkcs8_der(&key)?;
     let key_pair = ring::signature::RsaKeyPair::from_pkcs8(&der)
