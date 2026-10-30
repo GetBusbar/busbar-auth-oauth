@@ -124,6 +124,32 @@ const OAUTH_TOKEN_EXCHANGE_KEYS: &[&str] = &[
     "max_response_bytes",
 ];
 
+/// Every key the instance's own settings may hold: the keys of every style's row (the host opens
+/// the instance over a binding's settings).
+const INSTANCE_KEYS: &[&[&str]] = &[
+    JWT_BEARER_KEYS,
+    OAUTH_CLIENT_CREDENTIALS_KEYS,
+    OAUTH_TOKEN_EXCHANGE_KEYS,
+];
+
+/// The instance's own settings `m`: every key some style reads is accepted; any other is refused,
+/// naming it.
+///
+/// # Errors
+/// One finding per unknown key.
+pub(crate) fn instance_keys(m: &Map<String, Value>) -> Result<(), Vec<Refusal>> {
+    let unknown: Vec<Refusal> = m
+        .keys()
+        .filter(|k| !INSTANCE_KEYS.iter().any(|row| row.contains(&k.as_str())))
+        .map(|k| Refusal::Settings(format!("unknown key `{k}`")))
+        .collect();
+    if unknown.is_empty() {
+        Ok(())
+    } else {
+        Err(unknown)
+    }
+}
+
 /// Refuse every key the style does not document, naming it: a typo'd optional key must not
 /// silently fall back to its default.
 fn deny_unknown(m: &Map<String, Value>, allowed: &[&str]) -> Result<(), Vec<Refusal>> {
