@@ -51,7 +51,6 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
-mod held;
 mod instance;
 mod mint;
 mod style;

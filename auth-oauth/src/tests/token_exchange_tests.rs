@@ -7,7 +7,6 @@
 //! states reaching that request, a cached token per scope (two scopes never share one), a failed
 //! exchange failing exactly the calls that waited on it, and the binding's refusals.
 
-use crate::held::Own;
 use std::sync::Arc;
 
 use busbar_contract::abi::mechanism::call::Outcome;
@@ -21,13 +20,19 @@ use crate::mint::tests::{Scripted, Step};
 use crate::mint::{Got, Wire};
 use crate::style;
 use crate::test_support::{self, TestHost};
+use busbar_contract::abi::sdk::cred::SealedWrite;
 
 /// The scripted need, shared so the test reads what was sent.
 struct Shared(Arc<Scripted>);
 
 impl Wire for Shared {
-    fn open(&self, req: &TokenRequest, timeout_ms: u64) -> Result<ConnId, ConnError> {
-        self.0.open(req, timeout_ms)
+    fn open(
+        &self,
+        req: &TokenRequest,
+        body: &mut SealedWrite,
+        timeout_ms: u64,
+    ) -> Result<ConnId, ConnError> {
+        self.0.open(req, body, timeout_ms)
     }
     fn clock(&self) -> Option<crate::mint::HostClock> {
         self.0.clock()
@@ -126,14 +131,13 @@ fn the_exchange_request_is_the_previous_releases_form_with_the_stated_scope() {
         ]
     };
     assert_eq!(
-        form(req.body.expose_own(&Own::here())),
+        form(&crate::test_support::form_text(&req.body)),
         expected("fs_read_file fs_write_file")
     );
     let unscoped = Scoped::new(x, "").request().expect("a request");
-    assert_eq!(form(unscoped.body.expose_own(&Own::here())), expected(""));
-    assert!(
-        format!("{req:?}").find(SUBJECT).is_none(),
-        "the subject token never prints"
+    assert_eq!(
+        form(&crate::test_support::form_text(&unscoped.body)),
+        expected("")
     );
 }
 

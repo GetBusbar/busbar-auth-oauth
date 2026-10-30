@@ -6,8 +6,16 @@
 //! tests), and the tick-driven exchange with THE EXPIRED-TOKEN RULE.
 
 use super::*;
-use crate::held::Own;
+use busbar_contract::abi::sdk::cred::SealedWrite;
 use std::collections::VecDeque;
+
+/// A read as the tests compare it: the header value shown (`Read`'s own `Debug` redacts it).
+pub(crate) fn seen(r: Read<'_>) -> String {
+    match r {
+        Read::Header(h) => format!("Header({h:?})"),
+        other => format!("{other:?}"),
+    }
+}
 
 /// The unit tests' wall clock (epoch seconds): their doubles stand in for the host's `clock.now`.
 /// The plugin itself reads no clock (THE DESIGN §1: "one clock"); see [`HostClock`].
@@ -71,14 +79,19 @@ impl Wire for Scripted {
         })
     }
 
-    fn open(&self, req: &TokenRequest, _: u64) -> Result<ConnId, ConnError> {
+    fn open(
+        &self,
+        req: &TokenRequest,
+        body: &mut SealedWrite,
+        _: u64,
+    ) -> Result<ConnId, ConnError> {
         self.sent.lock().unwrap().push((
             req.target.clone(),
             req.fields
                 .iter()
                 .map(|(k, v)| (k.to_string(), v.to_string()))
                 .collect(),
-            req.body.expose_own(&Own::here()).clone(),
+            crate::test_support::sealed_text(body),
         ));
         let next = self
             .scripts
@@ -154,17 +167,17 @@ fn next_refresh_never_sleeps_past_a_live_token_expiry() {
 
 #[test]
 fn a_cached_token_is_redacted_in_debug() {
-    let (t, invalid) = CachedToken::new(Secret::held("super-secret-token".to_string()), 5);
+    let (t, invalid) = CachedToken::new(Zeroizing::new("super-secret-token".to_string()), 5);
     assert!(!invalid);
     assert!(!format!("{t:?}").contains("super-secret-token"));
 }
 
 #[test]
 fn a_cached_token_omits_the_header_for_bytes_invalid_in_a_header_value() {
-    let (t, invalid) = CachedToken::new(Secret::held("tok\r\nen".to_string()), 5);
+    let (t, invalid) = CachedToken::new(Zeroizing::new("tok\r\nen".to_string()), 5);
     assert!(invalid);
     assert_eq!(t.header(), None);
-    let (t, invalid) = CachedToken::new(Secret::held(String::new()), 0);
+    let (t, invalid) = CachedToken::new(Zeroizing::new(String::new()), 0);
     assert!(
         !invalid,
         "the pre-first-mint sentinel is not a reportable token"
@@ -291,17 +304,14 @@ fn the_first_tick_mints_and_the_request_path_presents_it() {
     let m = Minted::new(client_credentials(), DEFAULT_MAX_RESPONSE_BYTES);
     assert!(!m.is_ready());
     assert_eq!(
-        m.read(now_epoch(), |r| format!("{r:?}")),
+        m.read(now_epoch(), seen),
         "Nothing",
         "nothing minted yet: READY with no fields (the upstream answers 401, as in 1.5.5)"
     );
     let (due, report) = m.tick(1_000, now_epoch(), Some(&w));
     assert_eq!(report, Some(Report::Minted));
     assert!(m.is_ready());
-    assert_eq!(
-        m.read(now_epoch(), |r| format!("{r:?}")),
-        "Header(\"Bearer tok-1\")"
-    );
+    assert_eq!(m.read(now_epoch(), seen), "Header(\"Bearer tok-1\")");
     assert_eq!(due, 1_000 + (3600 - REFRESH_SKEW_SECS) * S);
     assert_eq!(*w.closed.lock().unwrap(), 1);
     let sent = w.sent.lock().unwrap();
@@ -321,10 +331,7 @@ fn a_huge_expires_in_schedules_no_overflowed_refresh() {
     let m = Minted::new(client_credentials(), DEFAULT_MAX_RESPONSE_BYTES);
     let (due, report) = m.tick(1_000, now_epoch(), Some(&w));
     assert_eq!(report, Some(Report::Minted));
-    assert_eq!(
-        m.read(now_epoch(), |r| format!("{r:?}")),
-        "Header(\"Bearer tok\")"
-    );
+    assert_eq!(m.read(now_epoch(), seen), "Header(\"Bearer tok\")");
     assert_eq!(
         due,
         u64::MAX,
@@ -462,7 +469,7 @@ fn an_expired_token_whose_refresh_failed_answers_wait_until_a_mint_lands() {
     let (due, _) = m.tick(0, now_epoch(), Some(&w));
     let later = now_epoch() + 3600;
     assert_eq!(
-        m.read(later, |r| format!("{r:?}")),
+        m.read(later, seen),
         "Header(\"Bearer old\")",
         "expired, refresh not failed: the current token"
     );
@@ -474,18 +481,15 @@ fn an_expired_token_whose_refresh_failed_answers_wait_until_a_mint_lands() {
             "token endpoint returned 500 Internal Server Error".to_string()
         ))
     );
-    assert_eq!(m.read(later, |r| format!("{r:?}")), "Wait");
+    assert_eq!(m.read(later, seen), "Wait");
     assert_eq!(
-        m.read(now_epoch(), |r| format!("{r:?}")),
+        m.read(now_epoch(), seen),
         "Header(\"Bearer old\")",
         "not yet expired: served even while refreshes fail"
     );
     w.ok(r#"{"access_token":"new","expires_in":3600}"#);
     assert_eq!(m.tick(due, now_epoch(), Some(&w)).1, Some(Report::Minted));
-    assert_eq!(
-        m.read(later, |r| format!("{r:?}")),
-        "Header(\"Bearer new\")"
-    );
+    assert_eq!(m.read(later, seen), "Header(\"Bearer new\")");
 }
 
 /// A reply code too large for 16 bits is not read as another code: 65736 is 200 modulo 65536, but
@@ -590,12 +594,12 @@ fn a_redirecting_token_endpoint_fails_the_mint() {
     }
 }
 
-/// THE TOKEN REQUEST FORM IS BUILT ONCE AND HELD WIPED (THE DESIGN §6: "auth material is
-/// zeroised"): it carries the client secret, the subject token or the signed assertion, so it is
-/// written into one buffer sized to its exact length (no growth frees a partial copy) and held in
-/// a `Secret<_, Own>` — byte for byte what `serde_urlencoded` (reqwest's `.form()`) wrote, for every byte.
+/// THE TOKEN REQUEST FORM IS THE CHIP'S (`cred::FormBody`): it carries the client secret, the
+/// subject token or the signed assertion as sealed values, and is written byte for byte as
+/// `serde_urlencoded` (reqwest's `.form()`) wrote it, for every byte.
 #[test]
-fn the_form_is_serde_urlencoded_byte_for_byte_and_built_once() {
+fn the_form_is_serde_urlencoded_byte_for_byte() {
+    use busbar_contract::abi::sdk::test_support::chip::cred;
     let mut every: String = (0_u8..=0x7f).map(char::from).collect();
     every.push_str("\u{e9}\u{1F600} +&=%");
     let pairs = [
@@ -604,15 +608,14 @@ fn the_form_is_serde_urlencoded_byte_for_byte_and_built_once() {
         ("scope", "https://cognitiveservices.azure.com/.default a b"),
         ("empty", ""),
     ];
-    let held: Secret<String, Own> = form(&pairs);
+    let form = busbar_contract::abi::sdk::cred::FormBody::new()
+        .public(pairs[0].0, pairs[0].1)
+        .sealed(pairs[1].0, &cred(pairs[1].1))
+        .public(pairs[2].0, pairs[2].1)
+        .public(pairs[3].0, pairs[3].1);
     assert_eq!(
-        held.expose_own(&Own::here()),
-        &serde_urlencoded::to_string(pairs).expect("a form")
-    );
-    assert_eq!(
-        held.expose_own(&Own::here()).capacity(),
-        held.expose_own(&Own::here()).len(),
-        "sized once"
+        crate::test_support::form_text(&form),
+        serde_urlencoded::to_string(pairs).expect("a form")
     );
 }
 

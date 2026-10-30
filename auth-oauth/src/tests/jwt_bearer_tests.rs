@@ -5,7 +5,6 @@
 //! The `token_uri` https/metadata vetting tests stay with the kernel (ARCHITECT ruling Q2 (a)).
 
 use super::*;
-use crate::held::Own;
 
 #[test]
 fn pem_to_pkcs8_der_strips_armor_and_decodes() {
@@ -219,6 +218,15 @@ pub(crate) fn test_signer(token_uri: &str, subject: Option<&str>) -> Signer {
     build(&sa, None, subject).expect("the test service account builds")
 }
 
+/// The assertion `signer` sends at `now`, read back off the token request's form as the chip
+/// writes it (its characters are all ones a form keeps as themselves).
+fn assertion(signer: &Signer, now: u64) -> String {
+    let form = crate::test_support::form_text(&signer.request(now).expect("a request").body);
+    form.strip_prefix("grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion=")
+        .expect("the grant type, then the assertion")
+        .to_string()
+}
+
 /// THE RFC 7523 ASSERTION, BYTE-IDENTICAL TO 1.5.5's (BUSBAR-1.6.0.md THE DESIGN, §6's proof). RS256 over PKCS#1
 /// v1.5 is deterministic, so for a fixed key, issuer, scope, audience and `iat` the assertion is one
 /// string. The golden was produced by 1.5.5's own `mint` code (`v1.5.5:crates/busbar/src/egress_auth/
@@ -228,7 +236,7 @@ pub(crate) fn test_signer(token_uri: &str, subject: Option<&str>) -> Signer {
 fn the_rfc_7523_assertion_is_byte_identical_to_1_5_5() {
     let signer = test_signer("https://oauth2.googleapis.com/token", None);
     assert_eq!(
-        signer.assertion(1_700_000_000).unwrap().as_str(),
+        assertion(&signer, 1_700_000_000),
         include_str!("fixtures/jwt_assertion_1_5_5.txt").trim_end()
     );
 }
@@ -247,12 +255,11 @@ fn the_token_request_is_the_form_1_5_5_posted() {
             ("accept", "*/*"),
         ]
     );
-    let assertion = signer.assertion(1_700_000_000).unwrap();
     assert_eq!(
-        req.body.expose_own(&Own::here()),
-        &format!(
+        crate::test_support::form_text(&req.body),
+        format!(
             "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion={}",
-            assertion.as_str()
+            include_str!("fixtures/jwt_assertion_1_5_5.txt").trim_end()
         )
     );
 }
@@ -386,19 +393,6 @@ fn the_private_key_is_read_into_one_wiped_buffer_with_every_escape_resolved() {
     assert!(private_key(r#"{"private_key":1}"#).is_err());
     // The service account still builds from the key it reads this way.
     let _ = test_signer("https://oauth2.googleapis.com/token", None);
-}
-
-/// THE SIGNED ASSERTION IS HELD WIPED (THE DESIGN §6): the token endpoint accepts it for an hour,
-/// so the plugin holds it in a buffer sized once and wiped on drop — byte-identical to 1.5.5's.
-#[test]
-fn the_assertion_is_held_in_a_wiped_buffer_sized_once() {
-    let signer = test_signer("https://oauth2.googleapis.com/token", None);
-    let assertion: zeroize::Zeroizing<String> = signer.assertion(1_700_000_000).unwrap();
-    assert_eq!(
-        assertion.as_str(),
-        include_str!("fixtures/jwt_assertion_1_5_5.txt").trim_end()
-    );
-    assert_eq!(assertion.capacity(), assertion.len(), "sized once");
 }
 
 /// THE KEY FILE IS THE HOST'S TO READ (THE DESIGN §11.11 R4 l.1464-1469: only the host's bounded

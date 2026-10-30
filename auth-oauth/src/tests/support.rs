@@ -99,3 +99,19 @@ pub(crate) fn fields(
     }
     (outcome, written.join(" ; "))
 }
+
+/// The bytes a sealed write carries, read back through the SDK's dev-only test support.
+pub(crate) fn sealed_text(w: &mut busbar_contract::abi::sdk::cred::SealedWrite) -> String {
+    let mut out = Vec::new();
+    let done = busbar_contract::abi::sdk::test_support::chip::drive_sealed::<()>(w, |b| {
+        out.extend_from_slice(b);
+        std::task::Poll::Ready(Ok(b.len()))
+    });
+    assert!(done.is_ready(), "a test sink takes every byte");
+    String::from_utf8(out).expect("a form is text")
+}
+
+/// A token request form as the wire carries it (the chip encodes it, signing what it signs).
+pub(crate) fn form_text(body: &busbar_contract::abi::sdk::cred::FormBody) -> String {
+    sealed_text(&mut body.encoded().expect("the form encodes"))
+}
