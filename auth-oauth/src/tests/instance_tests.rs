@@ -799,3 +799,107 @@ fn the_token_cache_key_is_keyed_per_instance_never_a_plain_digest() {
     );
     assert_ne!(a[0], b[0], "two instances derive one binding's key alike");
 }
+
+/// ONE POLICY FOR EVERY STYLE (KIND-auth lead decision, 1.6.0): a call is never sent with no
+/// credential. Before the first mint a scheduled style's call waits for it (PENDING on a ticket,
+/// bounded by the attempt's deadline; REFUSED on the spot, so the host submits it on a ticket) and
+/// is woken when the token lands. RED: the call answered READY with no field, and the upstream saw
+/// the request unauthenticated (1.5.5's behaviour).
+#[test]
+fn before_the_first_mint_a_call_waits_for_the_token() {
+    let host = TestHost::new();
+    let w = Arc::new(Scripted::default());
+    let o = instance(&w);
+    let h = open(
+        &o,
+        style::OAUTH_CLIENT_CREDENTIALS,
+        "id:secret",
+        r#"{"token_url":"https://idp.example/token","scope":"s"}"#,
+    );
+    let t = Ticket {
+        slot: 2,
+        generation: 1,
+    };
+    assert_eq!(
+        fields(&o, &host, h, Ticket::NONE),
+        (Outcome::Refused, String::new())
+    );
+    assert_eq!(fields(&o, &host, h, t), (Outcome::Pending, String::new()));
+    w.ok(r#"{"access_token":"tok-1","expires_in":3600}"#);
+    o.tick(1_000, Ticket::NONE, Some(&host.host), &mut Diags::default());
+    assert_eq!(
+        host.take(),
+        vec![t],
+        "the landed mint wakes the waiting call"
+    );
+    assert_eq!(
+        fields(&o, &host, h, t),
+        (Outcome::Ready, "authorization: Bearer tok-1".to_string())
+    );
+}
+
+/// A FIRST MINT THAT FAILED FAILS THE CALL, naming why, and wakes the calls waiting on it: nothing
+/// goes out unauthenticated (the token exchange's policy, and sigv4's refusal). The mint retries on
+/// its schedule; a call after a token lands presents it. RED: READY with no field.
+#[test]
+fn a_failed_first_mint_fails_the_call_rather_than_send_it_unauthenticated() {
+    let host = TestHost::new();
+    let w = Arc::new(Scripted::default());
+    let o = instance(&w);
+    let h = open(
+        &o,
+        style::OAUTH_CLIENT_CREDENTIALS,
+        "id:secret",
+        r#"{"token_url":"https://idp.example/token","scope":"s"}"#,
+    );
+    let waiting = Ticket {
+        slot: 2,
+        generation: 1,
+    };
+    assert_eq!(fields(&o, &host, h, waiting).0, Outcome::Pending);
+    w.push(vec![
+        Step::Head(401),
+        Step::Body(br#"{"error":"invalid_client"}"#.to_vec(), true),
+    ]);
+    o.tick(1_000, Ticket::NONE, Some(&host.host), &mut Diags::default());
+    assert_eq!(
+        host.take(),
+        vec![waiting],
+        "the failed mint wakes the waiting call"
+    );
+    for t in [waiting, Ticket::NONE] {
+        assert_eq!(fields(&o, &host, h, t), (Outcome::Failed, String::new()));
+    }
+    w.ok(r#"{"access_token":"tok-2","expires_in":3600}"#);
+    o.tick(
+        1_000 + 30 * NS,
+        Ticket::NONE,
+        Some(&host.host),
+        &mut Diags::default(),
+    );
+    assert_eq!(
+        fields(&o, &host, h, waiting).1,
+        "authorization: Bearer tok-2"
+    );
+}
+
+/// A MINTED TOKEN THAT CANNOT BE A HEADER VALUE FAILS THE CALL (never READY with no field).
+#[test]
+fn a_token_that_cannot_be_presented_fails_the_call() {
+    let host = TestHost::new();
+    let w = Arc::new(Scripted::default());
+    let o = instance(&w);
+    let h = open(
+        &o,
+        style::OAUTH_CLIENT_CREDENTIALS,
+        "id:secret",
+        r#"{"token_url":"https://idp.example/token","scope":"s"}"#,
+    );
+    w.ok("{\"access_token\":\"bad\\u0001token\",\"expires_in\":3600}");
+    o.tick(1_000, Ticket::NONE, Some(&host.host), &mut Diags::default());
+    assert_eq!(
+        fields(&o, &host, h, Ticket::NONE),
+        (Outcome::Failed, String::new())
+    );
+    assert!(!o.ready(h));
+}
