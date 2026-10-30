@@ -30,7 +30,8 @@ use zeroize::{Zeroize, Zeroizing};
 
 use crate::held::Own;
 use crate::held::Secret;
-use crate::token_response::{default_expires_in, deserialize_expires_in, json_err, wiped_member};
+use crate::token_response::{default_expires_in, deserialize_expires_in, wiped_member};
+use busbar_contract::abi::sdk::auth_kit::json_error;
 use busbar_contract::header::{is_legal_header_value, token_value};
 
 /// Refresh this many seconds BEFORE the token's stated expiry, so a request never races an expired
@@ -332,7 +333,7 @@ pub(crate) fn parse_response(
     }
     // A decode failure is described without the decoder's text, which can quote the token.
     let tok: TokenResponse =
-        serde_json::from_str(&body).map_err(json_err("token response JSON invalid"))?;
+        serde_json::from_str(&body).map_err(json_error("token response JSON invalid"))?;
     // The token's buffer moves into the held secret whole (no copy): the emptied wrapper drops.
     let mut read = access_token(&body)?;
     let token = Secret::held(std::mem::take(&mut *read));
