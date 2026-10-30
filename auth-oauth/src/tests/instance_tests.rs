@@ -760,3 +760,42 @@ fn a_retired_generation_leaves_a_cell_the_new_generation_holds() {
     assert_eq!(w.sent.lock().unwrap().len(), 1, "no new exchange");
     assert_eq!(o.cache.read().unwrap().len(), 1, "one cell");
 }
+
+/// THE TOKEN CACHE KEY IS NO PLAIN DIGEST OF THE CREDENTIAL (S1, bank grade): a SHA-256 of
+/// `style\0credential\0settings` held in memory lets anyone who reads it test guesses at a
+/// low-entropy client secret offline. The key is a keyed derivation under the instance's own random
+/// key, so two instances key one binding differently. RED: every cell was keyed by the plain digest.
+#[test]
+fn the_token_cache_key_is_keyed_per_instance_never_a_plain_digest() {
+    use sha2::{Digest, Sha256};
+    const CRED: &str = "id:secret";
+    const SETTINGS: &str = r#"{"token_url":"https://t","scope":"s"}"#;
+    let plain: [u8; 32] = {
+        let mut h = Sha256::new();
+        for (i, part) in [
+            style::OAUTH_CLIENT_CREDENTIALS.as_bytes(),
+            CRED.as_bytes(),
+            SETTINGS.as_bytes(),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            if i > 0 {
+                h.update([0]);
+            }
+            h.update(part);
+        }
+        h.finalize().into()
+    };
+    let keys = |o: &Oauth| -> Vec<[u8; 32]> {
+        open(o, style::OAUTH_CLIENT_CREDENTIALS, CRED, SETTINGS);
+        o.cache.read().unwrap().keys().copied().collect()
+    };
+    let (a, b) = (keys(&Oauth::new(1)), keys(&Oauth::new(1)));
+    assert_eq!((a.len(), b.len()), (1, 1));
+    assert_ne!(
+        a[0], plain,
+        "the cache key is the plain digest of the credential"
+    );
+    assert_ne!(a[0], b[0], "two instances derive one binding's key alike");
+}
