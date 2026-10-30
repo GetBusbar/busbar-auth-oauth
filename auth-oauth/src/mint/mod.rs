@@ -180,10 +180,8 @@ impl CachedToken {
 /// Seconds to sleep before the next re-mint, given a token that expires at `expires_at` (epoch secs).
 ///
 /// Refresh `REFRESH_SKEW_SECS` BEFORE expiry for a normally-lived token so a request never races the
-/// expiry boundary. But that skew cannot be honored for a SHORT-TTL token: the old
-/// `(ttl - SKEW).max(MIN_SLEEP)` floored the sleep back up to `MIN_SLEEP_SECS` (30s) even for a token
-/// that expired in, say, 10s — so `headers_for` served an EXPIRED bearer for ~20s and the upstream 401'd.
-/// Instead:
+/// expiry boundary. A SHORT-TTL token cannot take that skew (nor the `MIN_SLEEP_SECS` floor, which
+/// would serve it past its expiry), so:
 ///   - `ttl == 0` (already expired / garbage `expires_in ≈ 0`): back off `MIN_SLEEP_SECS` so the mint
 ///     loop cannot spin hot — nothing useful to serve, fail safe.
 ///   - `ttl <= REFRESH_SKEW_SECS` (too short to refresh a full skew early): re-mint at ~half the
