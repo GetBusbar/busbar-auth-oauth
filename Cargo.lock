@@ -204,12 +204,14 @@ version = "1.6.0"
 dependencies = [
  "base64 0.22.1",
  "busbar-contract",
+ "busbar-test-kit",
  "http",
  "ring",
  "serde",
  "serde_json",
  "serde_urlencoded",
  "sha2",
+ "tracing",
  "zeroize",
 ]
 

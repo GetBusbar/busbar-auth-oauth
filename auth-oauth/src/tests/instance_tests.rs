@@ -860,3 +860,65 @@ fn a_token_that_cannot_be_presented_fails_the_call() {
     );
     assert!(!o.ready(h));
 }
+
+/// THE MINT LOGS ITS OUTCOME (S4, S5): a token endpoint that answers 5xx or 429, or cannot be
+/// reached, is an OUTAGE, logged at WARN; one that refuses the credential (another 4xx) is logged
+/// at INFO. Each event carries `module = "oauth"` and the reason, never a secret. RED: the mint
+/// logged nothing (the diag channel only).
+#[test]
+fn a_failed_mint_is_logged_an_outage_at_warn_or_a_refusal_at_info() {
+    use busbar_test_kit::warn_capture::WarnCapture;
+    let mint_with = |cap: &WarnCapture, steps: Vec<Step>| {
+        tracing::subscriber::with_default(cap.clone(), || {
+            let host = TestHost::new();
+            let w = Arc::new(Scripted::default());
+            let o = instance(&w);
+            open(
+                &o,
+                style::OAUTH_CLIENT_CREDENTIALS,
+                "id:s3cr3t",
+                r#"{"token_url":"https://idp.example/token","scope":"s"}"#,
+            );
+            w.push(steps);
+            o.tick(1_000, Ticket::NONE, Some(&host.host), &mut Diags::default());
+        });
+        cap.messages()
+    };
+    for status in [503, 429] {
+        let warn = WarnCapture::default();
+        let m = mint_with(
+            &warn,
+            vec![Step::Head(status), Step::Body(b"busy".to_vec(), true)],
+        );
+        assert!(
+            m.iter()
+                .any(|l| l.contains("outage") && l.contains("module=oauth")),
+            "{status} at WARN: {m:?}"
+        );
+    }
+    let refused = || {
+        vec![
+            Step::Head(401),
+            Step::Body(br#"{"error":"invalid_client"}"#.to_vec(), true),
+        ]
+    };
+    let warn = WarnCapture::default();
+    assert_eq!(
+        mint_with(&warn, refused()),
+        Vec::<String>::new(),
+        "a refusal is no WARN"
+    );
+    drop(warn);
+    let info = WarnCapture::capturing_debug();
+    let m = mint_with(&info, refused());
+    assert!(
+        m.iter()
+            .any(|l| l.contains("invalid_client") && l.contains("module=oauth")),
+        "{m:?}"
+    );
+    assert!(
+        m.iter()
+            .all(|l| !l.contains("s3cr3t") && !l.contains("outage")),
+        "{m:?}"
+    );
+}
