@@ -349,7 +349,7 @@ impl OutboundPlugin for Oauth {
 
     fn open(settings: &[u8], _secrets: &[&[u8]], generation: u64) -> Result<Self, Refusal> {
         judged(settings)?;
-        Ok(Oauth::new(generation))
+        Oauth::opened(generation)
     }
 
     fn open_outbound(
