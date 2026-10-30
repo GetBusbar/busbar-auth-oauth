@@ -79,3 +79,39 @@ fn the_oauth_styles_state_their_token_endpoint_and_rank_after_the_header_styles(
         assert!(check_style_decl(d.flags, d.points).is_ok());
     }
 }
+
+/// THE INSTANCE'S OWN SETTINGS (S2): the host opens the instance over a binding's settings, so
+/// every key a style reads is accepted there, and any other key is refused BY NAME, FAILED, in the
+/// contract's instance-relative line form, at validate, open and refresh alike (`validate` refuses
+/// exactly what `open` refuses). RED: any JSON object was accepted, and the refusal line named the
+/// plugin instead of `settings`.
+#[test]
+fn an_unknown_instance_setting_is_refused_by_name_at_validate_open_and_refresh() {
+    use busbar_contract::abi::mechanism::call::Outcome;
+    use busbar_contract::abi::mechanism::lifecycle::check_validate_refusal;
+    let bad: &[u8] = br#"{"token_url":"https://i/t","scoep":"x","extra":1}"#;
+    let want = "settings: unknown key `scoep`\nsettings: unknown key `extra`";
+    let v = Oauth::validate(bad).unwrap_err();
+    assert_eq!((v.outcome(), v.text()), (Outcome::Failed, Some(want)));
+    assert!(check_validate_refusal(want.as_bytes()).is_ok());
+    let o = <Oauth as OutboundPlugin>::open(bad, &[], 1).err().unwrap();
+    assert_eq!((o.outcome(), o.text()), (Outcome::Failed, Some(want)));
+    let r = Oauth::new(1).refresh(bad, &[], 2).unwrap_err();
+    assert_eq!((r.outcome(), r.text()), (Outcome::Failed, Some(want)));
+    let not_object = Oauth::validate(b"[]").unwrap_err();
+    assert_eq!(not_object.text(), Some("settings: must be a JSON object"));
+    for good in [
+        &b""[..],
+        b"{}",
+        br#"{"token_url":"https://i/t","scope":"s","subject":"x","max_response_bytes":9}"#,
+        br#"{"token_uri":"https://i/t","scope":"s"}"#,
+        br#"{"token_url":"https://i/t","resource":"r","subject_token_type":"t"}"#,
+    ] {
+        assert!(
+            Oauth::validate(good).is_ok(),
+            "{}",
+            String::from_utf8_lossy(good)
+        );
+        assert!(<Oauth as OutboundPlugin>::open(good, &[], 1).is_ok());
+    }
+}
