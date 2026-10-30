@@ -376,8 +376,8 @@ fn outbound_ready_is_false_for_an_expired_token_whose_refresh_failed() {
     o.tick(1_000, Ticket::NONE, Some(&host.host), &mut Diags::default());
     assert_eq!(
         fields(&o, &host, h, Ticket::NONE),
-        (Outcome::Ready, String::new()),
-        "positive control: a token with bytes invalid in a header is presented as no header"
+        (Outcome::Failed, String::new()),
+        "positive control: a token with bytes invalid in a header fails the call"
     );
     assert!(
         !o.ready(h),
@@ -759,4 +759,166 @@ fn a_retired_generation_leaves_a_cell_the_new_generation_holds() {
     );
     assert_eq!(w.sent.lock().unwrap().len(), 1, "no new exchange");
     assert_eq!(o.cache.read().unwrap().len(), 1, "one cell");
+}
+
+/// THE TOKEN CACHE KEY IS NO PLAIN DIGEST OF THE CREDENTIAL (S1, bank grade): a SHA-256 of
+/// `style\0credential\0settings` held in memory lets anyone who reads it test guesses at a
+/// low-entropy client secret offline. The key is a keyed derivation under the instance's own random
+/// key, so two instances key one binding differently. RED: every cell was keyed by the plain digest.
+#[test]
+fn the_token_cache_key_is_keyed_per_instance_never_a_plain_digest() {
+    use sha2::{Digest, Sha256};
+    const CRED: &str = "id:secret";
+    const SETTINGS: &str = r#"{"token_url":"https://t","scope":"s"}"#;
+    let plain: [u8; 32] = {
+        let mut h = Sha256::new();
+        for (i, part) in [
+            style::OAUTH_CLIENT_CREDENTIALS.as_bytes(),
+            CRED.as_bytes(),
+            SETTINGS.as_bytes(),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            if i > 0 {
+                h.update([0]);
+            }
+            h.update(part);
+        }
+        h.finalize().into()
+    };
+    let keys = |o: &Oauth| -> Vec<[u8; 32]> {
+        open(o, style::OAUTH_CLIENT_CREDENTIALS, CRED, SETTINGS);
+        o.cache.read().unwrap().keys().copied().collect()
+    };
+    let (a, b) = (keys(&Oauth::new(1)), keys(&Oauth::new(1)));
+    assert_eq!((a.len(), b.len()), (1, 1));
+    assert_ne!(
+        a[0], plain,
+        "the cache key is the plain digest of the credential"
+    );
+    assert_ne!(a[0], b[0], "two instances derive one binding's key alike");
+}
+
+/// ONE POLICY WITH THE TOKEN EXCHANGE (KIND-auth lead decision, 1.6.0): A FIRST MINT THAT FAILED
+/// FAILS THE CALL, naming why: nothing goes out unauthenticated once a mint was attempted (the
+/// token exchange's policy, and sigv4's refusal). The mint retries on its schedule; a call after a
+/// token lands presents it. RED: READY with no field.
+#[test]
+fn a_failed_first_mint_fails_the_call_rather_than_send_it_unauthenticated() {
+    let host = TestHost::new();
+    let w = Arc::new(Scripted::default());
+    let o = instance(&w);
+    let h = open(
+        &o,
+        style::OAUTH_CLIENT_CREDENTIALS,
+        "id:secret",
+        r#"{"token_url":"https://idp.example/token","scope":"s"}"#,
+    );
+    let t = Ticket {
+        slot: 2,
+        generation: 1,
+    };
+    w.push(vec![
+        Step::Head(401),
+        Step::Body(br#"{"error":"invalid_client"}"#.to_vec(), true),
+    ]);
+    o.tick(1_000, Ticket::NONE, Some(&host.host), &mut Diags::default());
+    for ticket in [t, Ticket::NONE] {
+        assert_eq!(
+            fields(&o, &host, h, ticket),
+            (Outcome::Failed, String::new())
+        );
+    }
+    w.ok(r#"{"access_token":"tok-2","expires_in":3600}"#);
+    o.tick(
+        1_000 + 30 * NS,
+        Ticket::NONE,
+        Some(&host.host),
+        &mut Diags::default(),
+    );
+    assert_eq!(fields(&o, &host, h, t).1, "authorization: Bearer tok-2");
+}
+
+/// A MINTED TOKEN THAT CANNOT BE A HEADER VALUE FAILS THE CALL (never READY with no field).
+#[test]
+fn a_token_that_cannot_be_presented_fails_the_call() {
+    let host = TestHost::new();
+    let w = Arc::new(Scripted::default());
+    let o = instance(&w);
+    let h = open(
+        &o,
+        style::OAUTH_CLIENT_CREDENTIALS,
+        "id:secret",
+        r#"{"token_url":"https://idp.example/token","scope":"s"}"#,
+    );
+    w.ok("{\"access_token\":\"bad\\u0001token\",\"expires_in\":3600}");
+    o.tick(1_000, Ticket::NONE, Some(&host.host), &mut Diags::default());
+    assert_eq!(
+        fields(&o, &host, h, Ticket::NONE),
+        (Outcome::Failed, String::new())
+    );
+    assert!(!o.ready(h));
+}
+
+/// THE MINT LOGS ITS OUTCOME (S4, S5): a token endpoint that answers 5xx or 429, or cannot be
+/// reached, is an OUTAGE, logged at WARN; one that refuses the credential (another 4xx) is logged
+/// at INFO. Each event carries `module = "oauth"` and the reason, never a secret. RED: the mint
+/// logged nothing (the diag channel only).
+#[test]
+fn a_failed_mint_is_logged_an_outage_at_warn_or_a_refusal_at_info() {
+    use busbar_test_kit::warn_capture::WarnCapture;
+    let mint_with = |cap: &WarnCapture, steps: Vec<Step>| {
+        tracing::subscriber::with_default(cap.clone(), || {
+            let host = TestHost::new();
+            let w = Arc::new(Scripted::default());
+            let o = instance(&w);
+            open(
+                &o,
+                style::OAUTH_CLIENT_CREDENTIALS,
+                "id:s3cr3t",
+                r#"{"token_url":"https://idp.example/token","scope":"s"}"#,
+            );
+            w.push(steps);
+            o.tick(1_000, Ticket::NONE, Some(&host.host), &mut Diags::default());
+        });
+        cap.messages()
+    };
+    for status in [503, 429] {
+        let warn = WarnCapture::default();
+        let m = mint_with(
+            &warn,
+            vec![Step::Head(status), Step::Body(b"busy".to_vec(), true)],
+        );
+        assert!(
+            m.iter()
+                .any(|l| l.contains("outage") && l.contains("module=oauth")),
+            "{status} at WARN: {m:?}"
+        );
+    }
+    let refused = || {
+        vec![
+            Step::Head(401),
+            Step::Body(br#"{"error":"invalid_client"}"#.to_vec(), true),
+        ]
+    };
+    let warn = WarnCapture::default();
+    assert_eq!(
+        mint_with(&warn, refused()),
+        Vec::<String>::new(),
+        "a refusal is no WARN"
+    );
+    drop(warn);
+    let info = WarnCapture::capturing_debug();
+    let m = mint_with(&info, refused());
+    assert!(
+        m.iter()
+            .any(|l| l.contains("invalid_client") && l.contains("module=oauth")),
+        "{m:?}"
+    );
+    assert!(
+        m.iter()
+            .all(|l| !l.contains("s3cr3t") && !l.contains("outage")),
+        "{m:?}"
+    );
 }

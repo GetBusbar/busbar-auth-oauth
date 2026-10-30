@@ -12,6 +12,9 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock, RwLockWriteGuard};
 use busbar_contract::abi::mechanism::ticket::Ticket;
 use busbar_contract::abi::sdk::auth_outbound::Diags;
 use busbar_contract::abi::sdk::conn::Host;
+use busbar_contract::abi::sdk::hmac::hmac_sha256;
+use busbar_contract::abi::sdk::life::Refusal;
+use zeroize::Zeroizing;
 
 use crate::mint::host_wire::HostWire;
 use crate::mint::{Minted, Minter, Report, Wire, MIN_SLEEP_SECS};
@@ -64,6 +67,9 @@ pub struct Oauth {
     /// The tickets whose exchange failed: their resumed call answers FAILED (the attempt fails, as
     /// the previous release failed the call whose exchange the authorization server refused).
     exchange_failed: Mutex<Vec<Ticket>>,
+    /// The instance's own random key the token cache keys are derived under (HMAC-SHA-256), so no
+    /// cache key is a plain digest of a credential; wiped on drop.
+    cache_secret: Zeroizing<[u8; 32]>,
 }
 
 impl crate::style::TokenCache for Oauth {
@@ -73,6 +79,47 @@ impl crate::style::TokenCache for Oauth {
             .or_insert_with(|| Arc::new(Minted::new(minter, max)))
             .clone()
     }
+
+    fn key(&self, parts: &[&[u8]]) -> [u8; 32] {
+        let len = parts.iter().map(|p| p.len() + 1).sum::<usize>();
+        let mut joined = Zeroizing::new(Vec::with_capacity(len));
+        for (i, part) in parts.iter().enumerate() {
+            if i > 0 {
+                joined.push(0);
+            }
+            joined.extend_from_slice(part);
+        }
+        *hmac_sha256(&self.cache_secret[..], &joined)
+    }
+}
+
+/// A failed mint, logged ONCE (S4, S5): an outage of the token endpoint at WARN, any other failure
+/// (the endpoint refused the credential, the configuration cannot mint) at INFO. The reason names
+/// the status and at most the RFC 6749 error code, never a body or a secret.
+fn logged_failure(cell: &Minted, why: &str) {
+    if cell.outage() {
+        tracing::warn!(
+            module = "oauth",
+            reason = why,
+            "token endpoint outage: the OAuth mint failed and will retry"
+        );
+    } else {
+        tracing::info!(
+            module = "oauth",
+            reason = why,
+            "the OAuth mint was refused and will retry"
+        );
+    }
+}
+
+/// A fresh random key for an instance's token cache.
+fn cache_secret() -> Result<Zeroizing<[u8; 32]>, Refusal> {
+    use ring::rand::SecureRandom as _;
+    let mut key = Zeroizing::new([0_u8; 32]);
+    ring::rand::SystemRandom::new()
+        .fill(&mut key[..])
+        .map_err(|_| Refusal::failed("the system random source could not key the token cache"))?;
+    Ok(key)
 }
 
 impl Oauth {
@@ -84,13 +131,36 @@ impl Oauth {
     /// An instance at `generation`; its need is the host's, reached through the tables each
     /// `tick` and `drive` is handed (none: no need was granted, and a minted style reports that
     /// no connection was).
+    ///
+    /// # Errors
+    /// The system random source could not key its token cache.
+    pub(crate) fn opened(generation: u64) -> Result<Self, Refusal> {
+        Ok(Self::keyed(generation, None, cache_secret()?))
+    }
+
+    /// A test's instance at `generation`.
+    #[cfg(test)]
     pub(crate) fn new(generation: u64) -> Self {
         Self::with_wire(generation, None)
     }
 
     /// An instance over any [`Wire`] (the unit tests' double).
+    #[cfg(test)]
     pub(crate) fn with_wire(generation: u64, wire: Option<Box<dyn Wire>>) -> Self {
+        Self::keyed(
+            generation,
+            wire,
+            cache_secret().expect("the system random source"),
+        )
+    }
+
+    fn keyed(
+        generation: u64,
+        wire: Option<Box<dyn Wire>>,
+        cache_secret: Zeroizing<[u8; 32]>,
+    ) -> Self {
         Self {
+            cache_secret,
             wire,
             driver: Mutex::new(Ticket::NONE),
             issued: AtomicU32::new(0),
@@ -339,7 +409,8 @@ impl Oauth {
             .map(|(k, c)| (*k, Arc::clone(c)))
             .collect();
         let mut next = u64::MAX;
-        let mut minted = false;
+        // A mint landed or failed: the calls waiting on a token are woken to read the outcome.
+        let mut settled = false;
         for (key, cell) in cells {
             let (due, report) = cell.tick(now_ns, wall, wire);
             if cell.on_demand() {
@@ -347,15 +418,16 @@ impl Oauth {
                 self.settle_exchange(key, &cell, report, host, diags);
                 continue;
             }
+            settled |= report.is_some();
             match report {
-                Some(Report::Minted) => minted = true,
+                Some(Report::Minted) => {}
                 Some(Report::TokenInvalidBytes) => {
-                    minted = true;
                     diags.push(
                         diag::OAUTH_TOKEN_INVALID_BYTES,
                         WARN,
-                        "minted an OAuth token with bytes invalid for an HTTP header value; \
-                         omitting the auth header — upstream will reject with 401",
+                        "minted an OAuth token with bytes invalid for an HTTP header value; it is \
+                         not stored, a call with no token to present is refused rather than sent \
+                         unauthenticated, and the mint retries",
                     );
                 }
                 Some(Report::EmptyToken) => diags.push(
@@ -364,19 +436,22 @@ impl Oauth {
                     "OAuth token endpoint returned a 200 with an empty access_token; treating as a \
                      mint failure and will retry",
                 ),
-                Some(Report::MintFailed(e)) => diags.push(
-                    diag::OAUTH_MINT_FAILED,
-                    WARN,
-                    format!("OAuth token mint failed; will retry error={e}"),
-                ),
+                Some(Report::MintFailed(e)) => {
+                    logged_failure(&cell, &e);
+                    diags.push(
+                        diag::OAUTH_MINT_FAILED,
+                        WARN,
+                        format!("OAuth token mint failed; will retry error={e}"),
+                    );
+                }
                 None => {}
             }
             if !self.reap(key, &cell) {
                 next = next.min(due);
             }
         }
-        if minted {
-            // The token is stored before this drain: a call that parks after the drain reads it
+        if settled {
+            // The outcome is stored before this drain: a call that parks after the drain reads it
             // (it parks before it reads), and one that parked before is woken here.
             let woken: Vec<Ticket> = std::mem::take(&mut *lock(&self.waiters));
             if let Some(h) = host {
@@ -437,6 +512,7 @@ impl Oauth {
                 Some(true)
             }
             Some(Report::MintFailed(e)) => {
+                logged_failure(cell, &e);
                 diags.push(
                     diag::OAUTH_MINT_FAILED,
                     WARN,

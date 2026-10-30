@@ -21,6 +21,20 @@ impl TokenCache for Cache {
             .or_insert_with(|| Arc::new(Minted::new(minter, max)))
             .clone()
     }
+    fn key(&self, parts: &[&[u8]]) -> [u8; 32] {
+        digest(parts)
+    }
+}
+
+/// A test cache's key: a plain digest of the parts (the instance keys its own).
+fn digest(parts: &[&[u8]]) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    for p in parts {
+        h.update(p);
+        h.update([0]);
+    }
+    h.finalize().into()
 }
 
 fn open(
@@ -202,6 +216,9 @@ fn a_jwt_binding_dials_the_judged_token_uri_setting() {
             self.0.lock().unwrap().push(target);
             Arc::new(Minted::new(minter, max))
         }
+        fn key(&self, parts: &[&[u8]]) -> [u8; 32] {
+            digest(parts)
+        }
     }
     let sa = serde_json::json!({
         "client_email": "svc@proj.example.test",
@@ -218,6 +235,42 @@ fn a_jwt_binding_dials_the_judged_token_uri_setting() {
         [
             "https://oauth2.example.test/token",
             "https://user:pw@oauth2.example.test/token",
+        ]
+    );
+}
+
+/// NO SETTINGS VALUE IS ECHOED (S1): a wrong-typed or malformed setting is refused naming the key
+/// and what it must be, never with the decoder's text, which quotes the value (an operator may
+/// paste a secret into the wrong key). RED: `invalid type: string "<the value>"` reached the line.
+#[test]
+fn a_bad_setting_is_refused_without_its_value() {
+    const PASTED: &str = "s3cr3t-pasted-here";
+    for (style, settings) in [
+        (
+            OAUTH_CLIENT_CREDENTIALS,
+            format!(r#"{{"token_url":"https://i/t","scope":"s","max_response_bytes":"{PASTED}"}}"#),
+        ),
+        (JWT_BEARER, format!(r#"{{"scope":["{PASTED}"]}}"#)),
+        (JWT_BEARER, format!(r#"{{"scope":"{PASTED}"#)),
+    ] {
+        let l = lines(open(style, Some("id:secret"), &settings));
+        assert!(
+            l.iter().all(|line| !line.contains(PASTED)),
+            "{style}: {l:?}"
+        );
+        assert!(l.iter().all(|line| line.starts_with("settings: ")), "{l:?}");
+    }
+    assert_eq!(
+        lines(open(
+            OAUTH_CLIENT_CREDENTIALS,
+            Some("id:secret"),
+            &format!(
+                r#"{{"token_url":"https://i/t","scope":"s","max_response_bytes":"{PASTED}"}}"#
+            )
+        )),
+        [
+            "settings: outbound auth setting `max_response_bytes` is invalid: it must be a \
+          non-negative integer"
         ]
     );
 }
