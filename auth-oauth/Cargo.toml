@@ -18,10 +18,10 @@ description = "The OAuth self-minting auth styles (jwt-bearer, oauth-client-cred
 crate-type = ["rlib"]
 
 # DEPENDENCY POLICY. A plugin's closure is `busbar-contract` plus the third-party crates it needs to
-# do its job (owner ruling 2026-09-28, PLUGIN LIBRARIES): the RFC 7523 RS256 signature (`ring`,
-# `base64`), the token response (`serde`, `serde_json`), the
-# status line a mint failure names (the `http` crate), and the cache key hash (`sha2`). No kernel
-# crate, no plane, no sibling auth-kind plugin.
+# do its job (owner ruling 2026-09-28, PLUGIN LIBRARIES): the RFC 7523 assertion's base64url and
+# its PEM key's DER (`base64`; the chip signs it), the token response (`serde`, `serde_json`), the
+# status line a mint failure names (the `http` crate), the cache key's random key (`ring`) and a
+# token-exchange scope's key (`sha2`). No kernel crate, no plane, no sibling auth-kind plugin.
 # Every version is the workspace table's (busbar's at the pin).
 [dependencies]
 busbar-contract = { workspace = true }
@@ -38,8 +38,9 @@ sha2 = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
-# The token request forms are written by the crate's own encoder (`mint::form`, sized once and wiped
-# on drop); the tests read them back, and hold the encoder to `serde_urlencoded`'s bytes.
+# The token request forms are the chip's (`cred::FormBody`); the tests read the sealed bytes back
+# (`test-seal`, dev-only) and hold them to `serde_urlencoded`'s.
+busbar-contract = { workspace = true, features = ["test-seal"] }
 serde_urlencoded = { workspace = true }
 # The log double (`warn_capture::WarnCapture`): the refusal and outage events are read back.
 busbar-test-kit = { workspace = true }
