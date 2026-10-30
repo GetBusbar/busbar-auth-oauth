@@ -12,6 +12,9 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock, RwLockWriteGuard};
 use busbar_contract::abi::mechanism::ticket::Ticket;
 use busbar_contract::abi::sdk::auth_outbound::Diags;
 use busbar_contract::abi::sdk::conn::Host;
+use busbar_contract::abi::sdk::hmac::hmac_sha256;
+use busbar_contract::abi::sdk::life::Refusal;
+use zeroize::Zeroizing;
 
 use crate::mint::host_wire::HostWire;
 use crate::mint::{Minted, Minter, Report, Wire, MIN_SLEEP_SECS};
@@ -64,6 +67,9 @@ pub struct Oauth {
     /// The tickets whose exchange failed: their resumed call answers FAILED (the attempt fails, as
     /// the previous release failed the call whose exchange the authorization server refused).
     exchange_failed: Mutex<Vec<Ticket>>,
+    /// The instance's own random key the token cache keys are derived under (HMAC-SHA-256), so no
+    /// cache key is a plain digest of a credential; wiped on drop.
+    cache_secret: Zeroizing<[u8; 32]>,
 }
 
 impl crate::style::TokenCache for Oauth {
@@ -73,6 +79,28 @@ impl crate::style::TokenCache for Oauth {
             .or_insert_with(|| Arc::new(Minted::new(minter, max)))
             .clone()
     }
+
+    fn key(&self, parts: &[&[u8]]) -> [u8; 32] {
+        let len = parts.iter().map(|p| p.len() + 1).sum::<usize>();
+        let mut joined = Zeroizing::new(Vec::with_capacity(len));
+        for (i, part) in parts.iter().enumerate() {
+            if i > 0 {
+                joined.push(0);
+            }
+            joined.extend_from_slice(part);
+        }
+        *hmac_sha256(&self.cache_secret[..], &joined)
+    }
+}
+
+/// A fresh random key for an instance's token cache.
+fn cache_secret() -> Result<Zeroizing<[u8; 32]>, Refusal> {
+    use ring::rand::SecureRandom as _;
+    let mut key = Zeroizing::new([0_u8; 32]);
+    ring::rand::SystemRandom::new()
+        .fill(&mut key[..])
+        .map_err(|_| Refusal::failed("the system random source could not key the token cache"))?;
+    Ok(key)
 }
 
 impl Oauth {
@@ -84,13 +112,36 @@ impl Oauth {
     /// An instance at `generation`; its need is the host's, reached through the tables each
     /// `tick` and `drive` is handed (none: no need was granted, and a minted style reports that
     /// no connection was).
+    ///
+    /// # Errors
+    /// The system random source could not key its token cache.
+    pub(crate) fn opened(generation: u64) -> Result<Self, Refusal> {
+        Ok(Self::keyed(generation, None, cache_secret()?))
+    }
+
+    /// A test's instance at `generation`.
+    #[cfg(test)]
     pub(crate) fn new(generation: u64) -> Self {
         Self::with_wire(generation, None)
     }
 
     /// An instance over any [`Wire`] (the unit tests' double).
+    #[cfg(test)]
     pub(crate) fn with_wire(generation: u64, wire: Option<Box<dyn Wire>>) -> Self {
+        Self::keyed(
+            generation,
+            wire,
+            cache_secret().expect("the system random source"),
+        )
+    }
+
+    fn keyed(
+        generation: u64,
+        wire: Option<Box<dyn Wire>>,
+        cache_secret: Zeroizing<[u8; 32]>,
+    ) -> Self {
         Self {
+            cache_secret,
             wire,
             driver: Mutex::new(Ticket::NONE),
             issued: AtomicU32::new(0),

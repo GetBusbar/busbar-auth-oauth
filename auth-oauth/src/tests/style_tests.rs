@@ -21,6 +21,20 @@ impl TokenCache for Cache {
             .or_insert_with(|| Arc::new(Minted::new(minter, max)))
             .clone()
     }
+    fn key(&self, parts: &[&[u8]]) -> [u8; 32] {
+        digest(parts)
+    }
+}
+
+/// A test cache's key: a plain digest of the parts (the instance keys its own).
+fn digest(parts: &[&[u8]]) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    for p in parts {
+        h.update(p);
+        h.update([0]);
+    }
+    h.finalize().into()
 }
 
 fn open(
@@ -201,6 +215,9 @@ fn a_jwt_binding_dials_the_judged_token_uri_setting() {
                 .unwrap_or_default();
             self.0.lock().unwrap().push(target);
             Arc::new(Minted::new(minter, max))
+        }
+        fn key(&self, parts: &[&[u8]]) -> [u8; 32] {
+            digest(parts)
         }
     }
     let sa = serde_json::json!({
