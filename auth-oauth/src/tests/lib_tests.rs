@@ -8,16 +8,12 @@
 use super::*;
 use crate::instance::diag;
 
-/// THE FIELD FLAGS ARE NONE (ARCHITECT ruling 2026-09-28, Q4: the 1.5.5 bytes win). The `fields`
-/// door writes the authorization field with `FIELD_FLAGS`; 1.5.5 sent its credential headers
-/// indexable, so a sensitive (never-indexed) marking is different bytes. The SDK's `FieldsWriter`
-/// cannot be built outside its own door, so the constant the door passes is pinned directly.
+/// THE AUTHORIZATION FIELD IS SENSITIVE (KIND-auth lead ruling, 1.6.0): every credential field an
+/// outbound style presents carries `FIELD_SENSITIVE`, so an h2/h3 encoder sends it never-indexed
+/// and no header table keeps the bearer. RED: the flags were 0 (1.5.5's indexable bytes).
 #[test]
-fn the_authorization_field_is_written_with_no_flags() {
-    assert_eq!(
-        FIELD_FLAGS, 0,
-        "1.5.5 sent credential headers indexable: the flags stay 0 (ARCHITECT ruling Q4)"
-    );
+fn the_authorization_field_is_written_sensitive() {
+    assert_eq!(FIELD_FLAGS, busbar_contract::abi::auth::FIELD_SENSITIVE);
 }
 
 /// The diagnostic indices are the Statement's table positions, in `DIAG_IDS` order (the plugin
