@@ -25,11 +25,10 @@ pub(crate) mod token_exchange;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
+use busbar_contract::abi::sdk::cred::{FormBody, SealedWrite};
 use busbar_contract::conn::{ConnError, ConnId, PieceKind};
 use zeroize::{Zeroize, Zeroizing};
 
-use crate::held::Own;
-use crate::held::Secret;
 use crate::token_response::{default_expires_in, deserialize_expires_in, wiped_member};
 use busbar_contract::abi::sdk::auth_kit::json_error;
 use busbar_contract::header::{is_legal_header_value, token_value};
@@ -65,7 +64,6 @@ pub(crate) mod need {
 }
 
 /// One token request: POST `body` (a form) to `target`, over the need `need`.
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TokenRequest {
     /// The need it goes out on ([`need`]).
     pub need: u32,
@@ -73,15 +71,15 @@ pub(crate) struct TokenRequest {
     pub target: String,
     /// The head fields, in order.
     pub fields: Vec<(&'static str, &'static str)>,
-    /// The form body.
-    pub body: Secret<String, Own>,
+    /// The form body: its credential values are the chip's, encoded only as it is written.
+    pub body: FormBody,
 }
 
 impl TokenRequest {
     /// A form POST of `body` to `target`, over the need `need`. Its fields are, in order,
     /// the form's `content-type`, then the client-default `accept: */*`, which the request carries
     /// itself (the http door writes no field the caller did not).
-    pub(crate) fn form(need: u32, target: String, body: Secret<String, Own>) -> Self {
+    pub(crate) fn form(need: u32, target: String, body: FormBody) -> Self {
         Self {
             need,
             target,
@@ -94,57 +92,6 @@ impl TokenRequest {
     }
 }
 
-/// Whether `b` is written as itself in an `application/x-www-form-urlencoded` value (the WHATWG
-/// byte serializer `serde_urlencoded` writes with: ASCII alphanumerics and `*-._`).
-const fn form_kept(b: u8) -> bool {
-    b.is_ascii_alphanumeric() || matches!(b, b'*' | b'-' | b'.' | b'_')
-}
-
-/// How many bytes `v` takes form-encoded.
-fn form_len(v: &str) -> usize {
-    v.bytes()
-        .map(|b| if form_kept(b) || b == b' ' { 1 } else { 3 })
-        .sum()
-}
-
-/// The token request form: `pairs` as `name=value&...`, byte for byte what
-/// `serde_urlencoded::to_string` wrote for them (space as `+`, every byte but ASCII alphanumerics
-/// and `*-._` as an upper-case `%XX`), built in ONE buffer sized to the exact length first, so no
-/// growth frees a partial copy of the credential the form carries; held wiped on drop (auth material is
-/// zeroised).
-pub(crate) fn form(pairs: &[(&str, &str)]) -> Secret<String, Own> {
-    const HEX: &[u8; 16] = b"0123456789ABCDEF";
-    let len = pairs
-        .iter()
-        .map(|(n, v)| form_len(n) + 1 + form_len(v))
-        .sum::<usize>()
-        + pairs.len().saturating_sub(1);
-    let mut out = String::with_capacity(len);
-    for (i, (name, value)) in pairs.iter().enumerate() {
-        if i > 0 {
-            out.push('&');
-        }
-        for (j, part) in [name, value].into_iter().enumerate() {
-            if j == 1 {
-                out.push('=');
-            }
-            for b in part.bytes() {
-                if form_kept(b) {
-                    out.push(char::from(b));
-                } else if b == b' ' {
-                    out.push('+');
-                } else {
-                    out.push('%');
-                    out.push(char::from(HEX[usize::from(b >> 4)]));
-                    out.push(char::from(HEX[usize::from(b & 0x0f)]));
-                }
-            }
-        }
-    }
-    debug_assert_eq!(out.len(), len, "the form is sized once");
-    Secret::held(out)
-}
-
 /// A style that mints: how it builds its token request.
 pub(crate) enum Minter {
     /// RFC 7523.
@@ -154,6 +101,17 @@ pub(crate) enum Minter {
     /// RFC 8693, for one scope: minted ON DEMAND (a request that finds no usable token starts the
     /// exchange), never refreshed ahead of a request.
     TokenExchange(token_exchange::Scoped),
+}
+
+impl std::fmt::Debug for Read<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Header(_) => f.write_str("Header([REDACTED])"),
+            Self::Nothing => f.write_str("Nothing"),
+            Self::Refuse(why) => f.debug_tuple("Refuse").field(why).finish(),
+            Self::Wait => f.write_str("Wait"),
+        }
+    }
 }
 
 impl Minter {
@@ -168,19 +126,19 @@ impl Minter {
 
 /// A minted access token and the wall-clock epoch second it expires at.
 pub(crate) struct CachedToken {
-    /// The minted bearer, held redacted so it never leaks via `Debug`/logs and zeroizes on drop.
-    pub(crate) token: Secret<String, Own>,
+    /// The minted bearer, wiped on drop (no `Debug` of it: [`CachedToken`]'s own prints none).
+    pub(crate) token: Zeroizing<String>,
     pub(crate) expires_at: u64,
     /// The `Bearer <token>` value, pre-built ONCE here (at mint time) rather than on every request.
     /// `None` when `token` is empty (the pre-first-mint sentinel) or contains bytes invalid for an
     /// header value — both cases mean "emit no auth header".
-    header: Option<Secret<String, Own>>,
+    header: Option<Zeroizing<String>>,
 }
 
 impl std::fmt::Debug for CachedToken {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CachedToken")
-            .field("token", &self.token)
+            .field("token", &"[REDACTED]")
             .field("expires_at", &self.expires_at)
             .finish_non_exhaustive()
     }
@@ -189,15 +147,15 @@ impl std::fmt::Debug for CachedToken {
 impl CachedToken {
     /// Construct a `CachedToken`, building its header once here. The second value is whether the
     /// token was omitted for bytes invalid in a header value (the caller reports it). The token
-    /// arrives already `Secret<_, Own>` (a response's token is read into a wiped buffer and moved
-    /// into one, [`access_token`]); the header build below is its one exposure.
-    pub(crate) fn new(token: Secret<String, Own>, expires_at: u64) -> (Self, bool) {
-        let (header, invalid) = if token.expose_own(&Own::here()).is_empty() {
+    /// arrives already wiped on drop (a response's token is read into a wiped buffer and moved
+    /// here, [`access_token`]).
+    pub(crate) fn new(token: Zeroizing<String>, expires_at: u64) -> (Self, bool) {
+        let (header, invalid) = if token.is_empty() {
             (None, false)
         } else {
-            let mut v = token_value(token.expose_own(&Own::here()));
+            let mut v = token_value(&token);
             if is_legal_header_value(&v) {
-                (Some(Secret::held(v)), false)
+                (Some(Zeroizing::new(v)), false)
             } else {
                 v.zeroize();
                 (None, true)
@@ -215,9 +173,7 @@ impl CachedToken {
 
     /// The header value, when there is one to present.
     pub(crate) fn header(&self) -> Option<&str> {
-        self.header
-            .as_ref()
-            .map(|h| h.expose_own(&Own::here()).as_str())
+        self.header.as_ref().map(|h| h.as_str())
     }
 }
 
@@ -336,7 +292,7 @@ pub(crate) fn parse_response(
         serde_json::from_str(&body).map_err(json_error("token response JSON invalid"))?;
     // The token's buffer moves into the held secret whole (no copy): the emptied wrapper drops.
     let mut read = access_token(&body)?;
-    let token = Secret::held(std::mem::take(&mut *read));
+    let token = Zeroizing::new(std::mem::take(&mut *read));
     Ok(CachedToken::new(
         token,
         // saturating_add: `expires_in` is attacker-influenced (comes off the token endpoint), so a
@@ -361,8 +317,14 @@ pub(crate) struct Got {
 /// The plugin's own need, as the exchange uses it: the host's connection table
 /// (`busbar_contract::abi::host::conn::HostConns`), or a test's double.
 pub(crate) trait Wire: Send + Sync {
-    /// Open a connection for the need, sending the request's head and body.
-    fn open(&self, req: &TokenRequest, timeout_ms: u64) -> Result<ConnId, ConnError>;
+    /// Open a connection for the need, sending the request's head and `body` (its form, encoded
+    /// by the chip).
+    fn open(
+        &self,
+        req: &TokenRequest,
+        body: &mut SealedWrite,
+        timeout_ms: u64,
+    ) -> Result<ConnId, ConnError>;
     /// Read one piece into `buf`; [`ConnError::Pending`] when nothing is ready.
     fn read(&self, conn: ConnId, buf: &mut [u8]) -> Result<Got, ConnError>;
     /// Close the connection.
@@ -421,8 +383,8 @@ pub(crate) const NO_TOKEN: &str = "no OAuth token could be minted for this bindi
 pub(crate) const UNPRESENTABLE: &str = "the minted OAuth token holds bytes invalid in a header \
      value (see diagnostic BUSBAR-4014); the call is refused rather than sent unauthenticated";
 
-/// The answer the per-request call reads.
-#[derive(Debug, PartialEq, Eq)]
+/// The answer the per-request call reads. No `Debug`: it carries the bearer.
+#[derive(PartialEq, Eq)]
 pub(crate) enum Read<'a> {
     /// Present this header value (`Bearer <token>`).
     Header(&'a str),
@@ -464,7 +426,9 @@ impl Minted {
             on_demand: matches!(minter, Minter::TokenExchange(_)),
             minter,
             max_response_bytes,
-            token: RwLock::new(Arc::new(CachedToken::new(Secret::held(String::new()), 0).0)),
+            token: RwLock::new(Arc::new(
+                CachedToken::new(Zeroizing::new(String::new()), 0).0,
+            )),
             exchange: Mutex::new(Exchange::Idle { due_ns: 0 }),
             refresh_failed: AtomicBool::new(false),
             usable_until: AtomicU64::new(0),
@@ -510,7 +474,7 @@ impl Minted {
 
     /// Whether the first mint has populated a non-empty token.
     pub(crate) fn is_ready(&self) -> bool {
-        !self.current().token.expose_own(&Own::here()).is_empty()
+        !self.current().token.is_empty()
     }
 
     /// THE `ready` FACT at wall-clock `now` (epoch seconds), by the rule [`Minted::read`] applies:
@@ -547,7 +511,7 @@ impl Minted {
         // Before the first mint is attempted a scheduled cell presents nothing (the contract's
         // boot window); once a mint has failed with no token held, the call is refused, saying
         // why, never sent unauthenticated.
-        if tok.token.expose_own(&Own::here()).is_empty() {
+        if tok.token.is_empty() {
             return if self.refresh_failed.load(Ordering::Acquire) {
                 f(Read::Refuse(NO_TOKEN))
             } else {
@@ -597,7 +561,19 @@ impl Minted {
                 Ok(r) => r,
                 Err(e) => return self.failed(&mut ex, now_ns, e, false),
             };
-            match wire.open(&req, MINT_DEADLINE_SECS * 1000) {
+            // The chip encodes the form (and signs a JWT-bearer assertion) as it is written.
+            let mut body = match req.body.encoded() {
+                Ok(b) => b,
+                Err(r) => {
+                    return self.failed(
+                        &mut ex,
+                        now_ns,
+                        format!("the token request could not be built: {r}"),
+                        false,
+                    )
+                }
+            };
+            match wire.open(&req, &mut body, MINT_DEADLINE_SECS * 1000) {
                 Ok(conn) => {
                     *ex = Exchange::InFlight {
                         conn,
@@ -696,7 +672,7 @@ impl Minted {
             // an empty token collides with the pre-first-mint sentinel, so `ready` would stay false
             // forever AND the per-request call would emit no auth header — a permanent wedge with no
             // self-healing. Retry at MIN_SLEEP instead, exactly like a mint error.
-            Ok((fresh, _)) if fresh.token.expose_own(&Own::here()).is_empty() => {
+            Ok((fresh, _)) if fresh.token.is_empty() => {
                 self.refresh_failed.store(true, Ordering::Release);
                 let due = if self.on_demand {
                     u64::MAX

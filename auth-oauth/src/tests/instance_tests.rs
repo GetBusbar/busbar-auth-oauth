@@ -22,14 +22,20 @@ use crate::mint::TokenRequest;
 use crate::style;
 use crate::test_support::{self, TestHost};
 use busbar_contract::abi::mechanism::call::Outcome;
+use busbar_contract::abi::sdk::cred::SealedWrite;
 use busbar_contract::conn::{ConnError, ConnId};
 
 /// The scripted need, shared so the test reads what was sent.
 struct Shared(Arc<Scripted>);
 
 impl Wire for Shared {
-    fn open(&self, req: &TokenRequest, timeout_ms: u64) -> Result<ConnId, ConnError> {
-        self.0.open(req, timeout_ms)
+    fn open(
+        &self,
+        req: &TokenRequest,
+        body: &mut SealedWrite,
+        timeout_ms: u64,
+    ) -> Result<ConnId, ConnError> {
+        self.0.open(req, body, timeout_ms)
     }
     fn clock(&self) -> Option<mint::HostClock> {
         self.0.clock()
@@ -275,8 +281,13 @@ fn opening_a_binding_wakes_the_driver_ticket() {
 struct Pinned(Arc<Scripted>, u64);
 
 impl Wire for Pinned {
-    fn open(&self, req: &TokenRequest, timeout_ms: u64) -> Result<ConnId, ConnError> {
-        self.0.open(req, timeout_ms)
+    fn open(
+        &self,
+        req: &TokenRequest,
+        body: &mut SealedWrite,
+        timeout_ms: u64,
+    ) -> Result<ConnId, ConnError> {
+        self.0.open(req, body, timeout_ms)
     }
     fn read(&self, conn: ConnId, buf: &mut [u8]) -> Result<mint::Got, ConnError> {
         self.0.read(conn, buf)
@@ -523,8 +534,13 @@ fn forgetting_the_last_waiter_drops_its_exchange_entry() {
 struct HostClocked(Arc<Scripted>, Arc<AtomicU64>);
 
 impl Wire for HostClocked {
-    fn open(&self, req: &TokenRequest, timeout_ms: u64) -> Result<ConnId, ConnError> {
-        self.0.open(req, timeout_ms)
+    fn open(
+        &self,
+        req: &TokenRequest,
+        body: &mut SealedWrite,
+        timeout_ms: u64,
+    ) -> Result<ConnId, ConnError> {
+        self.0.open(req, body, timeout_ms)
     }
     fn read(&self, conn: ConnId, buf: &mut [u8]) -> Result<mint::Got, ConnError> {
         self.0.read(conn, buf)

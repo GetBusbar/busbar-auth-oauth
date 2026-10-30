@@ -17,16 +17,16 @@
 //! The `token_url` https / cloud-metadata vetting is not done here: the kernel judges an auth
 //! plugin's need target at seal and at `--validate`.
 
+use busbar_contract::abi::sdk::cred::{Cred, FormBody};
+use zeroize::Zeroizing;
+
 use super::TokenRequest;
-use crate::held::Own;
 
 /// The exchange material for one binding. Immutable after construction.
-#[derive(Debug)]
 pub(crate) struct ClientCreds {
     client_id: String,
-    /// The confidential-client secret, held `Secret<_, Own>` so it never leaks via `Debug`
-    /// (this struct derives it) and zeroizes on drop. Exposed only into the token-endpoint POST body.
-    client_secret: crate::held::Secret<String, Own>,
+    /// The confidential-client secret: the chip's, written only into the token request's form.
+    client_secret: Cred,
     token_url: String,
     scope: String,
 }
@@ -38,7 +38,7 @@ pub(crate) fn build(credential: &str, token_url: &str, scope: &str) -> Result<Cl
     let (client_id, client_secret) = split_credential(credential)?;
     Ok(ClientCreds {
         client_id: client_id.to_string(),
-        client_secret: crate::held::Secret::held(client_secret.to_string()),
+        client_secret: Cred::captured(Zeroizing::new(client_secret.as_bytes().to_vec())),
         token_url: token_url.to_string(),
         scope: scope.to_string(),
     })
@@ -67,19 +67,14 @@ pub(crate) fn validate_credential(credential: &str) -> Result<(), String> {
 }
 
 impl ClientCreds {
-    /// The token request (RFC 6749 §4.4): the form as `serde_urlencoded` writes it,
-    /// built once and wiped on drop ([`super::form`]: it carries the
-    /// client secret), POSTed to `token_url`.
+    /// The token request (RFC 6749 §4.4): the form as `serde_urlencoded` writes it, the client
+    /// secret the chip's ([`FormBody`]), POSTed to `token_url`.
     pub(crate) fn request(&self) -> Result<TokenRequest, String> {
-        let form = super::form(&[
-            ("grant_type", "client_credentials"),
-            ("client_id", self.client_id.as_str()),
-            (
-                "client_secret",
-                self.client_secret.expose_own(&Own::here()).as_str(),
-            ),
-            ("scope", self.scope.as_str()),
-        ]);
+        let form = FormBody::new()
+            .public("grant_type", "client_credentials")
+            .public("client_id", &self.client_id)
+            .sealed("client_secret", &self.client_secret)
+            .public("scope", &self.scope);
         Ok(TokenRequest::form(
             super::need::TOKEN_URL,
             self.token_url.clone(),

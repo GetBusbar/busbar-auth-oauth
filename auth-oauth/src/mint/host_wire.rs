@@ -14,7 +14,6 @@
 //! starts with nothing held, so the handle count is the instance's for the ticket's life, never
 //! reset: no service is ever answered from another's kept result.
 
-use crate::held::Own;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::task::Poll;
 
@@ -24,6 +23,7 @@ use busbar_contract::abi::host::conn::connector::{
 };
 use busbar_contract::abi::mechanism::ticket::Ticket;
 use busbar_contract::abi::sdk::conn::{ConnFailure, Connector, Host};
+use busbar_contract::abi::sdk::cred::SealedWrite;
 use busbar_contract::abi::transport::{fields, FrameSpan};
 use busbar_contract::conn::{ConnError, ConnId, PieceKind};
 
@@ -129,9 +129,13 @@ fn head(req: &TokenRequest, timeout_ms: u64) -> Result<(Vec<u8>, RequestPiece), 
 }
 
 impl Wire for HostWire<'_> {
-    fn open(&self, req: &TokenRequest, timeout_ms: u64) -> Result<ConnId, ConnError> {
+    fn open(
+        &self,
+        req: &TokenRequest,
+        body: &mut SealedWrite,
+        timeout_ms: u64,
+    ) -> Result<ConnId, ConnError> {
         let (head, head_piece) = head(req, timeout_ms)?;
-        let body = req.body.expose_own(&Own::here()).as_bytes();
         let body_piece = RequestPiece {
             kind: REQUEST_BODY,
             ..RequestPiece::default()
@@ -146,12 +150,9 @@ impl Wire for HostWire<'_> {
                 if now(c.write_request(stream, &head_piece, &head))? != head.len() {
                     return Err(ConnError::Refused);
                 }
-                let mut at = 0;
-                while at < body.len() {
-                    match now(c.write_request(stream, &body_piece, &body[at..]))? {
-                        0 => return Err(ConnError::Refused),
-                        n => at += n,
-                    }
+                // The sealed body is one piece: a framed request takes it whole.
+                if now(body.request(c, stream, &body_piece))? != body.len() {
+                    return Err(ConnError::Refused);
                 }
                 now(c.write_request(stream, &end_piece, &[])).map(|_| ())
             })();
