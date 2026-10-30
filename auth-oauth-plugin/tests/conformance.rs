@@ -382,7 +382,9 @@ const EXPECTED: &[&str] = &[
     "open_outbound oauth-client-credentials Ready ",
     "retire 1 Ready",
     "after retire fields Refused ",
-    "gen 2 fields Ready  ",
+    "gen 2 fields Failed no OAuth token could be minted for this binding (see diagnostics \
+     BUSBAR-4014/4015/4016); the call is refused rather than sent unauthenticated, and the mint \
+     retries on its schedule",
     "close Ready",
 ];
 

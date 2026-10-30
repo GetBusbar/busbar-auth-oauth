@@ -64,7 +64,7 @@
         "refreshed_fields": [
           ["authorization", "Bearer conformance-token-2", 1]
         ],
-        "refusal": "Ready"
+        "refusal": "Failed"
       },
       {
         "style": "jwt-bearer",
@@ -129,7 +129,7 @@
         "refreshed_fields": [
           ["authorization", "Bearer conformance-token-2", 1]
         ],
-        "refusal": "Ready"
+        "refusal": "Failed"
       },
       {
         "style": "oauth-token-exchange",
