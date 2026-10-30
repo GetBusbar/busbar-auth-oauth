@@ -388,10 +388,42 @@ const EXPECTED: &[&str] = &[
     "close Ready",
 ];
 
+/// The folds: the declared diagnostic, and each `tracing` event the SDK captured into the
+/// plugin's log (S5: every refusal logged once, `module = "oauth"`).
 const EXPECTED_FOLDS: &[&str] = &[
+    "diag 4294967295 sev=0 busbar_auth_oauth: instance settings refused module=\"oauth\" \
+     reason=\"settings: must be a JSON object\"",
+    "diag 4294967295 sev=0 busbar_auth_oauth: outbound binding refused module=\"oauth\" \
+     style=\"oauth-client-credentials\" reason=\"settings: uses auth: oauth-client-credentials \
+     but has no `token_url` (the OAuth token endpoint the client credentials are POSTed to) | \
+     credential: oauth-client-credentials key must be `client_id:client_secret`\"",
+    "diag 4294967295 sev=0 busbar_auth_oauth: outbound binding refused module=\"oauth\" \
+     style=\"jwt-bearer\" reason=\"settings: uses auth: jwt-bearer but declares `api_key: \
+     none`; that grant signs its assertion WITH the credential (the service-account JSON or key \
+     file), so there is nothing to declare keyless\"",
+    "diag 4294967295 sev=0 busbar_auth_oauth: outbound binding refused module=\"oauth\" \
+     style=\"bearer\" reason=\"settings: outbound auth style `bearer` is not served by this \
+     plugin\"",
+    "diag 4294967295 sev=0 busbar_auth_oauth: outbound binding refused module=\"oauth\" \
+     style=\"kerberos\" reason=\"settings: outbound auth style `kerberos` is not served by this \
+     plugin\"",
+    FIELDS_REFUSED,
+    FIELDS_REFUSED,
     "diag 2 sev=1 OAuth token mint failed; will retry error=token endpoint request failed: no \
      connection was granted for the token endpoint",
+    "diag 4294967295 sev=0 busbar_auth_oauth::instance: the OAuth mint was refused and will retry \
+     module=\"oauth\" reason=\"token endpoint request failed: no connection was granted for the \
+     token endpoint\"",
+    FIELDS_REFUSED,
+    "diag 4294967295 sev=0 busbar_auth_oauth: fields failed: no token to present \
+     module=\"oauth\" reason=\"no OAuth token could be minted for this binding (see diagnostics \
+     BUSBAR-4014/4015/4016); the call is refused rather than sent unauthenticated, and the mint \
+     retries on its schedule\"",
 ];
+
+const FIELDS_REFUSED: &str = "diag 4294967295 sev=0 busbar_auth_oauth: fields refused \
+     module=\"oauth\" reason=\"not the operator's own credential, or a handle this generation \
+     does not hold\"";
 
 fn run(p: &Plugin<Auth>, folds: &Folds) -> (Vec<String>, Vec<String>) {
     let t = script(p);

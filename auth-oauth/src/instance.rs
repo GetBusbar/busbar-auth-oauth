@@ -93,6 +93,25 @@ impl crate::style::TokenCache for Oauth {
     }
 }
 
+/// A failed mint, logged ONCE (S4, S5): an outage of the token endpoint at WARN, any other failure
+/// (the endpoint refused the credential, the configuration cannot mint) at INFO. The reason names
+/// the status and at most the RFC 6749 error code, never a body or a secret.
+fn logged_failure(cell: &Minted, why: &str) {
+    if cell.outage() {
+        tracing::warn!(
+            module = "oauth",
+            reason = why,
+            "token endpoint outage: the OAuth mint failed and will retry"
+        );
+    } else {
+        tracing::info!(
+            module = "oauth",
+            reason = why,
+            "the OAuth mint was refused and will retry"
+        );
+    }
+}
+
 /// A fresh random key for an instance's token cache.
 fn cache_secret() -> Result<Zeroizing<[u8; 32]>, Refusal> {
     use ring::rand::SecureRandom as _;
@@ -417,11 +436,14 @@ impl Oauth {
                     "OAuth token endpoint returned a 200 with an empty access_token; treating as a \
                      mint failure and will retry",
                 ),
-                Some(Report::MintFailed(e)) => diags.push(
-                    diag::OAUTH_MINT_FAILED,
-                    WARN,
-                    format!("OAuth token mint failed; will retry error={e}"),
-                ),
+                Some(Report::MintFailed(e)) => {
+                    logged_failure(&cell, &e);
+                    diags.push(
+                        diag::OAUTH_MINT_FAILED,
+                        WARN,
+                        format!("OAuth token mint failed; will retry error={e}"),
+                    );
+                }
                 None => {}
             }
             if !self.reap(key, &cell) {
@@ -490,6 +512,7 @@ impl Oauth {
                 Some(true)
             }
             Some(Report::MintFailed(e)) => {
+                logged_failure(cell, &e);
                 diags.push(
                     diag::OAUTH_MINT_FAILED,
                     WARN,
