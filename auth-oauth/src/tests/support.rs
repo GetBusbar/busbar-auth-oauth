@@ -76,13 +76,25 @@ pub(crate) fn fields(
     ticket: Ticket,
     scope: Option<&str>,
 ) -> (Outcome, String) {
+    fields_at(o, host, handle, ticket, scope, 0)
+}
+
+/// [`fields`] stamped with the host's wall time `timestamp` (epoch seconds; `0` = none).
+pub(crate) fn fields_at(
+    o: &Oauth,
+    host: &TestHost,
+    handle: u64,
+    ticket: Ticket,
+    scope: Option<&str>,
+    timestamp: u64,
+) -> (Outcome, String) {
     let mut written = Vec::new();
     let ask = Ask {
         handle,
         own: true,
         scope: scope.map(str::as_bytes),
         ticket,
-        timestamp: 0,
+        timestamp,
     };
     let answer = o.answer(&ask, Some(&host.host), &mut |h| {
         written.push(format!("authorization: {h}"));

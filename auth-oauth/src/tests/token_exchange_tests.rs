@@ -502,3 +502,147 @@ fn a_never_used_exchange_lane_is_tried_on_its_first_request() {
         "authorization: Bearer tok-first"
     );
 }
+
+/// The scripted need on a host whose wall clock (epoch seconds) the test sets.
+struct Clocked(Arc<Scripted>, Arc<std::sync::atomic::AtomicU64>);
+
+impl Wire for Clocked {
+    fn open(
+        &self,
+        req: &TokenRequest,
+        body: &mut SealedWrite,
+        timeout_ms: u64,
+    ) -> Result<ConnId, ConnError> {
+        self.0.open(req, body, timeout_ms)
+    }
+    fn clock(&self) -> Option<crate::mint::HostClock> {
+        Some(crate::mint::HostClock {
+            wall_secs: self.1.load(std::sync::atomic::Ordering::Acquire),
+            mono_ns: 0,
+        })
+    }
+    fn read(&self, conn: ConnId, buf: &mut [u8]) -> Result<Got, ConnError> {
+        self.0.read(conn, buf)
+    }
+    fn close(&self, conn: ConnId) {
+        self.0.close(conn);
+    }
+}
+
+/// A plausible host wall clock the clocked tests start at (2027-01-15).
+const T0: u64 = 1_800_000_000;
+
+/// A token-exchange binding on an instance whose host clock the test moves: the instance, the
+/// handle, the scripted need and the clock.
+struct ClockedBinding {
+    o: Oauth,
+    h: u64,
+    w: Arc<Scripted>,
+    wall: Arc<std::sync::atomic::AtomicU64>,
+    host: TestHost,
+}
+
+impl ClockedBinding {
+    fn new() -> Self {
+        let w = Arc::new(Scripted::default());
+        let wall = Arc::new(std::sync::atomic::AtomicU64::new(T0));
+        let o = Oauth::with_wire(1, Some(Box::new(Clocked(w.clone(), wall.clone()))));
+        let h = open(&o);
+        Self {
+            o,
+            h,
+            w,
+            wall,
+            host: TestHost::new(),
+        }
+    }
+
+    /// One `fields` for `scope` on `t` at host wall time `at` (the host's clock moved there too).
+    fn call(&self, t: Ticket, scope: &str, at: u64) -> Outcome {
+        self.wall.store(at, std::sync::atomic::Ordering::Release);
+        test_support::fields_at(&self.o, &self.host, self.h, t, Some(scope), at).0
+    }
+
+    /// A tick at host wall time `at`.
+    fn tick(&self, at: u64) {
+        self.wall.store(at, std::sync::atomic::Ordering::Release);
+        self.o.tick(
+            at.saturating_mul(1_000_000_000),
+            Ticket::NONE,
+            Some(&self.host.host),
+            &mut Diags::default(),
+        );
+    }
+
+    /// How many token requests went out.
+    fn sent(&self) -> usize {
+        self.w.sent.lock().unwrap().len()
+    }
+}
+
+/// O3, A FAILED EXCHANGE BACKS OFF (RFC 6585 §4, RFC 9110 §10.2.3): a scope whose exchange failed
+/// keeps its cell for a negative-cache window, 30 s (the other styles' retry interval), and every
+/// request for that scope in the window FAILS at once with the cached reason, sending nothing; the
+/// first request after the window arms a fresh exchange. RED: the failed cell was dropped and the
+/// next request re-hit the authorization server at request rate.
+#[test]
+fn a_failed_exchange_backs_off_for_its_window_and_fails_fast_meanwhile() {
+    let b = ClockedBinding::new();
+    assert_eq!(b.call(ticket(501), "s", T0), Outcome::Pending);
+    b.w.push(vec![Step::Head(503), Step::Body(b"busy".to_vec(), true)]);
+    b.tick(T0);
+    assert_eq!(b.sent(), 1);
+    assert_eq!(b.call(ticket(501), "s", T0), Outcome::Failed, "the waiter fails");
+    for at in [T0 + 1, T0 + 29] {
+        assert_eq!(
+            b.call(ticket(502), "s", at),
+            Outcome::Failed,
+            "inside the window the scope fails fast ({at})"
+        );
+        b.tick(at);
+        assert_eq!(b.sent(), 1, "nothing re-hits the authorization server ({at})");
+    }
+    assert_eq!(
+        b.call(ticket(503), "s", T0 + 31),
+        Outcome::Pending,
+        "after the window a request arms a fresh exchange"
+    );
+    b.w.ok(r#"{"access_token":"tok-s","expires_in":3600}"#);
+    b.tick(T0 + 31);
+    assert_eq!(b.sent(), 2);
+    assert_eq!(
+        test_support::fields_at(&b.o, &b.host, b.h, ticket(503), Some("s"), T0 + 31).1,
+        "authorization: Bearer tok-s"
+    );
+}
+
+/// O3, THE AUTHORIZATION SERVER'S `Retry-After` IS HONOURED, capped at 300 s: in seconds or as an
+/// HTTP-date, it sets the window instead of the default 30 s. RED: no window at all.
+#[test]
+fn a_failed_exchange_honours_retry_after_capped_at_300_seconds() {
+    // (retry-after, still failing at, retried at)
+    let date = "Fri, 15 Jan 2027 08:03:20 GMT"; // T0 + 200
+    for (value, failing_at, retried_at) in [
+        ("120", T0 + 100, T0 + 121),
+        ("100000", T0 + 299, T0 + 301),
+        (date, T0 + 150, T0 + 201),
+    ] {
+        let b = ClockedBinding::new();
+        assert_eq!(b.call(ticket(601), "s", T0), Outcome::Pending);
+        b.w.push(vec![
+            Step::HeadRetryAfter(429, value),
+            Step::Body(b"slow down".to_vec(), true),
+        ]);
+        b.tick(T0);
+        assert_eq!(
+            b.call(ticket(602), "s", failing_at),
+            Outcome::Failed,
+            "retry-after {value}: still backing off at {failing_at}"
+        );
+        assert_eq!(
+            b.call(ticket(603), "s", retried_at),
+            Outcome::Pending,
+            "retry-after {value}: retried at {retried_at}"
+        );
+    }
+}
