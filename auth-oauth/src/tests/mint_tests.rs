@@ -813,3 +813,21 @@ fn each_failed_exchange_arm_is_named_and_judged_outage_or_not() {
     assert!(e.contains("mint deadline"), "{e}");
     assert!(outage, "the deadline is an outage");
 }
+
+/// L3, A TOKEN THAT IS ALREADY EXPIRED IS NO TOKEN: a reply whose `expires_in` is 0 (expired as it
+/// lands, or so close that clock skew ate it) is a failed mint, retried on schedule, never stored
+/// and presented as a live bearer. RED: it was stored as a success and presented for 30 s.
+#[test]
+fn an_already_expired_token_is_a_failed_mint() {
+    let w = Scripted::default();
+    w.ok(r#"{"access_token":"stale","token_type":"Bearer","expires_in":0}"#);
+    let m = Minted::new(client_credentials(), DEFAULT_MAX_RESPONSE_BYTES);
+    let (due, report) = m.tick(0, now_epoch(), Some(&w));
+    assert!(
+        matches!(&report, Some(Report::MintFailed(e)) if e.contains("expires_in")),
+        "{report:?}"
+    );
+    assert_eq!(due, MIN_SLEEP_SECS * S, "retried on schedule");
+    assert!(!m.is_ready());
+    assert_eq!(m.read(now_epoch(), seen), "Refuse(\"no OAuth token could be minted for this binding (see diagnostics BUSBAR-4014/4015/4016); the call is refused rather than sent unauthenticated, and the mint retries on its schedule\")");
+}
