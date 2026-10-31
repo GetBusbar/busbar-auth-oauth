@@ -32,6 +32,15 @@ pub(crate) mod diag {
 
 const WARN: u8 = 1;
 
+/// The most scope cells one token-exchange binding keeps (O4): a request-stated scope past it
+/// evicts the least recently used idle cell no request waits on.
+pub(crate) const MAX_SCOPE_CELLS: usize = 256;
+
+/// Why a new scope is refused when every one of its binding's [`MAX_SCOPE_CELLS`] cells is busy.
+pub(crate) const SCOPES_BUSY: &str = "the token exchange binding already holds its 256 scope \
+     cells, each with an exchange in flight or a call waiting on it; the call is refused rather \
+     than made unauthenticated";
+
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
 }
@@ -60,6 +69,9 @@ pub struct Oauth {
     /// The token cells, by cache key: a call that finds its cell usable reads it under the read
     /// lock; every change (and every park) takes the write lock.
     cache: RwLock<HashMap<[u8; 32], Arc<Minted>>>,
+    /// The count each on-demand cell's use is stamped with ([`Minted::touch`]): the least recently
+    /// used idle cell is the one evicted past [`MAX_SCOPE_CELLS`].
+    uses: AtomicU64,
     waiters: Mutex<Vec<Ticket>>,
     /// The tickets waiting on each on-demand cell's exchange (a token-exchange scope), by its cache
     /// key: woken when it lands, or failed when it fails. Taken after `cache` wherever both are.
@@ -170,6 +182,7 @@ impl Oauth {
             next_handle: AtomicU64::new(1),
             handles: RwLock::new(HashMap::new()),
             cache: RwLock::new(HashMap::new()),
+            uses: AtomicU64::new(0),
             waiters: Mutex::new(Vec::new()),
             exchange_waiters: Mutex::new(HashMap::new()),
             exchange_failed: Mutex::new(Vec::new()),
@@ -213,13 +226,21 @@ impl Oauth {
     /// would present the cell's token, or the cell backs off and the call fails at once); a ticket
     /// that would wait is parked BEFORE the token is read, so an exchange that lands meanwhile
     /// still finds it.
+    ///
+    /// A binding (`mine` says which cells are its) keeps at most [`MAX_SCOPE_CELLS`]: a new scope
+    /// past it evicts the binding's least recently used cell that is idle, held by nothing else
+    /// and waited on by no request; when none is, the new scope is refused ([`SCOPES_BUSY`]).
+    ///
+    /// # Errors
+    /// [`SCOPES_BUSY`]: the binding's cells are all busy.
     pub(crate) fn exchange_cell(
         &self,
         key: [u8; 32],
         make: impl FnOnce() -> (Minter, usize),
         ticket: Ticket,
         usable: impl Fn(&Minted) -> bool,
-    ) -> Arc<Minted> {
+        mine: impl Fn(&Minted) -> bool,
+    ) -> Result<Arc<Minted>, &'static str> {
         // THE HIT: a cell that exists, for a call that will not park on it (no ticket, or a token
         // it presents now), under the read lock only.
         if let Some(cell) = self
@@ -229,13 +250,18 @@ impl Oauth {
             .get(&key)
             .filter(|c| ticket.is_none() || usable(c))
         {
-            return Arc::clone(cell);
+            cell.touch(self.uses.fetch_add(1, Ordering::Relaxed));
+            return Ok(Arc::clone(cell));
         }
         let mut cache = self.cache_mut();
+        if !cache.contains_key(&key) {
+            self.make_room(&mut cache, &mine)?;
+        }
         let cell = Arc::clone(cache.entry(key).or_insert_with(|| {
             let (minter, max) = make();
             Arc::new(Minted::new(minter, max))
         }));
+        cell.touch(self.uses.fetch_add(1, Ordering::Relaxed));
         if !ticket.is_none() && !usable(&cell) {
             let mut w = lock(&self.exchange_waiters);
             let waiting = w.entry(key).or_default();
@@ -244,7 +270,35 @@ impl Oauth {
             }
         }
         drop(cache);
-        cell
+        Ok(cell)
+    }
+
+    /// Room in `cache` for one more of a binding's scope cells (`mine`): at [`MAX_SCOPE_CELLS`],
+    /// the least recently used one that is idle, held by nothing but the cache and waited on by
+    /// no request leaves. Called under the cache's lock; takes the waiters' after it.
+    fn make_room(
+        &self,
+        cache: &mut HashMap<[u8; 32], Arc<Minted>>,
+        mine: &impl Fn(&Minted) -> bool,
+    ) -> Result<(), &'static str> {
+        if cache.values().filter(|c| mine(c)).count() < MAX_SCOPE_CELLS {
+            return Ok(());
+        }
+        let waiting = lock(&self.exchange_waiters);
+        let lru = cache
+            .iter()
+            .filter(|(k, c)| {
+                mine(c)
+                    && Arc::strong_count(c) == 1
+                    && c.idle()
+                    && waiting.get(*k).is_none_or(Vec::is_empty)
+            })
+            .min_by_key(|(_, c)| c.last_used())
+            .map(|(k, _)| *k)
+            .ok_or(SCOPES_BUSY)?;
+        drop(waiting);
+        cache.remove(&lru);
+        Ok(())
     }
 
     /// THE `ready` FACT of a token-exchange binding: not every scope it recently tried (its cells

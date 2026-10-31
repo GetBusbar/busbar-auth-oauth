@@ -491,6 +491,8 @@ pub(crate) struct Minted {
     retry_at: AtomicU64,
     /// Why the on-demand cell's last exchange failed, answered to the requests in its window.
     failure: Mutex<Option<String>>,
+    /// When a request last used this on-demand cell, as the instance's use count stamps it.
+    last_used: AtomicU64,
 }
 
 impl Minted {
@@ -510,6 +512,7 @@ impl Minted {
             outage: AtomicBool::new(false),
             retry_at: AtomicU64::new(0),
             failure: Mutex::new(None),
+            last_used: AtomicU64::new(0),
         }
     }
 
@@ -540,6 +543,16 @@ impl Minted {
     /// An on-demand cell holds a token it presents at wall-clock `now`.
     pub(crate) fn usable(&self, now: u64) -> bool {
         self.is_ready() && now < self.usable_until.load(Ordering::Acquire)
+    }
+
+    /// A request used this cell at use count `at`.
+    pub(crate) fn touch(&self, at: u64) {
+        self.last_used.fetch_max(at, Ordering::AcqRel);
+    }
+
+    /// The use count a request last used this cell at.
+    pub(crate) fn last_used(&self) -> u64 {
+        self.last_used.load(Ordering::Acquire)
     }
 
     /// An on-demand cell whose exchange failed is inside its negative-cache window at wall-clock

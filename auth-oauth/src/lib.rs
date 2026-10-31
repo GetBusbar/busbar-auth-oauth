@@ -94,6 +94,10 @@ use busbar_contract::abi::sdk::life::{self, Refusal};
 use crate::instance::Oauth;
 use crate::mint::Read;
 
+/// The longest per-call scope a token exchange takes (O4): each distinct scope is its own cell,
+/// so a request-stated scope is bounded.
+const MAX_SCOPE_BYTES: usize = 1024;
+
 /// The flags every field this plugin writes carries: [`FIELD_SENSITIVE`]. The field is the
 /// bearer, so an h2/h3 encoder sends it never-indexed and no header table keeps it.
 const FIELD_FLAGS: u32 = FIELD_SENSITIVE;
@@ -264,16 +268,27 @@ impl Oauth {
             )));
         }
         let scope = ask.scope.unwrap_or_default();
+        if scope.len() > MAX_SCOPE_BYTES {
+            return Poll::Ready(FieldsAnswer::Failed(Cow::Owned(format!(
+                "the call's token-exchange scope is {} bytes; a scope is at most {MAX_SCOPE_BYTES} \
+                 bytes, so the call is refused rather than made unauthenticated",
+                scope.len()
+            ))));
+        }
         let key = x.scope_key(scope);
         // The lookup and the park are one critical section with the cache (instance.rs).
         // A call parks only when it would wait: not on a usable token, nor on a scope backing off
         // after a failed exchange (that call fails at once, below).
-        let cell = self.exchange_cell(
+        let cell = match self.exchange_cell(
             key,
             || x.minter(scope),
             ticket,
             |c| c.usable(now) || c.backing_off(now),
-        );
+            |c| x.owns(c),
+        ) {
+            Ok(cell) => cell,
+            Err(why) => return Poll::Ready(FieldsAnswer::Failed(Cow::Borrowed(why))),
+        };
         if let Some(why) = cell.backoff_reason(now) {
             self.unpark_exchange(key, ticket);
             return Poll::Ready(FieldsAnswer::Failed(Cow::Owned(why)));
