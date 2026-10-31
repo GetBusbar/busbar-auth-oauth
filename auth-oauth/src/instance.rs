@@ -247,6 +247,16 @@ impl Oauth {
         cell
     }
 
+    /// THE `ready` FACT of a token-exchange binding: not every scope it recently tried (its cells
+    /// the cache still holds) is backing off after a failed exchange. One with no such cell is
+    /// ready.
+    pub(crate) fn exchange_ready(&self, binding: &crate::style::ExchangeBinding) -> bool {
+        let now = self.wall_secs();
+        let cache = self.cache.read().unwrap_or_else(PoisonError::into_inner);
+        let mut tried = cache.values().filter(|c| binding.owns(c)).peekable();
+        tried.peek().is_none() || tried.any(|c| !c.backing_off(now))
+    }
+
     /// Forget `ticket` as waiting on the on-demand cell `key` (its call answered after all).
     pub(crate) fn unpark_exchange(&self, key: [u8; 32], ticket: Ticket) {
         // A call on no ticket is never parked.
@@ -525,9 +535,6 @@ impl Oauth {
             }
         };
         if let Some(failed) = failure {
-            if let Some(exchange) = cell.exchange() {
-                exchange.settled(failed);
-            }
             let woken = lock(&self.exchange_waiters)
                 .remove(&key)
                 .unwrap_or_default();
