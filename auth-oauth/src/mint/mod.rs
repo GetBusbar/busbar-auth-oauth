@@ -138,6 +138,8 @@ pub(crate) struct CachedToken {
     /// `None` when `token` is empty (the pre-first-mint sentinel) or contains bytes invalid for an
     /// header value — both cases mean "emit no auth header".
     header: Option<Zeroizing<String>>,
+    /// The reply's `token_type`, as it stated it (`None`: it stated none).
+    pub(crate) token_type: Option<String>,
 }
 
 impl std::fmt::Debug for CachedToken {
@@ -171,14 +173,43 @@ impl CachedToken {
                 token,
                 expires_at,
                 header,
+                token_type: None,
             },
             invalid,
         )
     }
 
+    /// Why this token is no bearer (its `token_type` is stated and is not `bearer`, in any case);
+    /// `None` for a bearer or a reply that stated no type.
+    pub(crate) fn not_bearer(&self) -> Option<String> {
+        let t = self.token_type.as_deref()?;
+        if t.eq_ignore_ascii_case("bearer") {
+            return None;
+        }
+        Some(format!(
+            "token endpoint returned token_type {}, not a bearer token (RFC 6749 §7.1); it is not \
+             presented",
+            shown(t)
+        ))
+    }
+
     /// The header value, when there is one to present.
     pub(crate) fn header(&self) -> Option<&str> {
         self.header.as_ref().map(|h| h.as_str())
+    }
+}
+
+/// A reply's type word as a refusal names it: quoted when it is a short token of plain characters,
+/// else described (an endpoint's text is never echoed beyond that).
+fn shown(t: &str) -> String {
+    let plain = !t.is_empty()
+        && t.len() <= 64
+        && t.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"-._~+/:".contains(&b));
+    if plain {
+        format!("`{t}`")
+    } else {
+        "an unrecognised value".to_string()
     }
 }
 
@@ -222,6 +253,9 @@ struct TokenResponse {
         deserialize_with = "deserialize_expires_in"
     )]
     expires_in: u64,
+    /// RFC 6749 §5.1 `token_type` (REQUIRED there; absent is tolerated).
+    #[serde(default)]
+    token_type: Option<String>,
 }
 
 /// THE ACCESS TOKEN of a token response `json` the decoder has already judged well-formed (with an
@@ -296,12 +330,14 @@ pub(crate) fn parse_response(
     // The token's buffer moves into the held secret whole (no copy): the emptied wrapper drops.
     let mut read = access_token(&body)?;
     let token = Zeroizing::new(std::mem::take(&mut *read));
-    Ok(CachedToken::new(
+    let (mut cached, invalid) = CachedToken::new(
         token,
         // saturating_add: `expires_in` is attacker-influenced (comes off the token endpoint), so a
         // huge value must clamp to u64::MAX rather than wrap/panic.
         now.saturating_add(tok.expires_in),
-    ))
+    );
+    cached.token_type = tok.token_type;
+    Ok((cached, invalid))
 }
 
 /// One piece a need's connection delivered, as the exchange reads it.
@@ -431,6 +467,29 @@ enum Exchange {
     },
 }
 
+/// How a failed mint is judged, for its log line (S4, S5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Fail {
+    /// The endpoint refused the credential, or the configuration cannot mint: INFO.
+    Refused,
+    /// The endpoint is down or shedding load (a 5xx or 429, a timeout, a lost connection): WARN.
+    Outage,
+    /// The endpoint answered, but what it issued cannot be used as this binding's bearer, or
+    /// the host gave the mint nothing it can sign or date with: WARN, for the operator.
+    Unusable,
+}
+
+impl Fail {
+    /// An outage when `outage`, else a refusal.
+    const fn of(outage: bool) -> Self {
+        if outage {
+            Self::Outage
+        } else {
+            Self::Refused
+        }
+    }
+}
+
 /// What a finished tick of one cell reports for the envelope.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Report {
@@ -486,6 +545,10 @@ pub(crate) struct Minted {
     usable_until: AtomicU64,
     /// The last failed mint was an outage of the token endpoint ([`Minted::outage`]).
     outage: AtomicBool,
+    /// The last failed mint's reply could not be used ([`Minted::unusable`]).
+    unusable: AtomicBool,
+    /// An absent `token_type` was logged for this cell (once per cell, O5).
+    untyped_warned: AtomicBool,
     /// An on-demand cell whose exchange failed is not retried before this wall-clock epoch second
     /// (its negative-cache window: requests for its scope fail fast meanwhile); `0` = none.
     retry_at: AtomicU64,
@@ -510,6 +573,8 @@ impl Minted {
             refresh_failed: AtomicBool::new(false),
             usable_until: AtomicU64::new(0),
             outage: AtomicBool::new(false),
+            unusable: AtomicBool::new(false),
+            untyped_warned: AtomicBool::new(false),
             retry_at: AtomicU64::new(0),
             failure: Mutex::new(None),
             last_used: AtomicU64::new(0),
@@ -687,13 +752,13 @@ impl Minted {
                     wall,
                     "token endpoint request failed: no connection was granted for the token endpoint"
                         .to_string(),
-                    false,
+                    Fail::Refused,
                     None,
                 );
             };
             let req = match self.minter.request(wall) {
                 Ok(r) => r,
-                Err(e) => return self.failed(&mut ex, now_ns, wall, e, false, None),
+                Err(e) => return self.failed(&mut ex, now_ns, wall, e, Fail::Refused, None),
             };
             // The chip encodes the form (and signs a JWT-bearer assertion) as it is written.
             let mut body = match req.body.encoded() {
@@ -704,7 +769,7 @@ impl Minted {
                         now_ns,
                         wall,
                         format!("the token request could not be built: {r}"),
-                        false,
+                        Fail::Refused,
                         None,
                     )
                 }
@@ -727,7 +792,7 @@ impl Minted {
                         now_ns,
                         wall,
                         format!("token endpoint request failed: {}", conn_cause(e)),
-                        unreachable(e),
+                        Fail::of(unreachable(e)),
                         None,
                     )
                 }
@@ -812,6 +877,12 @@ impl Minted {
             parse_response(u16::try_from(status).unwrap_or(0), &body, wall)
                 .map_err(|e| (e, outage_status(status)))
         }) {
+            // A bearer is all this plugin presents (RFC 6749 §7.1): a token of another type is a
+            // failed mint, for the operator to see, never presented as `Bearer`.
+            Ok((fresh, _)) if fresh.not_bearer().is_some() => {
+                let e = fresh.not_bearer().unwrap_or_default();
+                self.failed(&mut ex, now_ns, wall, e, Fail::Unusable, retry)
+            }
             // A 200 with an EMPTY access_token must be treated as a (retryable) failure, not stored:
             // an empty token collides with the pre-first-mint sentinel, so `ready` would stay false
             // forever AND the per-request call would emit no auth header — a permanent wedge with no
@@ -850,6 +921,13 @@ impl Minted {
                 (due, Some(Report::TokenInvalidBytes))
             }
             Ok((fresh, _)) => {
+                if fresh.token_type.is_none() && !self.untyped_warned.swap(true, Ordering::AcqRel) {
+                    tracing::warn!(
+                        module = "oauth",
+                        "the token endpoint's reply carries no token_type (RFC 6749 §5.1 requires \
+                         it); its token is presented as a bearer"
+                    );
+                }
                 let now = wall;
                 let ahead = next_refresh_secs(fresh.expires_at, now);
                 // An on-demand token is presented until a scheduled style would refresh it, and no
@@ -872,7 +950,7 @@ impl Minted {
                 *ex = Exchange::Idle { due_ns: due };
                 (due, Some(Report::Minted))
             }
-            Err((e, outage)) => self.failed(&mut ex, now_ns, wall, e, outage, retry),
+            Err((e, outage)) => self.failed(&mut ex, now_ns, wall, e, Fail::of(outage), retry),
         }
     }
 
@@ -880,6 +958,12 @@ impl Minted {
     /// timeout, a connection lost), not a refusal of its credential or its configuration.
     pub(crate) fn outage(&self) -> bool {
         self.outage.load(Ordering::Acquire)
+    }
+
+    /// Whether this cell's last failed mint got a reply it cannot use as a bearer, or had nothing
+    /// to sign or date with: the operator's to see (WARN), though no outage.
+    pub(crate) fn unusable(&self) -> bool {
+        self.unusable.load(Ordering::Acquire)
     }
 
     /// A failed mint at tick-clock `now_ns` and wall-clock `wall`: keep serving whatever token is
@@ -891,12 +975,14 @@ impl Minted {
         now_ns: u64,
         wall: u64,
         e: String,
-        outage: bool,
+        kind: Fail,
         retry: Option<RetryAfter>,
     ) -> (u64, Option<Report>) {
         self.refresh_failed.store(true, Ordering::Release);
         self.back_off(wall, retry, &e);
-        self.outage.store(outage, Ordering::Release);
+        self.outage.store(kind == Fail::Outage, Ordering::Release);
+        self.unusable
+            .store(kind == Fail::Unusable, Ordering::Release);
         let due = if self.on_demand {
             u64::MAX
         } else {
