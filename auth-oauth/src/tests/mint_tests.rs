@@ -852,3 +852,73 @@ fn a_huge_expires_in_refreshes_within_24_hours() {
         );
     }
 }
+
+/// A need whose reply never ends: every read is another head piece, until a safety stop (a fault
+/// after 100 000 reads, so a loop with no bound ends the test rather than hangs it). With
+/// `clocked`, each clock reading is one second on the monotonic clock past the last.
+#[derive(Default)]
+struct Endless {
+    clocked: bool,
+    reads: std::sync::atomic::AtomicU64,
+    readings: std::sync::atomic::AtomicU64,
+}
+
+impl Wire for Endless {
+    fn open(&self, _: &TokenRequest, _: &mut SealedWrite, _: u64) -> Result<ConnId, ConnError> {
+        Ok(ConnId(9))
+    }
+    fn read(&self, _: ConnId, _: &mut [u8]) -> Result<Got, ConnError> {
+        if self.reads.fetch_add(1, Ordering::AcqRel) >= 100_000 {
+            return Err(ConnError::Fault);
+        }
+        Ok(Got {
+            kind: PieceKind::Fields,
+            len: 0,
+            end: false,
+            status: Some(200),
+            retry_after: None,
+        })
+    }
+    fn close(&self, _: ConnId) {}
+    fn clock(&self) -> Option<HostClock> {
+        let n = self.readings.fetch_add(1, Ordering::AcqRel);
+        self.clocked.then(|| HostClock {
+            wall_secs: now_epoch(),
+            mono_ns: n * S,
+        })
+    }
+}
+
+/// L5, THE READ LOOP IS BOUNDED IN ONE TICK: a reply whose pieces never end is abandoned at the
+/// mint deadline measured on the host's clock as it reads now (re-read each piece), not on the
+/// instant the tick began; with no host clock, one tick reads a bounded number of pieces and
+/// yields, the next tick judging the deadline anew. RED: the deadline was judged on the tick's
+/// fixed instant, so the loop ran on until the far end stopped.
+#[test]
+fn a_reply_that_never_ends_is_bounded_in_one_tick() {
+    let clocked = Endless {
+        clocked: true,
+        ..Endless::default()
+    };
+    let m = Minted::new(client_credentials(), DEFAULT_MAX_RESPONSE_BYTES);
+    let (_, report) = m.tick(0, now_epoch(), Some(&clocked));
+    assert!(
+        matches!(&report, Some(Report::MintFailed(e)) if e.contains("mint deadline")),
+        "{report:?}"
+    );
+    assert!(
+        clocked.reads.load(Ordering::Acquire) <= 2 * MINT_DEADLINE_SECS,
+        "abandoned at the deadline on the host's clock"
+    );
+
+    let bare = Endless::default();
+    let m = Minted::new(client_credentials(), DEFAULT_MAX_RESPONSE_BYTES);
+    let (due, report) = m.tick(0, now_epoch(), Some(&bare));
+    assert_eq!((due, report), (IN_FLIGHT_POLL_NS, None), "it yields");
+    assert!(
+        bare.reads.load(Ordering::Acquire) <= 10_000,
+        "a bounded number of reads: {}",
+        bare.reads.load(Ordering::Acquire)
+    );
+    assert!(!m.idle(), "the exchange goes on at the next tick");
+}
