@@ -115,12 +115,14 @@ impl Wire for Scripted {
                 len: 0,
                 end: false,
                 status: Some(s),
+                retry_after: None,
             }),
-            Step::HeadRetryAfter(s, _) => Ok(Got {
+            Step::HeadRetryAfter(s, value) => Ok(Got {
                 kind: PieceKind::Fields,
                 len: 0,
                 end: false,
                 status: Some(s),
+                retry_after: retry_after(value.as_bytes()),
             }),
             Step::Body(b, end) => {
                 buf[..b.len()].copy_from_slice(&b);
@@ -129,6 +131,7 @@ impl Wire for Scripted {
                     len: b.len(),
                     end,
                     status: None,
+                    retry_after: None,
                 })
             }
             Step::Done => Ok(Got {
@@ -136,6 +139,7 @@ impl Wire for Scripted {
                 len: 0,
                 end: true,
                 status: None,
+                retry_after: None,
             }),
             Step::Fail(e) => Err(e),
         }

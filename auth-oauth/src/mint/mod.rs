@@ -47,6 +47,11 @@ pub(crate) const MINT_DEADLINE_SECS: u64 = 30;
 pub(crate) const DEFAULT_MAX_RESPONSE_BYTES: usize = 256 * 1024;
 /// One read of a token response, in bytes.
 const READ_BUF_BYTES: usize = 16 * 1024;
+/// How long a token-exchange scope whose exchange failed is not retried (its negative-cache
+/// window) when the authorization server states no `Retry-After`: the other styles' retry interval.
+pub(crate) const EXCHANGE_BACKOFF_SECS: u64 = MIN_SLEEP_SECS;
+/// The longest window a `Retry-After` may set.
+pub(crate) const MAX_BACKOFF_SECS: u64 = 300;
 /// How long `tick` waits before reading an in-flight exchange again.
 pub(crate) const IN_FLIGHT_POLL_NS: u64 = 5_000_000;
 
@@ -310,6 +315,71 @@ pub(crate) struct Got {
     pub end: bool,
     /// The status number, where the wire reports one.
     pub status: Option<u32>,
+    /// The reply head's `Retry-After` (RFC 9110 §10.2.3), where it carries one.
+    pub retry_after: Option<RetryAfter>,
+}
+
+/// A reply's `Retry-After`: a delay in seconds, or an instant (epoch seconds).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RetryAfter {
+    /// `delay-seconds`.
+    Secs(u64),
+    /// An `HTTP-date`, as epoch seconds.
+    At(u64),
+}
+
+/// A `Retry-After` value (RFC 9110 §10.2.3): `delay-seconds`, or an `HTTP-date` in its preferred
+/// IMF-fixdate form; `None` for anything else (the default window applies).
+pub(crate) fn retry_after(value: &[u8]) -> Option<RetryAfter> {
+    let v = std::str::from_utf8(value).ok()?.trim();
+    if !v.is_empty() && v.bytes().all(|b| b.is_ascii_digit()) {
+        // Too many digits for a u64 is a delay longer than any cap.
+        return Some(RetryAfter::Secs(v.parse().unwrap_or(u64::MAX)));
+    }
+    imf_fixdate(v).map(RetryAfter::At)
+}
+
+/// An IMF-fixdate (`Sun, 06 Nov 1994 08:49:37 GMT`) as epoch seconds.
+fn imf_fixdate(v: &str) -> Option<u64> {
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let mut it = v.split(' ');
+    it.next()?.strip_suffix(',')?;
+    let day: u64 = it.next()?.parse().ok()?;
+    let mon = it.next()?;
+    let month = MONTHS.iter().position(|m| *m == mon)? as u64 + 1;
+    let year: u64 = it.next()?.parse().ok()?;
+    let mut hms = it.next()?.split(':');
+    let h: u64 = hms.next()?.parse().ok()?;
+    let m: u64 = hms.next()?.parse().ok()?;
+    let sec: u64 = hms.next()?.parse().ok()?;
+    if it.next()? != "GMT" || it.next().is_some() || hms.next().is_some() {
+        return None;
+    }
+    if !(1..=31).contains(&day) || !(1970..=9999).contains(&year) || h > 23 || m > 59 || sec > 60 {
+        return None;
+    }
+    // Days since the epoch of a proleptic Gregorian date (H. Hinnant's `days_from_civil`).
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = y / 400;
+    let yoe = y - era * 400;
+    let mp = (month + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = (era * 146_097 + doe).checked_sub(719_468)?;
+    Some(days * 86_400 + h * 3_600 + m * 60 + sec)
+}
+
+/// The negative-cache window of a failed exchange at wall-clock `wall`: the reply's `Retry-After`
+/// when it carried one, else [`EXCHANGE_BACKOFF_SECS`]; never past [`MAX_BACKOFF_SECS`].
+fn backoff_secs(retry: Option<RetryAfter>, wall: u64) -> u64 {
+    match retry {
+        None => EXCHANGE_BACKOFF_SECS,
+        Some(RetryAfter::Secs(s)) => s,
+        Some(RetryAfter::At(t)) => t.saturating_sub(wall),
+    }
+    .min(MAX_BACKOFF_SECS)
 }
 
 /// The plugin's own need, as the exchange uses it: the host's connection table
@@ -353,6 +423,8 @@ enum Exchange {
         conn: ConnId,
         started_ns: u64,
         status: Option<u32>,
+        /// The reply head's `Retry-After`, when it carried one.
+        retry_after: Option<RetryAfter>,
         /// The response so far: it carries the access token, so it grows only through
         /// [`append_wiped`] (no growth leaves an unwiped copy) and is wiped on drop.
         body: Zeroizing<Vec<u8>>,
@@ -414,6 +486,11 @@ pub(crate) struct Minted {
     usable_until: AtomicU64,
     /// The last failed mint was an outage of the token endpoint ([`Minted::outage`]).
     outage: AtomicBool,
+    /// An on-demand cell whose exchange failed is not retried before this wall-clock epoch second
+    /// (its negative-cache window: requests for its scope fail fast meanwhile); `0` = none.
+    retry_at: AtomicU64,
+    /// Why the on-demand cell's last exchange failed, answered to the requests in its window.
+    failure: Mutex<Option<String>>,
 }
 
 impl Minted {
@@ -431,6 +508,8 @@ impl Minted {
             refresh_failed: AtomicBool::new(false),
             usable_until: AtomicU64::new(0),
             outage: AtomicBool::new(false),
+            retry_at: AtomicU64::new(0),
+            failure: Mutex::new(None),
         }
     }
 
@@ -461,6 +540,48 @@ impl Minted {
     /// An on-demand cell holds a token it presents at wall-clock `now`.
     pub(crate) fn usable(&self, now: u64) -> bool {
         self.is_ready() && now < self.usable_until.load(Ordering::Acquire)
+    }
+
+    /// An on-demand cell whose exchange failed is inside its negative-cache window at wall-clock
+    /// `now`: its scope is not exchanged again until the window ends.
+    pub(crate) fn backing_off(&self, now: u64) -> bool {
+        now < self.retry_at.load(Ordering::Acquire)
+    }
+
+    /// Why a request for this cell's scope fails at once at wall-clock `now`: the cached failure,
+    /// while the cell backs off; `None` outside the window.
+    pub(crate) fn backoff_reason(&self, now: u64) -> Option<String> {
+        let until = self.retry_at.load(Ordering::Acquire);
+        if now >= until {
+            return None;
+        }
+        let why = self
+            .failure
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+            .unwrap_or_default();
+        Some(format!(
+            "the RFC 8693 token exchange for this call's scope failed ({why}); it is not tried \
+             again for {} s, and the call is refused rather than made unauthenticated",
+            until - now
+        ))
+    }
+
+    /// An on-demand cell's exchange failed at wall-clock `wall` for `why`: its scope backs off for
+    /// the window `retry` sets ([`backoff_secs`]). A scheduled cell retries on its own schedule.
+    fn back_off(&self, wall: u64, retry: Option<RetryAfter>, why: &str) {
+        if !self.on_demand {
+            return;
+        }
+        *self
+            .failure
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(why.to_string());
+        self.retry_at.store(
+            wall.saturating_add(backoff_secs(retry, wall)),
+            Ordering::Release,
+        );
     }
 
     fn current(&self) -> Arc<CachedToken> {
@@ -550,14 +671,16 @@ impl Minted {
                 return self.failed(
                     &mut ex,
                     now_ns,
+                    wall,
                     "token endpoint request failed: no connection was granted for the token endpoint"
                         .to_string(),
                     false,
+                    None,
                 );
             };
             let req = match self.minter.request(wall) {
                 Ok(r) => r,
-                Err(e) => return self.failed(&mut ex, now_ns, e, false),
+                Err(e) => return self.failed(&mut ex, now_ns, wall, e, false, None),
             };
             // The chip encodes the form (and signs a JWT-bearer assertion) as it is written.
             let mut body = match req.body.encoded() {
@@ -566,8 +689,10 @@ impl Minted {
                     return self.failed(
                         &mut ex,
                         now_ns,
+                        wall,
                         format!("the token request could not be built: {r}"),
                         false,
+                        None,
                     )
                 }
             };
@@ -577,6 +702,7 @@ impl Minted {
                         conn,
                         started_ns: now_ns,
                         status: None,
+                        retry_after: None,
                         // Nothing reserved up front: the body grows to what arrives, bounded by
                         // the cap ([`append_wiped`]).
                         body: Zeroizing::new(Vec::new()),
@@ -586,8 +712,10 @@ impl Minted {
                     return self.failed(
                         &mut ex,
                         now_ns,
+                        wall,
                         format!("token endpoint request failed: {}", conn_cause(e)),
                         unreachable(e),
+                        None,
                     )
                 }
             }
@@ -599,6 +727,7 @@ impl Minted {
             conn,
             started_ns,
             status,
+            retry_after,
             body,
         } = &mut *ex
         else {
@@ -619,6 +748,9 @@ impl Minted {
                 Ok(got) => {
                     if got.status.is_some() {
                         *status = got.status;
+                    }
+                    if got.retry_after.is_some() {
+                        *retry_after = got.retry_after;
                     }
                     if got.kind == PieceKind::Body {
                         if let Err(e) = append_wiped(body, &buf[..got.len], self.max_response_bytes)
@@ -661,6 +793,7 @@ impl Minted {
                 }
             }
         };
+        let retry = *retry_after;
         wire.close(conn);
         match finished.and_then(|(status, body)| {
             parse_response(u16::try_from(status).unwrap_or(0), &body, wall)
@@ -672,6 +805,11 @@ impl Minted {
             // self-healing. Retry at MIN_SLEEP instead, exactly like a mint error.
             Ok((fresh, _)) if fresh.token.is_empty() => {
                 self.refresh_failed.store(true, Ordering::Release);
+                self.back_off(
+                    wall,
+                    retry,
+                    "the authorization server returned 200 with an empty access_token",
+                );
                 let due = if self.on_demand {
                     u64::MAX
                 } else {
@@ -685,6 +823,11 @@ impl Minted {
             // calls with nothing to present fail rather than go out unauthenticated.
             Ok((_, true)) => {
                 self.refresh_failed.store(true, Ordering::Release);
+                self.back_off(
+                    wall,
+                    retry,
+                    "the exchanged token holds bytes invalid in a header value",
+                );
                 let due = if self.on_demand {
                     u64::MAX
                 } else {
@@ -710,12 +853,13 @@ impl Minted {
                 if self.on_demand {
                     self.usable_until
                         .store(now.saturating_add(ahead), Ordering::Release);
+                    self.retry_at.store(0, Ordering::Release);
                 }
                 self.refresh_failed.store(false, Ordering::Release);
                 *ex = Exchange::Idle { due_ns: due };
                 (due, Some(Report::Minted))
             }
-            Err((e, outage)) => self.failed(&mut ex, now_ns, e, outage),
+            Err((e, outage)) => self.failed(&mut ex, now_ns, wall, e, outage, retry),
         }
     }
 
@@ -725,16 +869,20 @@ impl Minted {
         self.outage.load(Ordering::Acquire)
     }
 
-    /// A failed mint: keep serving whatever token is current, and retry at `MIN_SLEEP_SECS` (an
-    /// on-demand cell retries when a request next arms it).
+    /// A failed mint at tick-clock `now_ns` and wall-clock `wall`: keep serving whatever token is
+    /// current, and retry at `MIN_SLEEP_SECS` (an on-demand cell retries when a request next arms
+    /// it, after its negative-cache window: `retry`, the reply's `Retry-After`, sets it).
     fn failed(
         &self,
         ex: &mut Exchange,
         now_ns: u64,
+        wall: u64,
         e: String,
         outage: bool,
+        retry: Option<RetryAfter>,
     ) -> (u64, Option<Report>) {
         self.refresh_failed.store(true, Ordering::Release);
+        self.back_off(wall, retry, &e);
         self.outage.store(outage, Ordering::Release);
         let due = if self.on_demand {
             u64::MAX

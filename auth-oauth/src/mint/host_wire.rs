@@ -27,7 +27,7 @@ use busbar_contract::abi::sdk::cred::SealedWrite;
 use busbar_contract::abi::transport::{fields, FrameSpan};
 use busbar_contract::conn::{ConnError, ConnId, PieceKind};
 
-use super::{Got, HostClock, TokenRequest, Wire};
+use super::{retry_after, Got, HostClock, TokenRequest, Wire};
 
 /// The connector for one entry of the driver ticket's cycle.
 pub(crate) struct HostWire<'a> {
@@ -128,6 +128,23 @@ fn head(req: &TokenRequest, timeout_ms: u64) -> Result<(Vec<u8>, RequestPiece), 
     Ok((bytes, piece))
 }
 
+/// The `retry-after` of a reply head whose field block the host wrote in the first
+/// `written` bytes of `buf` at `block_span` (the only field this plugin reads beyond the code);
+/// `None` when it
+/// carries none, or the span lies outside what was written.
+fn head_retry_after(
+    buf: &[u8],
+    written: usize,
+    block_span: FrameSpan,
+) -> Option<super::RetryAfter> {
+    let at = usize::try_from(block_span.offset).ok()?;
+    let len = usize::try_from(block_span.len).ok()?;
+    let block = buf.get(..written)?.get(at..at.checked_add(len)?)?;
+    fields::lines(block)
+        .find(|(name, _)| name.eq_ignore_ascii_case(b"retry-after"))
+        .and_then(|(_, value)| retry_after(value))
+}
+
 impl Wire for HostWire<'_> {
     fn open(
         &self,
@@ -178,18 +195,21 @@ impl Wire for HostWire<'_> {
                     len: 0,
                     end: false,
                     status: Some(got.piece.code),
+                    retry_after: head_retry_after(buf, got.len, got.piece.fields),
                 }),
                 REPLY_BODY => Ok(Got {
                     kind: PieceKind::Body,
                     len: got.len,
                     end: false,
                     status: None,
+                    retry_after: None,
                 }),
                 REPLY_END | REPLY_ACK => Ok(Got {
                     kind: PieceKind::Completion,
                     len: 0,
                     end: true,
                     status: None,
+                    retry_after: None,
                 }),
                 _ => Err(ConnError::Fault),
             },
