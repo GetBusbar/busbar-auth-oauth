@@ -341,3 +341,52 @@ fn a_forwarded_key_a_style_does_not_read_is_ignored_with_one_warn() {
     ));
     assert_eq!(l, ["settings: unknown key `resource`"]);
 }
+
+/// O7, `scope` IS OPTIONAL FOR CLIENT CREDENTIALS (RFC 6749 §4.4.2): a binding with no `scope`
+/// opens, and its token request carries no `scope` (the endpoint's default applies); a `scope`
+/// that is present but blank is still refused, naming it. RED: an absent scope was refused.
+#[test]
+fn a_client_credentials_binding_without_a_scope_requests_none() {
+    #[derive(Default)]
+    struct Forms(Mutex<Vec<String>>);
+    impl TokenCache for Forms {
+        fn cell(&self, _key: [u8; 32], minter: Minter, max: usize) -> Arc<Minted> {
+            let form = crate::test_support::form_text(&minter.request(0).expect("a request").body);
+            self.0.lock().unwrap().push(form);
+            Arc::new(Minted::new(minter, max))
+        }
+        fn key(&self, parts: &[&[u8]]) -> [u8; 32] {
+            digest(parts)
+        }
+    }
+    let forms = Forms::default();
+    for settings in [
+        r#"{"token_url":"https://i/t"}"#,
+        r#"{"token_url":"https://i/t","scope":"s"}"#,
+    ] {
+        assert!(
+            open_binding(
+                OAUTH_CLIENT_CREDENTIALS,
+                Some(b"id:secret"),
+                Some(settings.as_bytes()),
+                &forms
+            )
+            .is_ok(),
+            "{settings}"
+        );
+    }
+    assert_eq!(
+        *forms.0.lock().unwrap(),
+        [
+            "grant_type=client_credentials&client_id=id&client_secret=secret",
+            "grant_type=client_credentials&client_id=id&client_secret=secret&scope=s",
+        ]
+    );
+    let l = lines(open(
+        OAUTH_CLIENT_CREDENTIALS,
+        Some("id:secret"),
+        r#"{"token_url":"https://i/t","scope":"  "}"#,
+    ));
+    assert_eq!(l.len(), 1, "{l:?}");
+    assert!(l[0].contains("scope"), "the blank key is named: {l:?}");
+}
