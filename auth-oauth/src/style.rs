@@ -18,7 +18,10 @@
 //! | `oauth-token-exchange` | `{token_url, resource, subject_token_type?, max_response_bytes?}` |
 //!
 //! A key outside a style's row is refused (`settings: unknown key `<k>``), so a typo never
-//! silently falls back to a default.
+//! silently falls back to a default, unless core forwards it to every style from its shared
+//! provider schema (`token_url`, `token_uri`, `scope`, `subject`): a style that does not read such
+//! a key binds all the same and logs one WARN for it (`settings.<k>: not used by the <style>
+//! style; ignored`).
 //!
 //! `oauth-token-exchange` (RFC 8693) binds busbar's own
 //! subject token (the credential) and mints nothing at open: each request's scope (the call's
@@ -150,19 +153,33 @@ pub(crate) fn instance_keys(m: &Map<String, Value>) -> Result<(), Vec<Refusal>> 
     }
 }
 
-/// Refuse every key the style does not document, naming it: a typo'd optional key must not
-/// silently fall back to its default.
-fn deny_unknown(m: &Map<String, Value>, allowed: &[&str]) -> Result<(), Vec<Refusal>> {
+/// The keys core forwards from its shared provider/style schema to every style's open (the kind
+/// rule, lead ruling 2026-10-30, as sigv4 and header): a style that does not read one ignores it,
+/// with one WARN at the open, and never refuses it.
+const FORWARDED_KEYS: &[&str] = &["token_url", "token_uri", "scope", "subject"];
+
+/// Refuse every key the style does not document and core does not forward, naming it: a typo'd
+/// optional key must not silently fall back to its default. A forwarded key the style does not
+/// read is logged as ignored, once per key.
+fn deny_unknown(m: &Map<String, Value>, allowed: &[&str], style: &str) -> Result<(), Vec<Refusal>> {
     let unknown: Vec<Refusal> = m
         .keys()
-        .filter(|k| !allowed.contains(&k.as_str()))
+        .filter(|k| !allowed.contains(&k.as_str()) && !FORWARDED_KEYS.contains(&k.as_str()))
         .map(|k| Refusal::Settings(format!("unknown key `{k}`")))
         .collect();
-    if unknown.is_empty() {
-        Ok(())
-    } else {
-        Err(unknown)
+    if !unknown.is_empty() {
+        return Err(unknown);
     }
+    for key in m
+        .keys()
+        .filter(|k| !allowed.contains(&k.as_str()) && FORWARDED_KEYS.contains(&k.as_str()))
+    {
+        tracing::warn!(
+            module = "oauth",
+            "settings.{key}: not used by the {style} style; ignored"
+        );
+    }
+    Ok(())
 }
 
 /// The settings object (`{}` when absent).
@@ -249,7 +266,7 @@ fn open_token_exchange(
     cache: &dyn TokenCache,
 ) -> Result<ExchangeBinding, Vec<Refusal>> {
     let m = object(settings).map_err(|r| vec![r])?;
-    deny_unknown(&m, OAUTH_TOKEN_EXCHANGE_KEYS)?;
+    deny_unknown(&m, OAUTH_TOKEN_EXCHANGE_KEYS, OAUTH_TOKEN_EXCHANGE)?;
     let subject = match credential.map(std::str::from_utf8) {
         None => None,
         Some(Ok(s)) => Some(s),
@@ -326,8 +343,10 @@ pub fn open_binding(
 ) -> Result<Arc<Minted>, Vec<Refusal>> {
     let m = object(settings).map_err(|r| vec![r])?;
     match style {
-        OAUTH_CLIENT_CREDENTIALS => deny_unknown(&m, OAUTH_CLIENT_CREDENTIALS_KEYS)?,
-        JWT_BEARER => deny_unknown(&m, JWT_BEARER_KEYS)?,
+        OAUTH_CLIENT_CREDENTIALS => {
+            deny_unknown(&m, OAUTH_CLIENT_CREDENTIALS_KEYS, OAUTH_CLIENT_CREDENTIALS)?;
+        }
+        JWT_BEARER => deny_unknown(&m, JWT_BEARER_KEYS, JWT_BEARER)?,
         _ => {}
     }
     let credential_text = match credential.map(std::str::from_utf8) {
