@@ -33,6 +33,8 @@ pub(crate) enum Step {
     Pending,
     /// The response head, with this status.
     Head(u32),
+    /// The response head, with this status and this `retry-after` value.
+    HeadRetryAfter(u32, &'static str),
     /// Body bytes; `end` ends the frame.
     Body(Vec<u8>, bool),
     /// The exchange finished.
@@ -109,6 +111,12 @@ impl Wire for Scripted {
         match steps.pop_front().ok_or(ConnError::Closed)? {
             Step::Pending => Err(ConnError::Pending),
             Step::Head(s) => Ok(Got {
+                kind: PieceKind::Fields,
+                len: 0,
+                end: false,
+                status: Some(s),
+            }),
+            Step::HeadRetryAfter(s, _) => Ok(Got {
                 kind: PieceKind::Fields,
                 len: 0,
                 end: false,
