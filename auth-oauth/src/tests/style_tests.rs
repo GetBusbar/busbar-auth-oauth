@@ -420,3 +420,63 @@ fn max_response_bytes_outside_1024_to_1048576_is_refused_by_name() {
         );
     }
 }
+
+/// T2: THE SETTING REACHES THE CELL: each style's `max_response_bytes` is the cap its cell (or,
+/// for a token exchange, each scope's cell) is made with; unset, the 256 KiB default.
+#[test]
+fn max_response_bytes_reaches_the_cell() {
+    #[derive(Default)]
+    struct Caps(Mutex<Vec<usize>>);
+    impl TokenCache for Caps {
+        fn cell(&self, _key: [u8; 32], minter: Minter, max: usize) -> Arc<Minted> {
+            self.0.lock().unwrap().push(max);
+            Arc::new(Minted::new(minter, max))
+        }
+        fn key(&self, parts: &[&[u8]]) -> [u8; 32] {
+            digest(parts)
+        }
+    }
+    let sa = serde_json::json!({
+        "client_email": "svc@proj.example.test",
+        "private_key": include_str!("fixtures/test_sa_key.pem"),
+    })
+    .to_string();
+    let caps = Caps::default();
+    for (style, cred, settings) in [
+        (
+            OAUTH_CLIENT_CREDENTIALS,
+            "id:secret",
+            r#"{"token_url":"https://i/t","max_response_bytes":2048}"#,
+        ),
+        (
+            OAUTH_CLIENT_CREDENTIALS,
+            "id:secret",
+            r#"{"token_url":"https://i/t"}"#,
+        ),
+        (JWT_BEARER, sa.as_str(), r#"{"max_response_bytes":4096}"#),
+    ] {
+        assert!(
+            open_binding(
+                style,
+                Some(cred.as_bytes()),
+                Some(settings.as_bytes()),
+                &caps
+            )
+            .is_ok(),
+            "{style} {settings}"
+        );
+    }
+    assert_eq!(
+        *caps.0.lock().unwrap(),
+        [2048, crate::mint::DEFAULT_MAX_RESPONSE_BYTES, 4096]
+    );
+    let Ok(Binding::Exchange(x)) = super::open(
+        OAUTH_TOKEN_EXCHANGE,
+        Some(b"subject"),
+        Some(br#"{"token_url":"https://i/t","resource":"r","max_response_bytes":8192}"#),
+        &caps,
+    ) else {
+        panic!("the exchange binding opens")
+    };
+    assert_eq!(x.minter(b"s").1, 8192);
+}
