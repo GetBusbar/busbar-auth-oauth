@@ -1162,3 +1162,15 @@ fn a_mint_with_no_plausible_wall_clock_fails_at_warn() {
         "{m:?}"
     );
 }
+
+/// L1: THE WALL CLOCK NEVER MOVES BACKWARDS: an older reading (a call's own timestamp read before
+/// a newer tick's, racing it) leaves the newest one in place. RED: the last writer won.
+#[test]
+fn an_older_wall_clock_reading_never_moves_the_clock_back() {
+    let o = Oauth::new(1);
+    o.saw_wall(1_800_000_100);
+    o.saw_wall(1_800_000_000);
+    assert_eq!(o.wall_secs(), 1_800_000_100);
+    o.saw_wall(0);
+    assert_eq!(o.wall_secs(), 1_800_000_100, "no reading is no reading");
+}
