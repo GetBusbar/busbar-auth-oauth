@@ -89,8 +89,8 @@ fn form(body: &str) -> Vec<(String, String)> {
 
 /// THE REQUEST, FIELD FOR FIELD: the previous release's RFC 8693 form in RFC order — the grant,
 /// busbar's own subject token and its type, an access token requested back, the RFC 8707 resource,
-/// and the scope (present and empty when the call states none) — POSTed as a form to `token_url`
-/// over the need that names it.
+/// and the scope (absent when the call states none, L6) — POSTed as a form to `token_url` over
+/// the need that names it.
 #[test]
 fn the_exchange_request_is_the_previous_releases_form_with_the_stated_scope() {
     let x = Arc::new(build(
@@ -112,7 +112,7 @@ fn the_exchange_request_is_the_previous_releases_form_with_the_stated_scope() {
         ]
     );
     let expected = |scope: &str| {
-        vec![
+        let mut pairs = vec![
             ("grant_type".to_string(), GRANT_TYPE.to_string()),
             ("subject_token".to_string(), SUBJECT.to_string()),
             (
@@ -127,8 +127,11 @@ fn the_exchange_request_is_the_previous_releases_form_with_the_stated_scope() {
                 "resource".to_string(),
                 "https://tools.example/rpc".to_string(),
             ),
-            ("scope".to_string(), scope.to_string()),
-        ]
+        ];
+        if !scope.is_empty() {
+            pairs.push(("scope".to_string(), scope.to_string()));
+        }
+        pairs
     };
     assert_eq!(
         form(&crate::test_support::form_text(&req.body)),

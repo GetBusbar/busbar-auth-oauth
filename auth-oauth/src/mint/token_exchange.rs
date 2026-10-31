@@ -12,10 +12,12 @@
 //! blob), so each distinct scope is its own exchange and its own cached token — two scopes never
 //! share a token.
 //!
-//! The request is the previous release's byte for byte (its `ExchangeRequest::form_fields`): the
-//! form fields in RFC order, `grant_type`, `subject_token`, `subject_token_type`,
-//! `requested_token_type` (always an access token), `resource`, `scope` (present, empty when the
-//! call states none), POSTed to `token_url` over the plugin's own need.
+//! The request is the previous release's byte for byte (its `ExchangeRequest::form_fields`) when
+//! the call states a scope: the form fields in RFC order, `grant_type`, `subject_token`,
+//! `subject_token_type`, `requested_token_type` (always an access token), `resource`, `scope`,
+//! POSTed to `token_url` over the plugin's own need. A call that states no scope sends no `scope`
+//! (RFC 8693 §2.1: OPTIONAL; the previous release sent `scope=`, which RFC 6749 §3.3 does not
+//! allow).
 
 use std::sync::Arc;
 
@@ -106,8 +108,12 @@ impl Scoped {
             .sealed("subject_token", &x.subject_token)
             .public("subject_token_type", &x.subject_token_type)
             .public("requested_token_type", ACCESS_TOKEN_TYPE)
-            .public("resource", &x.resource)
-            .public("scope", &self.scope);
+            .public("resource", &x.resource);
+        let form = if self.scope.is_empty() {
+            form
+        } else {
+            form.public("scope", &self.scope)
+        };
         Ok(TokenRequest::form(
             super::need::TOKEN_URL,
             x.token_url.clone(),
