@@ -326,7 +326,9 @@ fn a_forwarded_key_a_style_does_not_read_is_ignored_with_one_warn() {
         for key in ignored {
             let want = format!("settings.{key}: not used by the {style} style; ignored");
             assert!(
-                warned.iter().any(|l| l.contains(&want) && l.contains("module=oauth")),
+                warned
+                    .iter()
+                    .any(|l| l.contains(&want) && l.contains("module=oauth")),
                 "{style}: {want} in {warned:?}"
             );
         }

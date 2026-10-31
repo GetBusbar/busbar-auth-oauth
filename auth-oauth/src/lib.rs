@@ -266,7 +266,18 @@ impl Oauth {
         let scope = ask.scope.unwrap_or_default();
         let key = x.scope_key(scope);
         // The lookup and the park are one critical section with the cache (instance.rs).
-        let cell = self.exchange_cell(key, || x.minter(scope), ticket, |c| c.usable(now));
+        // A call parks only when it would wait: not on a usable token, nor on a scope backing off
+        // after a failed exchange (that call fails at once, below).
+        let cell = self.exchange_cell(
+            key,
+            || x.minter(scope),
+            ticket,
+            |c| c.usable(now) || c.backing_off(now),
+        );
+        if let Some(why) = cell.backoff_reason(now) {
+            self.unpark_exchange(key, ticket);
+            return Poll::Ready(FieldsAnswer::Failed(Cow::Owned(why)));
+        }
         cell.read(now, |r| match r {
             Read::Header(h) => {
                 self.unpark_exchange(key, ticket);

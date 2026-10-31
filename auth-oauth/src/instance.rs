@@ -209,9 +209,10 @@ impl Oauth {
     /// THE CELL OF AN ON-DEMAND SCOPE, looked up (or made) and, for a call on `ticket` that will
     /// wait, that ticket parked on it, in ONE critical section with the cache: a tick that settles
     /// the cell either ran before (and the call finds or makes the cell anew) or after (and finds
-    /// the ticket waiting, so it keeps the cell). `usable` says whether the call would present the
-    /// cell's token now; a ticket that would wait is parked BEFORE the token is read, so an
-    /// exchange that lands meanwhile still finds it.
+    /// the ticket waiting, so it keeps the cell). `usable` says whether the call answers now (it
+    /// would present the cell's token, or the cell backs off and the call fails at once); a ticket
+    /// that would wait is parked BEFORE the token is read, so an exchange that lands meanwhile
+    /// still finds it.
     pub(crate) fn exchange_cell(
         &self,
         key: [u8; 32],
@@ -479,9 +480,11 @@ impl Oauth {
 
     /// AN ON-DEMAND CELL'S TICK, settled: a landed exchange wakes the tickets waiting on it; a
     /// failed one fails them (each is woken, and its resumed call answers FAILED), naming why in
-    /// the instance's log; a cell no request waits on, with nothing in flight and no token it would
-    /// present, is dropped from the cache (its scope's next request makes it again) — judged under
-    /// the cache's lock, so a call looking the cell up and parking on it is never split from it.
+    /// the instance's log; a cell no request waits on, with nothing in flight, no token it would
+    /// present and no negative-cache window running (a failed exchange's cell is kept for its
+    /// window, so its scope's requests fail fast rather than re-hit the authorization server), is
+    /// dropped from the cache (its scope's next request makes it again) — judged under the
+    /// cache's lock, so a call looking the cell up and parking on it is never split from it.
     fn settle_exchange(
         &self,
         key: [u8; 32],
@@ -541,7 +544,8 @@ impl Oauth {
         let waited = lock(&self.exchange_waiters)
             .get(&key)
             .is_some_and(|w| !w.is_empty());
-        if !waited && cell.idle() && !cell.usable(self.wall_secs()) {
+        let now = self.wall_secs();
+        if !waited && cell.idle() && !cell.usable(now) && !cell.backing_off(now) {
             cache.remove(&key);
         }
     }

@@ -16,7 +16,7 @@ use busbar_contract::conn::{ConnError, ConnId};
 
 use super::*;
 use crate::instance::Oauth;
-use crate::mint::tests::{Scripted, Step};
+use crate::mint::tests::{now_epoch, Scripted, Step};
 use crate::mint::{Got, Wire};
 use crate::style;
 use crate::test_support::{self, TestHost};
@@ -296,8 +296,8 @@ fn two_bindings_on_one_instance_never_share_a_scopes_token() {
 
 /// A FAILED EXCHANGE FAILS ITS CALLS: the authorization server's refusal wakes every call that
 /// waited on it, and each answers FAILED (the attempt fails; nothing unauthenticated is sent), the
-/// instance's log naming why; the scope's next call arms a fresh exchange rather than inheriting
-/// the failure.
+/// instance's log naming why; the scope's next call after the failure's back-off window (O3) arms
+/// a fresh exchange rather than inheriting the failure.
 #[test]
 fn a_refused_exchange_fails_the_calls_that_waited_and_the_next_call_asks_again() {
     let host = TestHost::new();
@@ -324,8 +324,12 @@ fn a_refused_exchange_fails_the_calls_that_waited_and_the_next_call_asks_again()
             .any(|(id, _, _)| id == crate::instance::diag::OAUTH_MINT_FAILED),
         "the failure is logged"
     );
-    // The next call is not failed by the last one: it arms a fresh exchange.
-    assert_eq!(fields(&o, &host, h, later, Some("s")).0, Outcome::Pending);
+    // The next call after the back-off window is not failed by the last one: it arms a fresh
+    // exchange.
+    assert_eq!(
+        test_support::fields_at(&o, &host, h, later, Some("s"), now_epoch() + 31).0,
+        Outcome::Pending
+    );
     w.ok(r#"{"access_token":"tok-s","expires_in":3600}"#);
     o.tick(2_000, Ticket::NONE, Some(&host.host), &mut diags);
     assert_eq!(host.take(), vec![later]);
@@ -433,9 +437,10 @@ fn an_exchanged_token_with_invalid_header_bytes_fails_the_calls_that_waited() {
         "the un-encodable token is logged"
     );
     assert_eq!(
-        fields(&o, &host, h, later, Some("s")).0,
+        test_support::fields_at(&o, &host, h, later, Some("s"), now_epoch() + 31).0,
         Outcome::Pending,
-        "the next call arms a fresh exchange; the un-encodable token is not served"
+        "the next call after the back-off window arms a fresh exchange; the un-encodable token \
+         is not served"
     );
 }
 
@@ -467,8 +472,9 @@ fn a_token_exchange_binding_is_not_ready_while_its_last_exchange_failed() {
     );
     assert!(!o.ready(h), "its last exchange failed: not ready");
     assert_eq!(
-        fields(&o, &host, h, ticket(302), Some("s")).0,
-        Outcome::Pending
+        test_support::fields_at(&o, &host, h, ticket(302), Some("s"), now_epoch() + 31).0,
+        Outcome::Pending,
+        "after the back-off window a request arms a fresh exchange"
     );
     w.ok(r#"{"access_token":"tok-s","expires_in":3600}"#);
     o.tick(2_000, Ticket::NONE, Some(&host.host), &mut diags);
@@ -592,7 +598,11 @@ fn a_failed_exchange_backs_off_for_its_window_and_fails_fast_meanwhile() {
     b.w.push(vec![Step::Head(503), Step::Body(b"busy".to_vec(), true)]);
     b.tick(T0);
     assert_eq!(b.sent(), 1);
-    assert_eq!(b.call(ticket(501), "s", T0), Outcome::Failed, "the waiter fails");
+    assert_eq!(
+        b.call(ticket(501), "s", T0),
+        Outcome::Failed,
+        "the waiter fails"
+    );
     for at in [T0 + 1, T0 + 29] {
         assert_eq!(
             b.call(ticket(502), "s", at),
@@ -600,7 +610,11 @@ fn a_failed_exchange_backs_off_for_its_window_and_fails_fast_meanwhile() {
             "inside the window the scope fails fast ({at})"
         );
         b.tick(at);
-        assert_eq!(b.sent(), 1, "nothing re-hits the authorization server ({at})");
+        assert_eq!(
+            b.sent(),
+            1,
+            "nothing re-hits the authorization server ({at})"
+        );
     }
     assert_eq!(
         b.call(ticket(503), "s", T0 + 31),
