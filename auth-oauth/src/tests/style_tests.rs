@@ -57,6 +57,28 @@ fn lines(r: Result<Arc<Minted>, Vec<Refusal>>) -> Vec<String> {
     }
 }
 
+#[test]
+fn a_blank_optional_setting_is_refused_instead_of_using_its_default() {
+    let refused = lines(open(
+        OAUTH_CLIENT_CREDENTIALS,
+        Some("client:secret"),
+        r#"{"token_url":"https://i/t","scope":" \t "}"#,
+    ));
+    assert!(refused.iter().any(|line| line.contains("scope")));
+
+    let refused = super::open(
+        OAUTH_TOKEN_EXCHANGE,
+        Some(b"subject"),
+        Some(br#"{"token_url":"https://i/t","resource":"https://upstream","subject_token_type":" "}"#),
+        &Cache::default(),
+    )
+    .err()
+    .expect("a blank token type must not become the default");
+    assert!(refused
+        .iter()
+        .any(|r| r.line().contains("subject_token_type")));
+}
+
 /// `oauth-client-credentials`: 1.5.5's `config_validate` findings, in its order, each the words
 /// BOOT-030 / BOOT-034 / BOOT-035 pin after the kernel's `provider '<p>' ` prefix.
 #[test]
