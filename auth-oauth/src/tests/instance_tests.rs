@@ -1178,3 +1178,36 @@ fn an_older_wall_clock_reading_never_moves_the_clock_back() {
     o.saw_wall(0);
     assert_eq!(o.wall_secs(), 1_800_000_100, "no reading is no reading");
 }
+
+/// L7: A SCHEDULED MINT THAT GETS AN EMPTY OR AN UNPRESENTABLE TOKEN IS LOGGED, one WARN each
+/// (`module = "oauth"`), as every other failed mint is: the calls it fails are explained in the
+/// plugin's own log, not the diagnostic channel alone. RED: neither was logged.
+#[test]
+fn an_empty_or_unpresentable_scheduled_token_is_logged_at_warn() {
+    use busbar_test_kit::warn_capture::WarnCapture;
+    for (body, named) in [
+        (r#"{"access_token":"","token_type":"Bearer"}"#, "empty"),
+        (
+            "{\"access_token\":\"bad\\u0001token\",\"token_type\":\"Bearer\"}",
+            "header value",
+        ),
+    ] {
+        let cap = WarnCapture::default();
+        tracing::subscriber::with_default(cap.clone(), || {
+            let host = TestHost::new();
+            let w = Arc::new(Scripted::default());
+            let o = instance(&w);
+            open(
+                &o,
+                style::OAUTH_CLIENT_CREDENTIALS,
+                "id:secret",
+                r#"{"token_url":"https://idp.example/token","scope":"s"}"#,
+            );
+            w.ok(body);
+            o.tick(1_000, Ticket::NONE, Some(&host.host), &mut Diags::default());
+        });
+        let m = cap.messages();
+        assert_eq!(cap.count("module=oauth"), 1, "{body}: {m:?}");
+        assert!(m[0].contains(named), "{body}: {m:?}");
+    }
+}
