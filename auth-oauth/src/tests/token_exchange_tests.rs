@@ -703,3 +703,63 @@ fn a_token_exchange_binding_is_ready_unless_every_tried_scope_is_failing() {
     );
     assert_eq!(b.sent(), 1, "readiness came back without an exchange");
 }
+
+/// O6, THE ISSUED TOKEN TYPE IS CHECKED (RFC 8693 §2.2.1): an exchange whose `issued_token_type`
+/// is stated and is neither an access token nor a JWT (`urn:ietf:params:oauth:token-type:
+/// access_token` / `:jwt`), or whose `token_type` is `N_A` (no bearer at all), fails the calls
+/// that waited on it, its diagnostic naming why; an access token or a JWT is presented. RED: the
+/// reply's types were never read, so a refresh token was presented as a bearer.
+#[test]
+fn an_exchange_issuing_no_access_token_fails_its_calls() {
+    for (body, presented, named) in [
+        (
+            r#"{"access_token":"t","token_type":"Bearer","issued_token_type":"urn:ietf:params:oauth:token-type:refresh_token"}"#,
+            false,
+            "issued_token_type",
+        ),
+        (
+            r#"{"access_token":"t","token_type":"N_A","issued_token_type":"urn:ietf:params:oauth:token-type:access_token"}"#,
+            false,
+            "N_A",
+        ),
+        (
+            r#"{"access_token":"t","token_type":"Bearer","issued_token_type":"urn:ietf:params:oauth:token-type:jwt"}"#,
+            true,
+            "",
+        ),
+        (
+            r#"{"access_token":"t","token_type":"Bearer","issued_token_type":"urn:ietf:params:oauth:token-type:access_token"}"#,
+            true,
+            "",
+        ),
+    ] {
+        let host = TestHost::new();
+        let w = Arc::new(Scripted::default());
+        let o = instance(&w);
+        let h = open(&o);
+        assert_eq!(
+            fields(&o, &host, h, ticket(801), Some("s")).0,
+            Outcome::Pending
+        );
+        w.ok(body);
+        let mut diags = Diags::default();
+        o.tick(1_000, Ticket::NONE, Some(&host.host), &mut diags);
+        let (outcome, written) = fields(&o, &host, h, ticket(801), Some("s"));
+        if presented {
+            assert_eq!(
+                (outcome, written.as_str()),
+                (Outcome::Ready, "authorization: Bearer t"),
+                "{body}"
+            );
+        } else {
+            assert_eq!(outcome, Outcome::Failed, "{body}");
+            assert!(
+                diags.iter().any(
+                    |(id, _, text)| id == crate::instance::diag::OAUTH_MINT_FAILED
+                        && text.contains(named)
+                ),
+                "{body}: the diagnostic names {named}"
+            );
+        }
+    }
+}
