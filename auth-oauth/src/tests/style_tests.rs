@@ -388,3 +388,35 @@ fn a_client_credentials_binding_without_a_scope_requests_none() {
     assert_eq!(l.len(), 1, "{l:?}");
     assert!(l[0].contains("scope"), "the blank key is named: {l:?}");
 }
+
+/// O9, `max_response_bytes` IS BOUNDED: a cap outside [1024, 1048576] (0 among them, which would
+/// refuse every reply) is refused, naming the key; the bounds themselves are accepted. RED: any
+/// value was accepted.
+#[test]
+fn max_response_bytes_outside_1024_to_1048576_is_refused_by_name() {
+    for bad in [0_u64, 1023, 1_048_577, u64::MAX] {
+        let l = lines(open(
+            OAUTH_CLIENT_CREDENTIALS,
+            Some("id:secret"),
+            &format!(r#"{{"token_url":"https://i/t","scope":"s","max_response_bytes":{bad}}}"#),
+        ));
+        assert_eq!(l.len(), 1, "{bad}: {l:?}");
+        assert!(
+            l[0].starts_with("settings") && l[0].contains("max_response_bytes"),
+            "{bad}: {l:?}"
+        );
+    }
+    for good in [1024_u64, 1_048_576] {
+        assert!(
+            open(
+                OAUTH_CLIENT_CREDENTIALS,
+                Some("id:secret"),
+                &format!(
+                    r#"{{"token_url":"https://i/t","scope":"s","max_response_bytes":{good}}}"#
+                ),
+            )
+            .is_ok(),
+            "{good}"
+        );
+    }
+}
