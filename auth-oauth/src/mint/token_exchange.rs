@@ -29,6 +29,8 @@ pub(crate) const GRANT_TYPE: &str = "urn:ietf:params:oauth:grant-type:token-exch
 /// RFC 8693 section 3: an access token — the default `subject_token_type`, and always the
 /// `requested_token_type` (an access token back, not another exchangeable subject token).
 pub(crate) const ACCESS_TOKEN_TYPE: &str = "urn:ietf:params:oauth:token-type:access_token";
+/// RFC 8693 section 3: a JWT, the other issued token type a call may present as a bearer.
+pub(crate) const JWT_TOKEN_TYPE: &str = "urn:ietf:params:oauth:token-type:jwt";
 
 /// One binding's exchange material, immutable after construction: every per-call exchange shares
 /// it and adds its own scope. How each scope's exchange settled is its own cell's

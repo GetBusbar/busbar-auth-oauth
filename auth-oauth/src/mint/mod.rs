@@ -140,6 +140,8 @@ pub(crate) struct CachedToken {
     header: Option<Zeroizing<String>>,
     /// The reply's `token_type`, as it stated it (`None`: it stated none).
     pub(crate) token_type: Option<String>,
+    /// An RFC 8693 reply's `issued_token_type` (`None`: it stated none).
+    pub(crate) issued_token_type: Option<String>,
 }
 
 impl std::fmt::Debug for CachedToken {
@@ -174,6 +176,7 @@ impl CachedToken {
                 expires_at,
                 header,
                 token_type: None,
+                issued_token_type: None,
             },
             invalid,
         )
@@ -186,9 +189,30 @@ impl CachedToken {
         if t.eq_ignore_ascii_case("bearer") {
             return None;
         }
+        if t == "N_A" {
+            return Some(
+                "token endpoint returned token_type N_A: the exchange issued no bearer token (RFC \
+                 8693 §2.2.1); it is not presented"
+                    .to_string(),
+            );
+        }
         Some(format!(
             "token endpoint returned token_type {}, not a bearer token (RFC 6749 §7.1); it is not \
              presented",
+            shown(t)
+        ))
+    }
+
+    /// Why an RFC 8693 exchange's token is not one to present: its `issued_token_type` is stated
+    /// and is neither an access token nor a JWT (RFC 8693 §3); `None` otherwise.
+    pub(crate) fn not_access_token(&self) -> Option<String> {
+        let t = self.issued_token_type.as_deref()?;
+        if t == token_exchange::ACCESS_TOKEN_TYPE || t == token_exchange::JWT_TOKEN_TYPE {
+            return None;
+        }
+        Some(format!(
+            "token endpoint returned issued_token_type {}, neither an access token nor a JWT (RFC \
+             8693 §2.2.1); it is not presented",
             shown(t)
         ))
     }
@@ -256,6 +280,9 @@ struct TokenResponse {
     /// RFC 6749 §5.1 `token_type` (REQUIRED there; absent is tolerated).
     #[serde(default)]
     token_type: Option<String>,
+    /// RFC 8693 §2.2.1 `issued_token_type` (a token exchange's reply).
+    #[serde(default)]
+    issued_token_type: Option<String>,
 }
 
 /// THE ACCESS TOKEN of a token response `json` the decoder has already judged well-formed (with an
@@ -337,6 +364,7 @@ pub(crate) fn parse_response(
         now.saturating_add(tok.expires_in),
     );
     cached.token_type = tok.token_type;
+    cached.issued_token_type = tok.issued_token_type;
     Ok((cached, invalid))
 }
 
@@ -879,8 +907,15 @@ impl Minted {
         }) {
             // A bearer is all this plugin presents (RFC 6749 §7.1): a token of another type is a
             // failed mint, for the operator to see, never presented as `Bearer`.
-            Ok((fresh, _)) if fresh.not_bearer().is_some() => {
-                let e = fresh.not_bearer().unwrap_or_default();
+            // A token exchange presents an access token (or a JWT) only (RFC 8693 §2.2.1).
+            Ok((fresh, _))
+                if fresh.not_bearer().is_some()
+                    || (self.on_demand && fresh.not_access_token().is_some()) =>
+            {
+                let e = fresh
+                    .not_bearer()
+                    .or_else(|| fresh.not_access_token())
+                    .unwrap_or_default();
                 self.failed(&mut ex, now_ns, wall, e, Fail::Unusable, retry)
             }
             // A 200 with an EMPTY access_token must be treated as a (retryable) failure, not stored:
