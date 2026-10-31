@@ -430,10 +430,12 @@ impl Oauth {
         self.wall.load(Ordering::Acquire)
     }
 
-    /// A call's own timestamp (the host's wall clock, epoch seconds) is the newest reading.
+    /// A reading of the host's wall clock (epoch seconds): a call's own timestamp, or a tick's or
+    /// drive's `clock.now`. The clock only moves forward: a reading older than the newest (a call
+    /// stamped before a tick that raced it) leaves the newest in place.
     pub(crate) fn saw_wall(&self, secs: u64) {
         if secs != 0 {
-            self.wall.store(secs, Ordering::Release);
+            self.wall.fetch_max(secs, Ordering::AcqRel);
         }
     }
 
