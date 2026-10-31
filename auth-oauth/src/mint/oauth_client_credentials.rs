@@ -28,19 +28,25 @@ pub(crate) struct ClientCreds {
     /// The confidential-client secret: the chip's, written only into the token request's form.
     client_secret: Cred,
     token_url: String,
-    scope: String,
+    /// `None`: the request states no `scope` (RFC 6749 §4.4.2, OPTIONAL).
+    scope: Option<String>,
 }
 
 /// Build an `oauth-client-credentials` binding. `credential` is `client_id:client_secret` (the first
 /// `:` splits them, so a secret may itself contain `:`). `token_url` and `scope` come from the
-/// provider config. Fails loud on a malformed credential; the token itself mints on `tick`.
-pub(crate) fn build(credential: &str, token_url: &str, scope: &str) -> Result<ClientCreds, String> {
+/// provider config (no `scope`: the request states none). Fails loud on a malformed credential;
+/// the token itself mints on `tick`.
+pub(crate) fn build(
+    credential: &str,
+    token_url: &str,
+    scope: Option<&str>,
+) -> Result<ClientCreds, String> {
     let (client_id, client_secret) = split_credential(credential)?;
     Ok(ClientCreds {
         client_id: client_id.to_string(),
         client_secret: Cred::captured(Zeroizing::new(client_secret.as_bytes().to_vec())),
         token_url: token_url.to_string(),
-        scope: scope.to_string(),
+        scope: scope.map(str::to_string),
     })
 }
 
@@ -68,13 +74,16 @@ pub(crate) fn validate_credential(credential: &str) -> Result<(), String> {
 
 impl ClientCreds {
     /// The token request (RFC 6749 §4.4): the form as `serde_urlencoded` writes it, the client
-    /// secret the chip's ([`FormBody`]), POSTed to `token_url`.
+    /// secret the chip's ([`FormBody`]), POSTed to `token_url`; `scope` only when one is set.
     pub(crate) fn request(&self) -> Result<TokenRequest, String> {
         let form = FormBody::new()
             .public("grant_type", "client_credentials")
             .public("client_id", &self.client_id)
-            .sealed("client_secret", &self.client_secret)
-            .public("scope", &self.scope);
+            .sealed("client_secret", &self.client_secret);
+        let form = match &self.scope {
+            Some(scope) => form.public("scope", scope),
+            None => form,
+        };
         Ok(TokenRequest::form(
             super::need::TOKEN_URL,
             self.token_url.clone(),
