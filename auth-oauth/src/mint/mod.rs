@@ -55,6 +55,11 @@ pub(crate) const MAX_BACKOFF_SECS: u64 = 300;
 /// How long `tick` waits before reading an in-flight exchange again.
 pub(crate) const IN_FLIGHT_POLL_NS: u64 = 5_000_000;
 
+/// The fleet's sanity floor for the host's wall clock (2026-01-01T00:00:00Z, epoch seconds): no
+/// token is minted at a wall clock before it (unknown, or decades off), since an assertion's `iat`
+/// and a token's expiry are read against it.
+pub(crate) const WALL_FLOOR_SECS: u64 = 1_767_225_600;
+
 /// Nanoseconds in a second, on the tick clock.
 pub(crate) const NS: u64 = 1_000_000_000;
 
@@ -784,6 +789,19 @@ impl Minted {
                     None,
                 );
             };
+            if wall < WALL_FLOOR_SECS {
+                return self.failed(
+                    &mut ex,
+                    now_ns,
+                    wall,
+                    format!(
+                        "no plausible wall clock: the host's reads {wall} s, before 2026-01-01 \
+                         (or none was read); no token is minted until it does"
+                    ),
+                    Fail::Unusable,
+                    None,
+                );
+            }
             let req = match self.minter.request(wall) {
                 Ok(r) => r,
                 Err(e) => return self.failed(&mut ex, now_ns, wall, e, Fail::Refused, None),

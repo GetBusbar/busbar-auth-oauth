@@ -24,6 +24,10 @@ use busbar_contract::abi::sdk::auth_kit::json_error;
 use busbar_contract::abi::sdk::cred::{Cred, FormBody, FormValue};
 use zeroize::Zeroizing;
 
+/// How long a signed assertion is valid (`exp - iat`): one hour, RFC 7523's common lifetime and
+/// 1.5.5's.
+const ASSERTION_LIFETIME_SECS: u64 = 3600;
+
 /// Default OAuth scope when the provider does not override it — the Vertex/GCP common case.
 const DEFAULT_SCOPE: &str = "https://www.googleapis.com/auth/cloud-platform";
 
@@ -113,7 +117,11 @@ impl Signer {
     /// chip appends the signature as the form is written.
     pub(crate) fn signing_input(&self, now: u64) -> Result<String, String> {
         use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
-        let exp = now + 3600; // 1h assertion; the returned token's own TTL governs refresh
+        // 1h assertion; the returned token's own TTL governs refresh. Checked: `now` is the
+        // host's clock, never trusted not to sit at the end of the range.
+        let exp = now
+            .checked_add(ASSERTION_LIFETIME_SECS)
+            .ok_or("the assertion's expiry overflows the clock; no assertion is signed")?;
         const HEADER: &[u8] = br#"{"alg":"RS256","typ":"JWT"}"#;
         let claims_json = jwt_claims_json(
             &self.issuer,
