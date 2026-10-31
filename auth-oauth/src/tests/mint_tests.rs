@@ -831,3 +831,24 @@ fn an_already_expired_token_is_a_failed_mint() {
     assert!(!m.is_ready());
     assert_eq!(m.read(now_epoch(), seen), "Refuse(\"no OAuth token could be minted for this binding (see diagnostics BUSBAR-4014/4015/4016); the call is refused rather than sent unauthenticated, and the mint retries on its schedule\")");
 }
+
+/// L4: THE REFRESH INTERVAL IS BOUNDED ABOVE: a token endpoint's `expires_in` of years (or of
+/// `u64::MAX`) still refreshes within 24 h, so a revoked token is not presented for the process's
+/// life. RED: the refresh was scheduled effectively never.
+#[test]
+fn a_huge_expires_in_refreshes_within_24_hours() {
+    for expires_in in ["100000000000", "18446744073709551615", "31536000"] {
+        let w = Scripted::default();
+        w.ok(&format!(
+            r#"{{"access_token":"tok","token_type":"Bearer","expires_in":{expires_in}}}"#
+        ));
+        let m = Minted::new(client_credentials(), DEFAULT_MAX_RESPONSE_BYTES);
+        let (due, report) = m.tick(1_000, now_epoch(), Some(&w));
+        assert_eq!(report, Some(Report::Minted), "{expires_in}");
+        assert_eq!(
+            due,
+            1_000 + 86_400 * S,
+            "{expires_in}: refreshed within a day"
+        );
+    }
+}
