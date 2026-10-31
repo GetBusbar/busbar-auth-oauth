@@ -105,8 +105,9 @@ impl crate::style::TokenCache for Oauth {
     }
 }
 
-/// A failed mint, logged ONCE (S4, S5): an outage of the token endpoint at WARN, any other failure
-/// (the endpoint refused the credential, the configuration cannot mint) at INFO. The reason names
+/// A failed mint, logged ONCE (S4, S5): an outage of the token endpoint at WARN, a reply or a host
+/// clock the mint cannot use at WARN (the operator's to see), any other failure (the endpoint
+/// refused the credential, the configuration cannot mint) at INFO. The reason names
 /// the status and at most the RFC 6749 error code, never a body or a secret.
 fn logged_failure(cell: &Minted, why: &str) {
     if cell.outage() {
@@ -114,6 +115,12 @@ fn logged_failure(cell: &Minted, why: &str) {
             module = "oauth",
             reason = why,
             "token endpoint outage: the OAuth mint failed and will retry"
+        );
+    } else if cell.unusable() {
+        tracing::warn!(
+            module = "oauth",
+            reason = why,
+            "the OAuth mint failed and will retry: what it got cannot be used"
         );
     } else {
         tracing::info!(
