@@ -190,7 +190,7 @@ fn an_unknown_settings_key_is_refused_by_name() {
     assert!(open(
         JWT_BEARER,
         Some("unused"),
-        r#"{"token_uri":"u","scope":"s","subject":"x","max_response_bytes":9}"#
+        r#"{"token_uri":"u","scope":"s","subject":"x","max_response_bytes":4096}"#
     )
     .is_err_and(|r| r[0].line().starts_with("credential:")));
 }

@@ -17,6 +17,8 @@
 //! | `oauth-client-credentials` | `{token_url, scope?, max_response_bytes?}` (no `scope`: the request states none, RFC 6749 §4.4.2) |
 //! | `oauth-token-exchange` | `{token_url, resource, subject_token_type?, max_response_bytes?}` |
 //!
+//! `max_response_bytes` (the token response cap; default 256 KiB) must be from 1024 to 1048576.
+//!
 //! A key outside a style's row is refused (`settings: unknown key `<k>``), so a typo never
 //! silently falls back to a default, unless core forwards it to every style from its shared
 //! provider schema (`token_url`, `token_uri`, `scope`, `subject`): a style that does not read such
@@ -221,11 +223,25 @@ fn text(m: &Map<String, Value>, key: &str) -> Result<Option<String>, Refusal> {
     Ok(field::<String>(m, key, "a string")?.filter(|s| !s.trim().is_empty()))
 }
 
+/// The bounds a token response cap may take: below 1 KiB no real token response fits; above
+/// 1 MiB a cap bounds nothing a token endpoint should send.
+const MAX_RESPONSE_BYTES_RANGE: std::ops::RangeInclusive<usize> = 1024..=1_048_576;
+
+/// The token response cap (`max_response_bytes`), its default when unset; one outside
+/// [`MAX_RESPONSE_BYTES_RANGE`] is refused, naming the key.
 fn max_response_bytes(m: &Map<String, Value>) -> Result<usize, Refusal> {
-    Ok(
-        field::<usize>(m, "max_response_bytes", "a non-negative integer")?
-            .unwrap_or(mint::DEFAULT_MAX_RESPONSE_BYTES),
-    )
+    let Some(max) = field::<usize>(m, "max_response_bytes", "a non-negative integer")? else {
+        return Ok(mint::DEFAULT_MAX_RESPONSE_BYTES);
+    };
+    if MAX_RESPONSE_BYTES_RANGE.contains(&max) {
+        Ok(max)
+    } else {
+        Err(Refusal::Settings(format!(
+            "outbound auth setting `max_response_bytes` is invalid: it must be from {} to {}",
+            MAX_RESPONSE_BYTES_RANGE.start(),
+            MAX_RESPONSE_BYTES_RANGE.end()
+        )))
+    }
 }
 
 /// What opening a style needs from the instance: the token cache, keyed by (style, credential,
