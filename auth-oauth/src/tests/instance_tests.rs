@@ -1129,3 +1129,35 @@ fn a_token_type_other_than_bearer_fails_the_mint_and_an_absent_one_warns_once() 
         cap.messages()
     );
 }
+
+/// O8: a mint the host's wall clock cannot date fails the call (nothing is presented) and is
+/// logged at WARN, `module = "oauth"`, naming the clock. RED: it minted at `iat` 0.
+#[test]
+fn a_mint_with_no_plausible_wall_clock_fails_at_warn() {
+    use busbar_test_kit::warn_capture::WarnCapture;
+    let host = TestHost::new();
+    let cap = WarnCapture::default();
+    tracing::subscriber::with_default(cap.clone(), || {
+        let w = Arc::new(Scripted::default());
+        let o = Oauth::with_wire(1, Some(Box::new(Pinned(w.clone(), 0))));
+        let h = open(
+            &o,
+            style::OAUTH_CLIENT_CREDENTIALS,
+            "id:secret",
+            r#"{"token_url":"https://idp.example/token","scope":"s"}"#,
+        );
+        w.ok(r#"{"access_token":"tok","token_type":"Bearer","expires_in":3600}"#);
+        o.tick(1_000, Ticket::NONE, Some(&host.host), &mut Diags::default());
+        assert!(w.sent.lock().unwrap().is_empty(), "nothing was sent");
+        assert_eq!(
+            fields(&o, &host, h, Ticket::NONE),
+            (Outcome::Failed, String::new())
+        );
+    });
+    let m = cap.messages();
+    assert!(
+        m.iter()
+            .any(|l| l.contains("wall clock") && l.contains("module=oauth")),
+        "{m:?}"
+    );
+}

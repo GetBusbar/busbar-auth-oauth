@@ -714,3 +714,44 @@ fn an_on_demand_read_racing_the_exchange_never_presents_nothing() {
         "an on-demand read presented no authorization while its exchange landed"
     );
 }
+
+/// O8, NO MINT WITHOUT A PLAUSIBLE WALL CLOCK: with the host's wall clock unknown (`0`) or before
+/// the fleet's sanity floor (2026-01-01), a mint fails saying so and sends nothing (a jwt-bearer
+/// assertion would carry `iat` 0 and `exp` 3600, and a token's expiry would be judged on a clock
+/// decades off); it retries on the usual schedule and mints once the clock is plausible. RED: the
+/// mint signed and sent at whatever clock it was given.
+#[test]
+fn no_mint_without_a_plausible_wall_clock() {
+    let sa = serde_json::json!({
+        "client_email": "svc@proj.iam.gserviceaccount.com",
+        "private_key": include_str!("fixtures/test_sa_key.pem"),
+        "token_uri": "https://oauth2.googleapis.com/token",
+    })
+    .to_string();
+    for wall in [0, 1_700_000_000, 1_767_225_599] {
+        let w = Scripted::default();
+        w.ok(r#"{"access_token":"t","token_type":"Bearer","expires_in":3600}"#);
+        let m = Minted::new(
+            Minter::JwtBearer(Box::new(
+                jwt_bearer::build(&sa, None, None).expect("the service account builds"),
+            )),
+            DEFAULT_MAX_RESPONSE_BYTES,
+        );
+        let (due, report) = m.tick(0, wall, Some(&w));
+        assert!(
+            matches!(&report, Some(Report::MintFailed(e)) if e.contains("wall clock")),
+            "{wall}: {report:?}"
+        );
+        assert!(
+            w.sent.lock().unwrap().is_empty(),
+            "{wall}: nothing was sent"
+        );
+        assert_eq!(due, MIN_SLEEP_SECS * S, "{wall}: it retries on schedule");
+        let (_, report) = m.tick(due, 1_767_225_600, Some(&w));
+        assert_eq!(
+            report,
+            Some(Report::Minted),
+            "{wall}: a plausible clock mints"
+        );
+    }
+}

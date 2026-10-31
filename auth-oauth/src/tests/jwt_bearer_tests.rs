@@ -438,3 +438,12 @@ fn a_key_file_path_is_refused_with_the_file_secret_form_and_its_json_bytes_build
     let req = signer.request(1_700_000_000).expect("a token request");
     assert_eq!(req.target, "https://oauth2.googleapis.com/token");
 }
+
+/// O8: `exp` is `iat + 3600` checked, never an overflow: a hostile timestamp near `u64::MAX` is
+/// refused, not wrapped (release) or panicked on (debug). RED: `now + 3600` overflowed.
+#[test]
+fn an_assertion_at_an_overflowing_time_is_refused() {
+    let signer = test_signer("https://oauth2.googleapis.com/token", None);
+    assert!(signer.signing_input(u64::MAX - 10).is_err());
+    assert!(signer.signing_input(1_800_000_000).is_ok());
+}
