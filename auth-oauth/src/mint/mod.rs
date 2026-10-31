@@ -39,6 +39,9 @@ const REFRESH_SKEW_SECS: u64 = 300;
 /// Floor on the refresh sleep so a short-lived / already-near-expiry token can't spin the loop hot,
 /// and the retry delay after a mint failure.
 pub(crate) const MIN_SLEEP_SECS: u64 = 30;
+/// The longest a token is held before its refresh, whatever its `expires_in` (an endpoint's
+/// untrusted number): a day, so a revoked token is not presented for the process's life.
+pub(crate) const MAX_REFRESH_SECS: u64 = 24 * 60 * 60;
 /// The whole-mint deadline — send plus capped body read under ONE absolute instant, the
 /// client-level 30s total.
 pub(crate) const MINT_DEADLINE_SECS: u64 = 30;
@@ -255,16 +258,18 @@ fn shown(t: &str) -> String {
 ///     the skew boundary.
 ///
 /// Guarantees: for any `ttl > 0` the next mint is scheduled strictly before expiry (no expired token is
-/// served); for `ttl == 0` the loop is rate-limited to `MIN_SLEEP_SECS`.
+/// served); for `ttl == 0` the loop is rate-limited to `MIN_SLEEP_SECS`; and no refresh is further
+/// off than [`MAX_REFRESH_SECS`].
 pub(crate) fn next_refresh_secs(expires_at: u64, now: u64) -> u64 {
     let ttl = expires_at.saturating_sub(now);
-    if ttl == 0 {
+    let secs = if ttl == 0 {
         MIN_SLEEP_SECS
     } else if ttl <= REFRESH_SKEW_SECS {
         (ttl / 2).max(1)
     } else {
         (ttl - REFRESH_SKEW_SECS).max(MIN_SLEEP_SECS)
-    }
+    };
+    secs.min(MAX_REFRESH_SECS)
 }
 
 /// An OAuth token endpoint's success body (RFC 6749 section 5.1), as far as a minter reads it.

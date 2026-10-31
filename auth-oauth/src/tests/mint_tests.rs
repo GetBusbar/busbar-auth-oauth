@@ -336,7 +336,7 @@ fn the_first_tick_mints_and_the_request_path_presents_it() {
 }
 
 /// A token endpoint's `expires_in` is untrusted: one so large that `ahead * NS` would overflow
-/// u64 schedules the refresh at the far end of the clock, never a wrapped (arbitrary) instant.
+/// u64 schedules the refresh a day on (L4), never a wrapped (arbitrary) instant.
 #[test]
 fn a_huge_expires_in_schedules_no_overflowed_refresh() {
     let w = Scripted::default();
@@ -347,8 +347,8 @@ fn a_huge_expires_in_schedules_no_overflowed_refresh() {
     assert_eq!(m.read(now_epoch(), seen), "Header(\"Bearer tok\")");
     assert_eq!(
         due,
-        u64::MAX,
-        "the refresh is effectively never, not a wrapped instant"
+        1_000 + MAX_REFRESH_SECS * S,
+        "the refresh is a day on, not a wrapped instant"
     );
 }
 
