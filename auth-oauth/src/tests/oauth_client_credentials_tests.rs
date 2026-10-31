@@ -12,12 +12,14 @@ use super::*;
 #[test]
 fn build_rejects_a_malformed_credential_in_1_5_5_words() {
     assert_eq!(
-        build("no-colon-here", "https://t", "s").err().unwrap(),
+        build("no-colon-here", "https://t", Some("s"))
+            .err()
+            .unwrap(),
         "oauth-client-credentials key must be `client_id:client_secret`"
     );
     for empty in [":secret-only", "id-only:"] {
         assert_eq!(
-            build(empty, "https://t", "s").err().unwrap(),
+            build(empty, "https://t", Some("s")).err().unwrap(),
             "oauth-client-credentials key has an empty client_id or client_secret"
         );
     }
@@ -34,7 +36,7 @@ fn validate_credential_rejects_malformed_and_accepts_well_formed() {
 #[test]
 fn build_accepts_a_secret_containing_a_colon() {
     // Only the FIRST colon splits id:secret, so a secret with colons is preserved.
-    let c = build("client-abc:secret:with:colons", "https://t", "s").unwrap();
+    let c = build("client-abc:secret:with:colons", "https://t", Some("s")).unwrap();
     assert_eq!(
         crate::test_support::form_text(&c.request().unwrap().body),
         "grant_type=client_credentials&client_id=client-abc&client_secret=secret%3Awith%3Acolons&scope=s"
@@ -48,7 +50,7 @@ fn the_token_request_is_the_form_1_5_5_posted() {
     let c = build(
         "my id:s3cr&t=",
         "https://login.example.com/tenant/oauth2/v2.0/token",
-        "https://cognitiveservices.azure.com/.default",
+        Some("https://cognitiveservices.azure.com/.default"),
     )
     .unwrap();
     let req = c.request().unwrap();

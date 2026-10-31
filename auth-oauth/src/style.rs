@@ -14,7 +14,7 @@
 //! | style | settings |
 //! |---|---|
 //! | `jwt-bearer` | `{token_uri?, scope?, subject?, max_response_bytes?}` (`token_uri`: the host's judged copy of the service account's endpoint) |
-//! | `oauth-client-credentials` | `{token_url, scope, max_response_bytes?}` |
+//! | `oauth-client-credentials` | `{token_url, scope?, max_response_bytes?}` (no `scope`: the request states none, RFC 6749 §4.4.2) |
 //! | `oauth-token-exchange` | `{token_url, resource, subject_token_type?, max_response_bytes?}` |
 //!
 //! A key outside a style's row is refused (`settings: unknown key `<k>``), so a typo never
@@ -371,7 +371,7 @@ pub fn open_binding(
 }
 
 /// `oauth-client-credentials`: the checks, in order (the keyless
-/// contradiction, `token_url`, `scope`, the credential shape), then the binding.
+/// contradiction, `token_url`, a blank `scope`, the credential shape), then the binding.
 fn open_client_credentials(
     m: &Map<String, Value>,
     credential: Option<&str>,
@@ -398,12 +398,19 @@ fn open_client_credentials(
                 .to_string(),
         ));
     }
-    let scope = text(m, "scope").map_err(|r| vec![r])?;
-    if scope.is_none() {
-        refusals.push(Refusal::Settings(
-            "uses auth: oauth-client-credentials but has no `scope`".to_string(),
-        ));
-    }
+    // RFC 6749 §4.4.2: `scope` is OPTIONAL; with none the request states none and the endpoint's
+    // default applies. Present but blank is refused, naming it.
+    let scope = match m.get("scope") {
+        Some(Value::String(s)) if s.trim().is_empty() => {
+            refusals.push(Refusal::Settings(
+                "outbound auth setting `scope` is invalid: it must not be blank (omit it to request \
+                 the token endpoint's default scope)"
+                    .to_string(),
+            ));
+            None
+        }
+        _ => text(m, "scope").map_err(|r| vec![r])?,
+    };
     let cred = credential.unwrap_or("");
     if !cred.trim().is_empty() {
         if let Err(e) = mint::oauth_client_credentials::validate_credential(cred) {
@@ -414,10 +421,10 @@ fn open_client_credentials(
     if !refusals.is_empty() {
         return Err(refusals);
     }
-    let (Some(token_url), Some(scope)) = (token_url, scope) else {
+    let Some(token_url) = token_url else {
         return Err(refusals);
     };
-    let built = mint::oauth_client_credentials::build(cred, &token_url, &scope)
+    let built = mint::oauth_client_credentials::build(cred, &token_url, scope.as_deref())
         .map_err(|e| vec![Refusal::Credential(e)])?;
     let key = cache.key(&[
         OAUTH_CLIENT_CREDENTIALS.as_bytes(),

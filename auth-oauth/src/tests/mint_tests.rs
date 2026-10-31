@@ -153,7 +153,8 @@ impl Wire for Scripted {
 
 pub(crate) fn client_credentials() -> Minter {
     Minter::ClientCredentials(
-        oauth_client_credentials::build("id:secret", "https://idp.example/token", "s").unwrap(),
+        oauth_client_credentials::build("id:secret", "https://idp.example/token", Some("s"))
+            .unwrap(),
     )
 }
 

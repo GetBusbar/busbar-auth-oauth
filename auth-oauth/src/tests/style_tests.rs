@@ -69,16 +69,14 @@ fn oauth_client_credentials_refuses_in_1_5_5_words_and_order() {
             "credential: oauth-client-credentials key must be `client_id:client_secret`",
         ]
     );
+    // O7 (1.5.5-visible): no `scope` is no longer a refusal (RFC 6749 §4.4.2: OPTIONAL).
     assert_eq!(
         lines(open(
             OAUTH_CLIENT_CREDENTIALS,
             Some("unused"),
             r#"{"token_url":"https://127.0.0.1/token"}"#
         )),
-        [
-            "settings: uses auth: oauth-client-credentials but has no `scope`",
-            "credential: oauth-client-credentials key must be `client_id:client_secret`",
-        ]
+        ["credential: oauth-client-credentials key must be `client_id:client_secret`"]
     );
     assert_eq!(
         lines(open(
