@@ -274,3 +274,68 @@ fn a_bad_setting_is_refused_without_its_value() {
         ]
     );
 }
+
+/// THE KIND RULE (O1; lead ruling 2026-10-30, as sigv4 and header): core forwards its shared
+/// provider/style keys (`token_url`, `token_uri`, `scope`, `subject`) to every style's open. A
+/// style that does not read one binds all the same, logging ONE WARN per such key at the open
+/// (`settings.<key>: not used by the <style> style; ignored`, `module = "oauth"`); a key in neither
+/// set stays refused by name. RED: the minted styles and the token exchange refused them.
+#[test]
+fn a_forwarded_key_a_style_does_not_read_is_ignored_with_one_warn() {
+    use busbar_test_kit::warn_capture::WarnCapture;
+    let sa = serde_json::json!({
+        "client_email": "svc@proj.example.test",
+        "private_key": include_str!("fixtures/test_sa_key.pem"),
+        "token_uri": "https://oauth2.example.test/token",
+    })
+    .to_string();
+    let cases: [(&str, &str, &str, &[&str]); 3] = [
+        (
+            JWT_BEARER,
+            sa.as_str(),
+            r#"{"token_url":"https://i/t","scope":"s"}"#,
+            &["token_url"],
+        ),
+        (
+            OAUTH_CLIENT_CREDENTIALS,
+            "id:secret",
+            r#"{"token_url":"https://i/t","scope":"s","token_uri":"https://i/u","subject":"x"}"#,
+            &["token_uri", "subject"],
+        ),
+        (
+            OAUTH_TOKEN_EXCHANGE,
+            "subject-token",
+            r#"{"token_url":"https://i/t","resource":"r","token_uri":"u","scope":"s","subject":"x"}"#,
+            &["token_uri", "scope", "subject"],
+        ),
+    ];
+    for (style, cred, settings, ignored) in cases {
+        let cap = WarnCapture::default();
+        let bound = tracing::subscriber::with_default(cap.clone(), || {
+            super::open(
+                style,
+                Some(cred.as_bytes()),
+                Some(settings.as_bytes()),
+                &Cache::default(),
+            )
+            .is_ok()
+        });
+        assert!(bound, "{style}: a forwarded key does not fail the bind");
+        let warned = cap.messages();
+        assert_eq!(warned.len(), ignored.len(), "{style}: {warned:?}");
+        for key in ignored {
+            let want = format!("settings.{key}: not used by the {style} style; ignored");
+            assert!(
+                warned.iter().any(|l| l.contains(&want) && l.contains("module=oauth")),
+                "{style}: {want} in {warned:?}"
+            );
+        }
+    }
+    // A key in neither set is still refused by name.
+    let l = lines(open(
+        OAUTH_CLIENT_CREDENTIALS,
+        Some("id:secret"),
+        r#"{"token_url":"https://i/t","scope":"s","resource":"r"}"#,
+    ));
+    assert_eq!(l, ["settings: unknown key `resource`"]);
+}
