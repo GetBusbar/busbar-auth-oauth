@@ -938,3 +938,121 @@ fn a_failed_mint_is_logged_an_outage_at_warn_or_a_refusal_at_info() {
         "{m:?}"
     );
 }
+
+/// A token-exchange binding on `o` (busbar's own subject token, the shared settings).
+fn exchange_binding(o: &Oauth) -> u64 {
+    o.keep_binding(
+        style::open(
+            style::OAUTH_TOKEN_EXCHANGE,
+            Some(b"busbar-own-subject-token".as_slice()),
+            Some(
+                br#"{"token_url":"https://as.example/token","resource":"https://tools.example/rpc"}"#
+                    .as_slice(),
+            ),
+            o,
+        )
+        .unwrap_or_else(|_| panic!("the binding opens")),
+    )
+}
+
+/// O4, A REQUEST-STATED SCOPE IS BOUNDED: a scope longer than 1024 bytes is refused (FAILED,
+/// saying why) before any cell is made for it; one of exactly 1024 bytes is exchanged. RED: every
+/// scope, of any length, made its own cell and exchange.
+#[test]
+fn a_scope_longer_than_1024_bytes_is_refused() {
+    let host = TestHost::new();
+    let w = Arc::new(Scripted::default());
+    let o = instance(&w);
+    let h = exchange_binding(&o);
+    let long = "s".repeat(1025);
+    let t = Ticket {
+        slot: 801,
+        generation: 1,
+    };
+    assert_eq!(
+        test_support::fields(&o, &host, h, t, Some(&long)).0,
+        Outcome::Failed
+    );
+    assert!(o.cache.read().unwrap().is_empty(), "no cell for it");
+    assert_eq!(
+        test_support::fields(&o, &host, h, t, Some(&long[..1024])).0,
+        Outcome::Pending,
+        "1024 bytes is a scope"
+    );
+}
+
+/// O4, A BINDING HOLDS AT MOST 256 SCOPE CELLS: the 257th scope evicts the least recently used
+/// IDLE cell no request waits on (a cell a request just read is not it). RED: one cell per
+/// request-stated scope, unbounded.
+#[test]
+fn a_binding_holds_at_most_256_scope_cells_evicting_the_least_recently_used_idle_one() {
+    let host = TestHost::new();
+    let w = Arc::new(Scripted::default());
+    let o = instance(&w);
+    let h = exchange_binding(&o);
+    let Some(Binding::Exchange(x)) = o.bound(h) else {
+        panic!("an exchange binding")
+    };
+    let call = |i: u32| Ticket {
+        slot: 1_000 + i,
+        generation: 1,
+    };
+    for i in 0..256_u32 {
+        assert_eq!(
+            test_support::fields(&o, &host, h, call(i), Some(&format!("s{i}"))).0,
+            Outcome::Pending
+        );
+        w.ok(r#"{"access_token":"tok","expires_in":3600}"#);
+    }
+    o.tick(1_000, Ticket::NONE, Some(&host.host), &mut Diags::default());
+    assert_eq!(o.cache.read().unwrap().len(), 256, "256 scopes minted");
+    // `s0` is read again: `s1` is now the least recently used.
+    assert_eq!(
+        test_support::fields(&o, &host, h, Ticket::NONE, Some("s0")).1,
+        "authorization: Bearer tok"
+    );
+    assert_eq!(
+        test_support::fields(&o, &host, h, call(256), Some("s256")).0,
+        Outcome::Pending
+    );
+    let cache = o.cache.read().unwrap();
+    assert_eq!(cache.len(), 256, "the cap holds");
+    assert!(
+        cache.contains_key(&x.scope_key(b"s0")),
+        "the recently read cell stays"
+    );
+    assert!(
+        !cache.contains_key(&x.scope_key(b"s1")),
+        "the LRU idle cell left"
+    );
+    assert!(cache.contains_key(&x.scope_key(b"s256")));
+}
+
+/// O4: a cell some request waits on is never evicted; with every one of the 256 cells waited on,
+/// a new scope is refused (FAILED, saying why) rather than grow the cache past its cap.
+#[test]
+fn a_scope_cell_with_waiters_is_never_evicted() {
+    let host = TestHost::new();
+    let w = Arc::new(Scripted::default());
+    let o = instance(&w);
+    let h = exchange_binding(&o);
+    let call = |i: u32| Ticket {
+        slot: 2_000 + i,
+        generation: 1,
+    };
+    for i in 0..256_u32 {
+        assert_eq!(
+            test_support::fields(&o, &host, h, call(i), Some(&format!("w{i}"))).0,
+            Outcome::Pending
+        );
+    }
+    assert_eq!(
+        test_support::fields(&o, &host, h, call(256), Some("w256")).0,
+        Outcome::Failed
+    );
+    assert_eq!(
+        o.cache.read().unwrap().len(),
+        256,
+        "no waited cell was evicted"
+    );
+}
