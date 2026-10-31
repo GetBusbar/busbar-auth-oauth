@@ -55,6 +55,9 @@ const READ_BUF_BYTES: usize = 16 * 1024;
 pub(crate) const EXCHANGE_BACKOFF_SECS: u64 = MIN_SLEEP_SECS;
 /// The longest window a `Retry-After` may set.
 pub(crate) const MAX_BACKOFF_SECS: u64 = 300;
+/// With no host clock to measure the read loop on, the most pieces one `tick` or `drive` reads
+/// before it yields (the next judges the mint deadline anew).
+const MAX_READS_PER_TICK: u32 = 1024;
 /// How long `tick` waits before reading an in-flight exchange again.
 pub(crate) const IN_FLIGHT_POLL_NS: u64 = 5_000_000;
 
@@ -864,8 +867,23 @@ impl Minted {
         };
         let conn = *conn;
         let mut buf = Zeroizing::new([0_u8; READ_BUF_BYTES]);
+        // THE LOOP'S CLOCK: `now_ns` is the tick's instant, fixed for the call, so each piece
+        // re-reads the host's monotonic clock to judge the deadline; with no host clock, the loop
+        // reads a bounded number of pieces and yields.
+        let mono_at = wire.clock().map(|c| c.mono_ns);
+        let mut reads = 0_u32;
         let finished = loop {
-            if now_ns.saturating_sub(*started_ns) >= MINT_DEADLINE_SECS * NS {
+            let elapsed = mono_at.map_or(0, |at| {
+                wire.clock().map_or(0, |c| c.mono_ns.saturating_sub(at))
+            });
+            if mono_at.is_none() {
+                if reads >= MAX_READS_PER_TICK {
+                    return (now_ns.saturating_add(IN_FLIGHT_POLL_NS), None);
+                }
+                reads += 1;
+            }
+            if now_ns.saturating_add(elapsed).saturating_sub(*started_ns) >= MINT_DEADLINE_SECS * NS
+            {
                 break Err((
                     "token endpoint response was not read before the mint deadline; refusing to \
                      parse a partial token response"
