@@ -660,3 +660,46 @@ fn a_failed_exchange_honours_retry_after_capped_at_300_seconds() {
         );
     }
 }
+
+/// O2, THE `ready` FACT IS PER SCOPE: one scope's failure does not make a binding whose other
+/// scope presents a token unready (no last-writer-wins across scopes), and a binding whose only
+/// tried scope failed is ready again once that scope's back-off window ends, with no request in
+/// between (exchanges start only on requests, so a latched `0` would never be tried again). RED:
+/// one binding-wide flag, set by whichever scope settled last, cleared only by a landed exchange.
+#[test]
+fn a_token_exchange_binding_is_ready_unless_every_tried_scope_is_failing() {
+    let b = ClockedBinding::new();
+    assert_eq!(b.call(ticket(701), "good", T0), Outcome::Pending);
+    b.w.ok(r#"{"access_token":"tok-good","expires_in":3600}"#);
+    b.tick(T0);
+    assert_eq!(b.call(ticket(702), "bad", T0), Outcome::Pending);
+    b.w.push(vec![
+        Step::Head(401),
+        Step::Body(br#"{"error":"invalid_scope"}"#.to_vec(), true),
+    ]);
+    b.tick(T0);
+    assert_eq!(
+        b.call(ticket(702), "bad", T0),
+        Outcome::Failed,
+        "positive control: the second scope's exchange failed"
+    );
+    assert!(
+        b.o.ready(b.h),
+        "the first scope still presents its token: the binding is ready"
+    );
+
+    let b = ClockedBinding::new();
+    assert_eq!(b.call(ticket(711), "s", T0), Outcome::Pending);
+    b.w.push(vec![Step::Head(503), Step::Body(b"busy".to_vec(), true)]);
+    b.tick(T0);
+    assert!(
+        !b.o.ready(b.h),
+        "its only tried scope is failing: not ready"
+    );
+    b.tick(T0 + 31);
+    assert!(
+        b.o.ready(b.h),
+        "the scope's back-off ended: ready again, so the lane is tried and a request retries"
+    );
+    assert_eq!(b.sent(), 1, "readiness came back without an exchange");
+}
