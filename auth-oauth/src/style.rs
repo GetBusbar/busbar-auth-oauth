@@ -68,10 +68,15 @@ pub struct ExchangeBinding {
 }
 
 impl ExchangeBinding {
-    /// Whether `cell` is one of this binding's scopes.
+    /// Whether `cell` is one of this binding's scopes: made by this binding, or by an earlier
+    /// opening of it (the same credential and settings, so the same key).
     pub(crate) fn owns(&self, cell: &Minted) -> bool {
-        cell.exchange()
-            .is_some_and(|x| std::ptr::eq(x, Arc::as_ptr(&self.exchange)))
+        cell.exchange().is_some_and(|x| x.binding() == self.key)
+    }
+
+    /// This binding's cache key.
+    pub(crate) fn key(&self) -> [u8; 32] {
+        self.key
     }
 
     /// The cache key of this binding's cell for `scope`: SHA-256 over the binding's own key and the
@@ -334,12 +339,10 @@ fn open_token_exchange(
         settings.unwrap_or_default(),
     ]);
     Ok(ExchangeBinding {
-        exchange: Arc::new(mint::token_exchange::build(
-            subject,
-            &token_url,
-            &subject_token_type,
-            &resource,
-        )),
+        exchange: Arc::new(
+            mint::token_exchange::build(subject, &token_url, &subject_token_type, &resource)
+                .bound_to(key),
+        ),
         key,
         max_response_bytes: max,
     })

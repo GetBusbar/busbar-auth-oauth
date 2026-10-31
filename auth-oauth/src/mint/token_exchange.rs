@@ -41,6 +41,23 @@ pub(crate) struct Exchange {
     subject_token_type: String,
     token_url: String,
     resource: String,
+    /// The cache key of the binding this material is (`ExchangeBinding`'s): a binding re-opened
+    /// with the same credential and settings has the same key, so its scope cells are its own.
+    binding: [u8; 32],
+}
+
+impl Exchange {
+    /// This material as the binding keyed `binding` holds it.
+    #[must_use]
+    pub(crate) fn bound_to(mut self, binding: [u8; 32]) -> Self {
+        self.binding = binding;
+        self
+    }
+
+    /// The cache key of the binding this material is.
+    pub(crate) fn binding(&self) -> [u8; 32] {
+        self.binding
+    }
 }
 
 /// Build a binding's exchange material.
@@ -55,6 +72,7 @@ pub(crate) fn build(
         subject_token_type: subject_token_type.to_string(),
         token_url: token_url.to_string(),
         resource: resource.to_string(),
+        binding: [0; 32],
     }
 }
 
