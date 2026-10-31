@@ -574,7 +574,7 @@ fn red_a_writer_that_ignores_the_host_capacity_faults() {
 mod mint_door {
     use std::collections::{HashMap, VecDeque};
     use std::sync::{Arc, Mutex};
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     use busbar_contract::abi::host::conn::connector::{DIRECTION_OUTBOUND, EGRESS_PROVIDER};
     use busbar_contract::abi::mechanism::rendering::ReadNeed;
@@ -594,6 +594,18 @@ mod mint_door {
     const TOKEN_URL: &str = "https://login.example.com/tenant/oauth2/v2.0/token";
     const SCOPE: &str = "https://cognitiveservices.azure.com/.default";
     const CREDENTIAL: &str = "oracle-client-0001:oracle:secret:with:colons";
+
+    struct Clock(Instant);
+
+    impl busbar_contract::services::double::ServicesDouble for Clock {
+        fn now(&self) -> busbar_contract::services::Reading {
+            let elapsed = u64::try_from(self.0.elapsed().as_nanos()).expect("test clock fits");
+            busbar_contract::services::Reading {
+                wall_ns: 1_798_761_600_000_000_000 + elapsed,
+                mono_ns: elapsed,
+            }
+        }
+    }
 
     /// What one open carried: the need, the target, the method, the head target, the fields, the body.
     type Opened = (u32, String, String, String, Vec<(String, String)>, String);
@@ -755,7 +767,10 @@ mod mint_door {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_binding_presents_its_minted_bearer_then_the_refreshed_one() {
         let table = Arc::new(TokenEndpoint::default());
-        let dispatcher = Arc::new(Dispatcher::new(DispatchConfig::default()));
+        let dispatcher = Arc::new(Dispatcher::with_services(
+            DispatchConfig::default(),
+            Arc::new(Clock(Instant::now())),
+        ));
         let row = LinkedRow::of(busbar_auth_oauth::door).expect("the door states its Statement");
         let plugin = load_linked::<Auth>(
             &row,

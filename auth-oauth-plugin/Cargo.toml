@@ -19,6 +19,7 @@ busbar-auth-oauth = { path = "../auth-oauth" }
 busbar-contract = { workspace = true }
 
 [dev-dependencies]
+busbar-contract = { workspace = true, features = ["services-double"] }
 # busbar's published conformance suite and the door's own both-ways proof (`tests/conformance.rs`,
 # moved from busbar's crates/busbar-auth-oauth) load the linked door and dlopen the built cdylib over
 # busbar's REAL loader: dev-only, never in the shipped artifact.
