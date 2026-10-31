@@ -1056,3 +1056,76 @@ fn a_scope_cell_with_waiters_is_never_evicted() {
         "no waited cell was evicted"
     );
 }
+
+/// O5, THE TOKEN TYPE IS CHECKED (RFC 6749 §5.1, §7.1): a reply whose `token_type` is present and
+/// not `bearer` (any case) fails the mint, at an operator-visible WARN, and nothing is presented
+/// as a bearer; `Bearer` in any case mints; an absent `token_type` is accepted (many endpoints
+/// omit it) with ONE WARN per cell. RED: `token_type` was never read.
+#[test]
+fn a_token_type_other_than_bearer_fails_the_mint_and_an_absent_one_warns_once() {
+    use busbar_test_kit::warn_capture::WarnCapture;
+    const SETTINGS: &str = r#"{"token_url":"https://idp.example/token","scope":"s"}"#;
+    let host = TestHost::new();
+    let cap = WarnCapture::default();
+    tracing::subscriber::with_default(cap.clone(), || {
+        let w = Arc::new(Scripted::default());
+        let o = instance(&w);
+        let h = open(&o, style::OAUTH_CLIENT_CREDENTIALS, "id:secret", SETTINGS);
+        w.ok(r#"{"access_token":"tok","token_type":"mac","expires_in":3600}"#);
+        o.tick(1_000, Ticket::NONE, Some(&host.host), &mut Diags::default());
+        assert_eq!(
+            fields(&o, &host, h, Ticket::NONE),
+            (Outcome::Failed, String::new()),
+            "a mac token is never presented as a bearer"
+        );
+    });
+    let m = cap.messages();
+    assert!(
+        m.iter()
+            .any(|l| l.contains("token_type") && l.contains("module=oauth")),
+        "the refusal is a WARN: {m:?}"
+    );
+    for spelling in ["Bearer", "bearer", "BEARER"] {
+        let w = Arc::new(Scripted::default());
+        let o = instance(&w);
+        let h = open(&o, style::OAUTH_CLIENT_CREDENTIALS, "id:secret", SETTINGS);
+        w.ok(&format!(
+            r#"{{"access_token":"tok","token_type":"{spelling}","expires_in":3600}}"#
+        ));
+        o.tick(1_000, Ticket::NONE, Some(&host.host), &mut Diags::default());
+        assert_eq!(
+            fields(&o, &host, h, Ticket::NONE).1,
+            "authorization: Bearer tok",
+            "{spelling}"
+        );
+    }
+    let cap = WarnCapture::default();
+    tracing::subscriber::with_default(cap.clone(), || {
+        let w = Arc::new(Scripted::default());
+        let o = instance(&w);
+        let h = open(&o, style::OAUTH_CLIENT_CREDENTIALS, "id:secret", SETTINGS);
+        w.ok(r#"{"access_token":"tok-1","expires_in":3600}"#);
+        o.tick(1_000, Ticket::NONE, Some(&host.host), &mut Diags::default());
+        assert_eq!(
+            fields(&o, &host, h, Ticket::NONE).1,
+            "authorization: Bearer tok-1"
+        );
+        w.ok(r#"{"access_token":"tok-2","expires_in":3600}"#);
+        o.tick(
+            1_000 + 3_300 * NS,
+            Ticket::NONE,
+            Some(&host.host),
+            &mut Diags::default(),
+        );
+        assert_eq!(
+            fields(&o, &host, h, Ticket::NONE).1,
+            "authorization: Bearer tok-2"
+        );
+    });
+    assert_eq!(
+        cap.count("token_type"),
+        1,
+        "an absent token_type warns once per cell: {:?}",
+        cap.messages()
+    );
+}
