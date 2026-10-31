@@ -305,12 +305,13 @@ impl Wire for Pinned {
 
 /// ONE CLOCK (THE DESIGN §1: "one clock, which also drives every plugin's `tick`"; §11.12
 /// `clock.now`; Q128 auth-oauth LOW). The assertion's `iat` is the HOST's wall time, not a clock
-/// the plugin reads for itself: a host pinned at 1_700_000_000 signs an assertion issued then.
-/// RED before the fix: the plugin read `SystemTime::now()`.
+/// the plugin reads for itself: a host pinned at 1_800_000_000 signs an assertion issued then (a
+/// plausible clock: O8 mints at none before 2026-01-01). RED before the fix: the plugin read
+/// `SystemTime::now()`.
 #[test]
 fn jwt_bearer_signs_at_the_hosts_wall_clock() {
     use base64::Engine as _;
-    const HOST_WALL: u64 = 1_700_000_000;
+    const HOST_WALL: u64 = 1_800_000_000;
     let host = TestHost::new();
     let w = Arc::new(Scripted::default());
     let o = Oauth::with_wire(1, Some(Box::new(Pinned(w.clone(), HOST_WALL))));
@@ -589,14 +590,14 @@ fn fields_at(
 /// ONE CLOCK, FOR EXPIRY AND CACHING (THE DESIGN §1 l.159: "one clock, which also drives every
 /// plugin's tick"; §11.12: the clock family is "wall and monotonic time from the kernel's one
 /// clock"; Q128 auth-oauth LOW, finding 3). A token's expiry and an on-demand token's cache life are
-/// judged on the HOST's wall time, never the process's: the host's clock here sits at 2001, decades
-/// behind the process clock, so a token minted on it is FRESH on the host's time though the process
-/// clock calls it long expired; and a host clock moved far into the future sees the same cached
+/// judged on the HOST's wall time, never the process's: the host's clock here sits at 2026-01-02
+/// (the earliest plausible clock, O8), months behind the process clock, so a token minted on it is
+/// FRESH on the host's time though the process clock calls it long expired; and a host clock moved far into the future sees the same cached
 /// token as expired, though the process clock calls it fresh. The refresh timing is 1.5.5's,
 /// relative to the clock the plugin is given.
 #[test]
 fn token_expiry_and_caching_are_judged_on_the_hosts_clock() {
-    const HOST_WALL: u64 = 1_000_000_000;
+    const HOST_WALL: u64 = 1_767_312_000;
     const FAR_FUTURE: u64 = 4_000_000_000;
     let host = TestHost::new();
     let w = Arc::new(Scripted::default());
