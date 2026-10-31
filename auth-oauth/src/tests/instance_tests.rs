@@ -104,9 +104,9 @@ fn oauth_client_credentials_mints_on_tick_and_honours_the_expired_token_rule() {
         "before the first mint, on a ticket: READY, no fields, nothing parked"
     );
 
-    // THE FIRST MINT, on the first tick: a token that expires at once, so the rule can run on the
-    // wall clock.
-    w.ok(r#"{"access_token":"tok-1","expires_in":0}"#);
+    // THE FIRST MINT, on the first tick: a ten-minute token, so the rule can run on the wall
+    // clock once the host's clock passes it (a token expired as it lands is no token, L3).
+    w.ok(r#"{"access_token":"tok-1","expires_in":600}"#);
     let mut diags = Diags::default();
     let due = o.tick(1_000, Ticket::NONE, Some(&host.host), &mut diags);
     {
@@ -144,14 +144,16 @@ fn oauth_client_credentials_mints_on_tick_and_honours_the_expired_token_rule() {
     );
     assert_eq!(
         due,
-        1_000 + 30 * NS,
-        "an expired-at-once token re-mints after MIN_SLEEP"
+        1_000 + 300 * NS,
+        "a ten-minute token re-mints the skew (five minutes) ahead of its expiry"
     );
 
-    // THE REFRESH FAILS: the expired token answers PENDING on a ticket, bounded by the deadline;
-    // a call that may not pend answers REFUSED (the host re-submits it on a ticket).
+    // THE REFRESH FAILS, and the host's clock passes the token's expiry: the expired token
+    // answers PENDING on a ticket, bounded by the deadline; a call that may not pend answers
+    // REFUSED (the host re-submits it on a ticket).
     w.push(vec![Step::Head(503), Step::Body(b"down".to_vec(), true)]);
     o.tick(due, Ticket::NONE, Some(&host.host), &mut diags);
+    o.saw_wall(now_epoch() + 3_600);
     let ticket = Ticket {
         slot: 3,
         generation: 1,
@@ -339,8 +341,9 @@ fn jwt_bearer_signs_at_the_hosts_wall_clock() {
 
 const CC_SETTINGS: &str = r#"{"token_url":"https://login.example.com/tenant/oauth2/v2.0/token","scope":"https://cognitiveservices.azure.com/.default"}"#;
 
-/// A client-credentials binding whose token has expired and whose refresh failed: `tok-1`,
-/// expiring at once, then a 503.
+/// A client-credentials binding whose token has expired and whose refresh failed: `tok-1`, ten
+/// minutes to live, a 503 on its refresh, then the host's clock past its expiry (a token expired
+/// as it lands is no token, L3).
 fn expired_and_failed(w: &Arc<Scripted>, host: &TestHost) -> (Oauth, u64) {
     let o = instance(w);
     let h = open(
@@ -350,10 +353,11 @@ fn expired_and_failed(w: &Arc<Scripted>, host: &TestHost) -> (Oauth, u64) {
         CC_SETTINGS,
     );
     let mut diags = Diags::default();
-    w.ok(r#"{"access_token":"tok-1","expires_in":0}"#);
+    w.ok(r#"{"access_token":"tok-1","expires_in":600}"#);
     let due = o.tick(1_000, Ticket::NONE, Some(&host.host), &mut diags);
     w.push(vec![Step::Head(503), Step::Body(b"down".to_vec(), true)]);
     o.tick(due, Ticket::NONE, Some(&host.host), &mut diags);
+    o.saw_wall(now_epoch() + 3_600);
     (o, h)
 }
 
