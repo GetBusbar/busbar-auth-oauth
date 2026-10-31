@@ -793,3 +793,25 @@ fn a_reload_keeps_the_scope_tokens_of_a_binding_that_survives_it() {
     assert_eq!(w.sent.lock().unwrap().len(), 1, "no new exchange");
     assert!(o.ready(h2));
 }
+
+/// L6: A CALL THAT STATES NO SCOPE SENDS NO `scope` (RFC 8693 §2.1: OPTIONAL; RFC 6749 §3.3: a
+/// scope is at least one character, so `scope=` is malformed): the form ends at `resource`. RED:
+/// `scope=` went out empty.
+#[test]
+fn an_unscoped_exchange_sends_no_scope_parameter() {
+    let x = Arc::new(build(
+        SUBJECT,
+        "https://as.example/token",
+        ACCESS_TOKEN_TYPE,
+        "https://tools.example/rpc",
+    ));
+    let form = form(&crate::test_support::form_text(
+        &Scoped::new(x, "").request().expect("a request").body,
+    ));
+    assert_eq!(
+        form.last().map(|(k, _)| k.as_str()),
+        Some("resource"),
+        "{form:?}"
+    );
+    assert!(form.iter().all(|(k, _)| k != "scope"), "{form:?}");
+}
