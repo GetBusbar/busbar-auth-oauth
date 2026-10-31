@@ -763,3 +763,33 @@ fn an_exchange_issuing_no_access_token_fails_its_calls() {
         }
     }
 }
+
+/// L2, A RELOAD KEEPS THE SCOPE TOKENS OF A BINDING THAT SURVIVES IT (contract `abi/auth`: the
+/// token cache is keyed by style, credential and settings, never by handle): the new generation
+/// re-opens the same binding, the old one retires, and the scope's cached token is presented with
+/// no new exchange; the binding's readiness reads that scope too. RED: `retire` dropped every idle
+/// scope cell, so each scope re-exchanged after every reload.
+#[test]
+fn a_reload_keeps_the_scope_tokens_of_a_binding_that_survives_it() {
+    let host = TestHost::new();
+    let w = Arc::new(Scripted::default());
+    let o = instance(&w);
+    let h1 = open(&o);
+    assert_eq!(
+        fields(&o, &host, h1, ticket(901), Some("s")).0,
+        Outcome::Pending
+    );
+    w.ok(r#"{"access_token":"tok-kept","token_type":"Bearer","expires_in":3600}"#);
+    o.tick(1_000, Ticket::NONE, Some(&host.host), &mut Diags::default());
+    o.set_generation(2);
+    let h2 = open(&o);
+    o.retire(1);
+    o.tick(2_000, Ticket::NONE, Some(&host.host), &mut Diags::default());
+    assert_eq!(
+        fields(&o, &host, h2, ticket(902), Some("s")),
+        (Outcome::Ready, "authorization: Bearer tok-kept".to_string()),
+        "the surviving binding's scope token is presented"
+    );
+    assert_eq!(w.sent.lock().unwrap().len(), 1, "no new exchange");
+    assert!(o.ready(h2));
+}
