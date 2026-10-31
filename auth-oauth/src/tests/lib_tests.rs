@@ -99,7 +99,7 @@ fn an_unknown_instance_setting_is_refused_by_name_at_validate_open_and_refresh()
     for good in [
         &b""[..],
         b"{}",
-        br#"{"token_url":"https://i/t","scope":"s","subject":"x","max_response_bytes":9}"#,
+        br#"{"token_url":"https://i/t","scope":"s","subject":"x","max_response_bytes":1024}"#,
         br#"{"token_uri":"https://i/t","scope":"s"}"#,
         br#"{"token_url":"https://i/t","resource":"r","subject_token_type":"t"}"#,
     ] {
@@ -109,6 +109,41 @@ fn an_unknown_instance_setting_is_refused_by_name_at_validate_open_and_refresh()
             String::from_utf8_lossy(good)
         );
         assert!(<Oauth as OutboundPlugin>::open(good, &[], 1).is_ok());
+    }
+}
+
+#[test]
+fn invalid_present_settings_are_refused_at_every_lifecycle_entry() {
+    use busbar_contract::abi::mechanism::call::Outcome;
+    let keys = [
+        "token_url",
+        "token_uri",
+        "scope",
+        "subject",
+        "resource",
+        "subject_token_type",
+    ];
+    for key in keys {
+        for value in [serde_json::json!(7), serde_json::json!(" \t ")] {
+            let settings = serde_json::to_vec(&serde_json::json!({(key): value})).unwrap();
+            let refusals = [
+                Oauth::validate(&settings).err(),
+                <Oauth as OutboundPlugin>::open(&settings, &[], 1).err(),
+                Oauth::new(1).refresh(&settings, &[], 2).err(),
+            ];
+            for refused in refusals {
+                let refused = refused.expect("an invalid present setting must be refused");
+                assert_eq!(refused.outcome(), Outcome::Failed);
+                assert!(refused.text().is_some_and(|text| text.contains(key)));
+            }
+        }
+    }
+    for value in [serde_json::json!(9), serde_json::json!("large")] {
+        let settings =
+            serde_json::to_vec(&serde_json::json!({"max_response_bytes": value})).unwrap();
+        assert!(Oauth::validate(&settings).is_err());
+        assert!(<Oauth as OutboundPlugin>::open(&settings, &[], 1).is_err());
+        assert!(Oauth::new(1).refresh(&settings, &[], 2).is_err());
     }
 }
 
