@@ -923,6 +923,18 @@ impl Minted {
             parse_response(u16::try_from(status).unwrap_or(0), &body, wall)
                 .map_err(|e| (e, outage_status(status)))
         }) {
+            // A token that has already expired as it lands (`expires_in` 0, or a clock skew that
+            // ate it) is no token: a failed mint, retried on schedule, never presented.
+            Ok((fresh, _)) if !fresh.token.is_empty() && fresh.expires_at <= wall => self.failed(
+                &mut ex,
+                now_ns,
+                wall,
+                "token endpoint returned an access token that has already expired (expires_in 0); \
+                 it is not presented"
+                    .to_string(),
+                Fail::Unusable,
+                retry,
+            ),
             // A bearer is all this plugin presents (RFC 6749 §7.1): a token of another type is a
             // failed mint, for the operator to see, never presented as `Bearer`.
             // A token exchange presents an access token (or a JWT) only (RFC 8693 §2.2.1).
