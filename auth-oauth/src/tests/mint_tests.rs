@@ -755,3 +755,61 @@ fn no_mint_without_a_plausible_wall_clock() {
         );
     }
 }
+
+/// T3: EVERY OUTAGE ARM OF THE EXCHANGE, and the refusals that are not one (S4): an open the host
+/// times out, closes or faults, a read that times out or faults mid-response, a connection lost
+/// after the head, and an exchange past the mint deadline are OUTAGES (logged at WARN), each
+/// named; a refused open is not.
+#[test]
+fn each_failed_exchange_arm_is_named_and_judged_outage_or_not() {
+    let fail = |setup: &dyn Fn(&Scripted), later: Option<u64>| {
+        let w = Scripted::default();
+        setup(&w);
+        let m = Minted::new(client_credentials(), DEFAULT_MAX_RESPONSE_BYTES);
+        let (_, mut report) = m.tick(0, now_epoch(), Some(&w));
+        if let Some(at) = later {
+            report = m.tick(at, now_epoch(), Some(&w)).1;
+        }
+        let Some(Report::MintFailed(e)) = report else {
+            panic!("a failed mint: {report:?}")
+        };
+        assert!(!m.is_ready());
+        (e, m.outage())
+    };
+    for (e, text) in [
+        (ConnError::Timeout, "timed out"),
+        (ConnError::Closed, "connection closed"),
+        (ConnError::Fault, "fault"),
+    ] {
+        assert_eq!(
+            fail(&|w| w.refuse(e), None),
+            (format!("token endpoint request failed: {text}"), true),
+            "open: {e:?}"
+        );
+        assert!(
+            fail(&|w| w.push(vec![Step::Fail(e)]), None).1,
+            "read: {e:?}"
+        );
+    }
+    assert_eq!(
+        fail(&|w| w.refuse(ConnError::Refused), None),
+        ("token endpoint request failed: refused".to_string(), false),
+        "a refusal by the host's own rules is no outage"
+    );
+    assert_eq!(
+        fail(&|w| w.push(vec![Step::Fail(ConnError::Timeout)]), None).0,
+        "token endpoint request failed: timed out"
+    );
+    let (e, outage) = fail(
+        &|w| w.push(vec![Step::Head(200), Step::Fail(ConnError::Closed)]),
+        None,
+    );
+    assert!(e.contains("mid-response"), "{e}");
+    assert!(outage, "a connection lost mid-response is an outage");
+    let (e, outage) = fail(
+        &|w| w.push(vec![Step::Pending, Step::Pending]),
+        Some(MINT_DEADLINE_SECS * S),
+    );
+    assert!(e.contains("mint deadline"), "{e}");
+    assert!(outage, "the deadline is an outage");
+}
