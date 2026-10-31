@@ -17,7 +17,6 @@
 //! `requested_token_type` (always an access token), `resource`, `scope` (present, empty when the
 //! call states none), POSTed to `token_url` over the plugin's own need.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use busbar_contract::abi::sdk::cred::{Cred, FormBody};
@@ -31,29 +30,15 @@ pub(crate) const GRANT_TYPE: &str = "urn:ietf:params:oauth:grant-type:token-exch
 /// `requested_token_type` (an access token back, not another exchangeable subject token).
 pub(crate) const ACCESS_TOKEN_TYPE: &str = "urn:ietf:params:oauth:token-type:access_token";
 
-/// One binding's exchange material, immutable after construction but for how its last exchange
-/// settled: every per-call exchange shares it and adds its own scope.
+/// One binding's exchange material, immutable after construction: every per-call exchange shares
+/// it and adds its own scope. How each scope's exchange settled is its own cell's
+/// ([`super::Minted::backing_off`]), never the binding's.
 pub(crate) struct Exchange {
     /// Busbar's own subject token: the chip's, written only into the token request's form.
     subject_token: Cred,
     subject_token_type: String,
     token_url: String,
     resource: String,
-    /// The binding's LAST settled exchange (any scope) failed: its `ready` fact reads `0` until one
-    /// lands (contract `OutboundReadyOut::ready`).
-    failing: AtomicBool,
-}
-
-impl Exchange {
-    /// Record how an exchange of this binding settled.
-    pub(crate) fn settled(&self, failed: bool) {
-        self.failing.store(failed, Ordering::Release);
-    }
-
-    /// Whether the binding's last settled exchange failed.
-    pub(crate) fn failing(&self) -> bool {
-        self.failing.load(Ordering::Acquire)
-    }
 }
 
 /// Build a binding's exchange material.
@@ -68,7 +53,6 @@ pub(crate) fn build(
         subject_token_type: subject_token_type.to_string(),
         token_url: token_url.to_string(),
         resource: resource.to_string(),
-        failing: AtomicBool::new(false),
     }
 }
 

@@ -330,11 +330,13 @@ impl Oauth {
     pub(crate) fn ready(&self, handle: u64) -> bool {
         match self.bound(handle) {
             Some(style::Binding::Minted(cell)) => cell.presents(self.wall_secs()),
-            // A token exchange is ready unless its last settled exchange failed (its authorization
-            // server is refusing, so `fields` would fail). One not asked yet IS ready: it mints
-            // lazily, per request, so reading it unready until it minted would keep its lane from
-            // ever being tried and so from ever minting.
-            Some(style::Binding::Exchange(b)) => !b.failing(),
+            // A token exchange is ready unless EVERY scope it recently tried is failing (each
+            // backing off after a failed exchange: its authorization server is refusing, so
+            // `fields` would fail). One not asked yet IS ready: it mints lazily, per request, so
+            // reading it unready until it minted would keep its lane from ever being tried and so
+            // from ever minting; and a failing scope clears when its back-off ends, so a later
+            // request retries.
+            Some(style::Binding::Exchange(b)) => self.exchange_ready(&b),
             None => false,
         }
     }

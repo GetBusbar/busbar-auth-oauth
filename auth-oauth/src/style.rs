@@ -66,9 +66,10 @@ pub struct ExchangeBinding {
 }
 
 impl ExchangeBinding {
-    /// Whether this binding's last settled exchange failed (its `ready` fact reads `0`).
-    pub(crate) fn failing(&self) -> bool {
-        self.exchange.failing()
+    /// Whether `cell` is one of this binding's scopes.
+    pub(crate) fn owns(&self, cell: &Minted) -> bool {
+        cell.exchange()
+            .is_some_and(|x| std::ptr::eq(x, Arc::as_ptr(&self.exchange)))
     }
 
     /// The cache key of this binding's cell for `scope`: SHA-256 over the binding's own key and the
