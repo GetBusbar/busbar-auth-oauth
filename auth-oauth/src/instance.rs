@@ -508,6 +508,11 @@ impl Oauth {
             match report {
                 Some(Report::Minted) => {}
                 Some(Report::TokenInvalidBytes) => {
+                    tracing::warn!(
+                        module = "oauth",
+                        "the OAuth mint got a token with bytes invalid in a header value; it is \
+                         not stored, and the mint retries"
+                    );
                     diags.push(
                         diag::OAUTH_TOKEN_INVALID_BYTES,
                         WARN,
@@ -516,12 +521,19 @@ impl Oauth {
                          unauthenticated, and the mint retries",
                     );
                 }
-                Some(Report::EmptyToken) => diags.push(
-                    diag::OAUTH_EMPTY_TOKEN,
-                    WARN,
-                    "OAuth token endpoint returned a 200 with an empty access_token; treating as a \
-                     mint failure and will retry",
-                ),
+                Some(Report::EmptyToken) => {
+                    tracing::warn!(
+                        module = "oauth",
+                        "the OAuth token endpoint returned 200 with an empty access_token; the \
+                         mint retries"
+                    );
+                    diags.push(
+                        diag::OAUTH_EMPTY_TOKEN,
+                        WARN,
+                        "OAuth token endpoint returned a 200 with an empty access_token; treating \
+                         as a mint failure and will retry",
+                    );
+                }
                 Some(Report::MintFailed(e)) => {
                     logged_failure(&cell, &e);
                     diags.push(
