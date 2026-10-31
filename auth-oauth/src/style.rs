@@ -147,17 +147,32 @@ const INSTANCE_KEYS: &[&[&str]] = &[
 /// naming it.
 ///
 /// # Errors
-/// One finding per unknown key.
+/// Findings for unknown keys and malformed present settings.
 pub(crate) fn instance_keys(m: &Map<String, Value>) -> Result<(), Vec<Refusal>> {
-    let unknown: Vec<Refusal> = m
+    let mut refusals: Vec<Refusal> = m
         .keys()
         .filter(|k| !INSTANCE_KEYS.iter().any(|row| row.contains(&k.as_str())))
         .map(|k| Refusal::Settings(format!("unknown key `{k}`")))
         .collect();
-    if unknown.is_empty() {
+    for key in [
+        "token_url",
+        "token_uri",
+        "scope",
+        "subject",
+        "resource",
+        "subject_token_type",
+    ] {
+        if let Err(refusal) = text(m, key) {
+            refusals.push(refusal);
+        }
+    }
+    if let Err(refusal) = max_response_bytes(m) {
+        refusals.push(refusal);
+    }
+    if refusals.is_empty() {
         Ok(())
     } else {
-        Err(unknown)
+        Err(refusals)
     }
 }
 
@@ -225,7 +240,13 @@ fn field<T: for<'de> Deserialize<'de>>(
 
 /// A non-blank string setting.
 fn text(m: &Map<String, Value>, key: &str) -> Result<Option<String>, Refusal> {
-    Ok(field::<String>(m, key, "a string")?.filter(|s| !s.trim().is_empty()))
+    let value = field::<String>(m, key, "a string")?;
+    if value.as_ref().is_some_and(|s| s.trim().is_empty()) {
+        return Err(Refusal::Settings(format!(
+            "outbound auth setting `{key}` is invalid: it must be a non-blank string"
+        )));
+    }
+    Ok(value)
 }
 
 /// The bounds a token response cap may take: below 1 KiB no real token response fits; above
