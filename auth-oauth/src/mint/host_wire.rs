@@ -230,3 +230,7 @@ impl Wire for HostWire<'_> {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "../tests/host_wire_tests.rs"]
+mod tests;
