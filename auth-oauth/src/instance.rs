@@ -53,8 +53,8 @@ pub struct Oauth {
     /// The instance's driver ticket, as its first `tick` names it: a binding opened, or a request
     /// waiting on a token, wakes it so a `drive` starts the mint at once.
     driver: Mutex<Ticket>,
-    /// The handle count of the driver ticket's cycle ([`HostWire`]): reset at each `tick`, carried
-    /// on through each `drive`.
+    /// The completion handle count of the driver ticket ([`HostWire`]), carried through every
+    /// `tick` and `drive` for that ticket's lifetime.
     issued: AtomicU32,
     /// The last `tick`'s clock (`TickIn::now_ns`) and the host's monotonic clock as it read then:
     /// a `drive` reads the tick clock from them (one host clock; the plugin reads none of its
@@ -390,7 +390,7 @@ impl Oauth {
 
     /// `cancel`: forget `ticket`.
     pub(crate) fn unpark(&self, ticket: Ticket) {
-        lock(&self.waiters).retain(|t| *t != ticket);
+        self.unpark_mint(ticket);
         // An emptied list is dropped with its key: no entry outlives the waiters it served.
         lock(&self.exchange_waiters).retain(|_, waiting| {
             waiting.retain(|t| *t != ticket);
@@ -626,12 +626,16 @@ impl Oauth {
             }
         };
         if let Some(failed) = failure {
-            let woken = lock(&self.exchange_waiters)
-                .remove(&key)
-                .unwrap_or_default();
-            if failed {
-                lock(&self.exchange_failed).extend(woken.iter().copied());
-            }
+            let woken = {
+                // Keep cancellation ordered with the transfer into the failed list:
+                // cancel removes the waiter first, then any recorded failure.
+                let mut waiting = lock(&self.exchange_waiters);
+                let woken = waiting.remove(&key).unwrap_or_default();
+                if failed {
+                    lock(&self.exchange_failed).extend(woken.iter().copied());
+                }
+                woken
+            };
             if let Some(h) = host {
                 for t in woken {
                     h.wake(t);

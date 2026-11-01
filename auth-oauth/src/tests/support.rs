@@ -97,19 +97,26 @@ pub(crate) fn fields_at(
         timestamp,
     };
     let answer = o.answer(&ask, Some(&host.host), &mut |h| {
-        written.push(format!("authorization: {h}"));
+        written.push(format!("authorization: {}", bearer_text(h)));
     });
     let outcome = match answer {
         Poll::Pending if ticket.is_none() => Outcome::Refused,
         Poll::Pending => Outcome::Pending,
         Poll::Ready(FieldsAnswer::Ready) => Outcome::Ready,
-        Poll::Ready(FieldsAnswer::Refused) => Outcome::Refused,
+        Poll::Ready(FieldsAnswer::Refused | FieldsAnswer::RefusedBecause(_)) => Outcome::Refused,
         Poll::Ready(FieldsAnswer::Failed(_)) => Outcome::Failed,
     };
     if outcome != Outcome::Ready {
         written.clear();
     }
     (outcome, written.join(" ; "))
+}
+
+/// The bytes a sealed write carries, read back through the SDK's dev-only test support.
+pub(crate) fn bearer_text(credential: &busbar_contract::abi::sdk::cred::Cred) -> String {
+    sealed_text(&mut busbar_contract::abi::sdk::cred::SealedWrite::new(
+        busbar_contract::abi::sdk::cred::Parts::new().sealed(credential.bearer()),
+    ))
 }
 
 /// The bytes a sealed write carries, read back through the SDK's dev-only test support.

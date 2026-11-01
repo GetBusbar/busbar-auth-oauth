@@ -370,10 +370,12 @@ const EXPECTED: &[&str] = &[
      plugin",
     "open_outbound kerberos Failed settings: outbound auth style `kerberos` is not served by this \
      plugin",
-    // Before the first mint: READY with no fields (the upstream answers 401, as in 1.5.5).
-    "fields Ready  ",
-    "fields Refused ",
-    "fields Refused ",
+    // Before the first mint: fail locally with the same stable reason as an unavailable token.
+    "fields Failed no OAuth token could be minted for this binding (see diagnostics \
+     BUSBAR-4014/4015/4016); the call is refused rather than sent unauthenticated, and the mint \
+     retries on its schedule",
+    "fields Refused the auth plugin refused the request's fields and gave no reason",
+    "fields Refused the auth plugin refused the request's fields and gave no reason",
     "ready Ready 0",
     "tick Ready next=30000001000",
     "verify Refused",
@@ -381,7 +383,7 @@ const EXPECTED: &[&str] = &[
     "refresh Ready",
     "open_outbound oauth-client-credentials Ready ",
     "retire 1 Ready",
-    "after retire fields Refused ",
+    "after retire fields Refused the auth plugin refused the request's fields and gave no reason",
     "gen 2 fields Failed no OAuth token could be minted for this binding (see diagnostics \
      BUSBAR-4014/4015/4016); the call is refused rather than sent unauthenticated, and the mint \
      retries on its schedule",
@@ -407,6 +409,10 @@ const EXPECTED_FOLDS: &[&str] = &[
     "diag 4294967295 sev=0 busbar_auth_oauth: outbound binding refused module=\"oauth\" \
      style=\"kerberos\" reason=\"settings: outbound auth style `kerberos` is not served by this \
      plugin\"",
+    "diag 4294967295 sev=0 busbar_auth_oauth: fields failed: no token to present \
+     module=\"oauth\" reason=\"no OAuth token could be minted for this binding (see diagnostics \
+     BUSBAR-4014/4015/4016); the call is refused rather than sent unauthenticated, and the mint \
+     retries on its schedule\"",
     FIELDS_REFUSED,
     FIELDS_REFUSED,
     "diag 2 sev=1 OAuth token mint failed; will retry error=token endpoint request failed: no \
@@ -524,19 +530,9 @@ fn the_diag_indices_name_their_catalog_codes() {
     );
 }
 
-#[test]
-fn red_a_field_without_the_sensitive_flag() {
-    let d = Dispatcher::new(DispatchConfig::default());
-    let folds = Arc::new(Folds::default());
-    let red =
-        load_linked::<Auth>(&row(insensitive_door), bind(&folds, &d)).expect("the door loads");
-    let t = script(&red);
-    assert_eq!(
-        t, EXPECTED,
-        "no mint lands without a connection table (the step 20-21 seam), so this build's \
-         transcript is unchanged — the RED case that DOES diverge is covered end to end by \
-         busbar-auth-header, whose styles mint nothing and so always answer fields synchronously"
-    );
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn red_a_field_without_the_sensitive_flag() {
+    mint_door::check_binding(insensitive_door, false).await;
 }
 
 extern "C" fn overrunning_fields(_: *mut c_void, i: *const c_void, o: *mut c_void) -> RawOutcome {
@@ -802,13 +798,22 @@ mod mint_door {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_binding_presents_its_minted_bearer_then_the_refreshed_one() {
-        SEALED_REQUIRED.store(false, Ordering::SeqCst);
+        check_binding(observed_door, true).await;
+    }
+
+    pub(super) async fn check_binding(
+        door: busbar_contract::abi::mechanism::door::DoorFn,
+        sensitive: bool,
+    ) {
+        if sensitive {
+            SEALED_REQUIRED.store(false, Ordering::SeqCst);
+        }
         let table = Arc::new(TokenEndpoint::default());
         let dispatcher = Arc::new(Dispatcher::with_services(
             DispatchConfig::default(),
             Arc::new(Clock(Instant::now())),
         ));
-        let row = LinkedRow::of(observed_door).expect("the door states its Statement");
+        let row = LinkedRow::of(door).expect("the door states its Statement");
         let plugin = load_linked::<Auth>(
             &row,
             Bind {
@@ -856,12 +861,11 @@ mod mint_door {
             .open_outbound("oauth-client-credentials", CREDENTIAL.as_bytes(), &settings)
             .expect("the binding opens");
 
-        // BEFORE THE FIRST MINT: READY with no fields on the spot, so the upstream answers 401, as
-        // in 1.5.5 (THE DESIGN §11.11); `ready` stays 0.
+        // Before the first mint, fail locally; no upstream request may be sent anonymously.
         let request = FieldsRequest::default();
         assert!(
-            matches!(instance.fields_now(handle, &request), Some(Fields::Ready(f)) if f.is_empty()),
-            "nothing minted yet: READY with no fields"
+            matches!(instance.fields_now(handle, &request), Some(Fields::Failed)),
+            "nothing minted yet: failed closed"
         );
 
         // THE TICK SCHEDULE: the first mint lands, and the next call presents it.
@@ -877,9 +881,22 @@ mod mint_door {
         })
         .await
         .expect("the first mint lands");
-        assert!(
-            SEALED_REQUIRED.load(Ordering::SeqCst),
-            "the actual minted bearer must carry its secure-field requirement to the host"
+        if sensitive {
+            assert!(
+                SEALED_REQUIRED.load(Ordering::SeqCst),
+                "the actual minted bearer must carry its secure-field requirement to the host"
+            );
+        }
+        let Fields::Ready(ref fields) = first else {
+            panic!("the minted bearer is ready");
+        };
+        let bearer = fields
+            .iter()
+            .find(|field| field.name == b"authorization")
+            .expect("the actual mint writes an authorization field");
+        assert_eq!(
+            bearer.sensitive, sensitive,
+            "the real field's flag distinguishes the altered door"
         );
         assert!(
             presents(&first, "Bearer oracle-minted-1"),

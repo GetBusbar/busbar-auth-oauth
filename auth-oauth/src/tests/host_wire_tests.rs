@@ -353,7 +353,9 @@ fn a_jwt_bearer_mint_runs_over_the_host_wire_at_the_hosts_wall_seconds() {
         ticket: Ticket::NONE,
         timestamp: 0,
     };
-    let answer = o.answer(&ask, Some(&h), &mut |v| written.push(v.to_string()));
+    let answer = o.answer(&ask, Some(&h), &mut |v| {
+        written.push(crate::test_support::bearer_text(v))
+    });
     assert!(matches!(
         answer,
         std::task::Poll::Ready(busbar_contract::abi::sdk::auth_outbound::FieldsAnswer::Ready)

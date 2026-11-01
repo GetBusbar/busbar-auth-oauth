@@ -92,11 +92,11 @@ impl ExchangeBinding {
 
     /// What a new cell for `scope` mints with, and its response cap: built only when the cache
     /// holds no cell for the scope yet.
-    pub(crate) fn minter(&self, scope: &[u8]) -> (Minter, usize) {
+    pub(crate) fn minter(&self, scope: &str) -> (Minter, usize) {
         (
             Minter::TokenExchange(mint::token_exchange::Scoped::new(
                 Arc::clone(&self.exchange),
-                &String::from_utf8_lossy(scope),
+                scope,
             )),
             self.max_response_bytes,
         )
@@ -452,7 +452,7 @@ fn open_client_credentials(
         _ => text(m, "scope").map_err(|r| vec![r])?,
     };
     let cred = credential.unwrap_or("");
-    if !cred.trim().is_empty() {
+    if credential.is_some() {
         if let Err(e) = mint::oauth_client_credentials::validate_credential(cred) {
             refusals.push(Refusal::Credential(e));
         }

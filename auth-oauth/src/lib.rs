@@ -13,8 +13,8 @@
 //!   (generation data). It never touches the network.
 //! * `fields` is called by the binding's transport at the style's auth point (`Head`): the auth fields for this request, staged into the SDK's
 //!   writer, which the transport adds to the head before it encodes it.
-//!   Neither style serves the caller's credential — an OAuth token is always minted from the
-//!   OPERATOR's own configured credential, never a per-request one — so neither style declares
+//!   None of these styles serves the caller's credential — an OAuth token is always minted from the
+//!   OPERATOR's own configured credential, never a per-request one — so none of these styles declares
 //!   [`busbar_contract::abi::auth::STYLE_CALLER_CREDENTIAL`].
 //! * `outbound_ready` is the handle's `ready` fact for the health prober.
 //! * `tick` refreshes minted tokens ahead of expiry.
@@ -27,10 +27,10 @@
 //! instance's driver ticket, and fails (FAILED) when the exchange does.
 //!
 //! Each style mints through the plugin's own need and refreshes ahead of expiry on `tick`
-//! ([`mint`]). The kernel holds no auth cache and does no per-plugin branching.
+//! (`mint`). The kernel holds no auth cache and does no per-plugin branching.
 //!
 //! The door is the SDK's safe outbound-auth kit (`busbar_contract::abi::sdk::auth_outbound`,
-//! `auth_outbound_door!`): [`Oauth`](instance::Oauth) is its [`OutboundPlugin`], and the crate
+//! `auth_outbound_door!`): `Oauth` is its [`OutboundPlugin`], and the crate
 //! holds no `unsafe` (`#![forbid(unsafe_code)]`). The inbound
 //! operations (`verify`, the login pair) are not served and answer REFUSED (the tail declares only
 //! the outbound capability).
@@ -87,6 +87,7 @@ use busbar_contract::abi::sdk::auth_outbound::{
     Mode, OpenRefusal, OutboundPlugin,
 };
 use busbar_contract::abi::sdk::conn::Host;
+use busbar_contract::abi::sdk::cred::{Cred, Parts};
 use busbar_contract::abi::sdk::door::{abi_str, statement};
 use busbar_contract::abi::sdk::exchange::Op;
 use busbar_contract::abi::sdk::life::{self, Refusal};
@@ -145,7 +146,8 @@ const fn token_need(target_from: &'static str) -> Need {
     }
 }
 
-/// THE PLUGIN'S OWN NEEDS, in [`mint::need`] order: `oauth-client-credentials` POSTs to the
+/// THE PLUGIN'S OWN NEEDS, in `mint::need` order: `oauth-client-credentials` and
+/// `oauth-token-exchange` POST to the
 /// binding's `token_url`, `jwt-bearer` to its `token_uri`.
 pub const NEEDS: &[Need] = &[
     token_need("settings.token_url"),
@@ -218,22 +220,20 @@ pub(crate) struct Ask<'a> {
 }
 
 /// What a read answers a call at once (`None`: it waits), the header handed to `present`.
-fn ready_answer(r: Read<'_>, present: &mut dyn FnMut(&str)) -> Option<FieldsAnswer> {
+fn ready_answer(r: Read<'_>, present: &mut dyn FnMut(&Cred)) -> Option<FieldsAnswer> {
     match r {
         Read::Header(h) => {
             present(h);
             Some(FieldsAnswer::Ready)
         }
-        Read::Nothing => Some(FieldsAnswer::Ready),
         Read::Refuse(why) => Some(FieldsAnswer::Failed(Cow::Borrowed(why))),
         Read::Wait => None,
     }
 }
 
 impl Oauth {
-    /// THE ANSWER TO ONE `fields`: the cached bearer, handed to `present` (READY with it); READY
-    /// with no field only in the boot window before a scheduled style's first mint is attempted
-    /// (the contract's rule at this pin); PENDING on a ticket while the call waits for a token (an
+    /// THE ANSWER TO ONE `fields`: the cached bearer, handed to `present` (READY with it); FAILED
+    /// with an explanation before a scheduled style's first mint; PENDING on a ticket while the call waits for a token (an
     /// expired one whose refresh failed, or a token exchange in flight), woken when one lands or
     /// the mint fails; REFUSED for a passthrough or a handle this generation does not hold; FAILED,
     /// saying why, when there is no token to present after a mint (it failed, or its token cannot
@@ -246,7 +246,7 @@ impl Oauth {
         &self,
         ask: &Ask<'_>,
         host: Option<&Host>,
-        present: &mut dyn FnMut(&str),
+        present: &mut dyn FnMut(&Cred),
     ) -> Poll<FieldsAnswer> {
         if !ask.own {
             return Poll::Ready(FieldsAnswer::Refused);
@@ -275,13 +275,18 @@ impl Oauth {
                 scope.len()
             ))));
         }
+        let Ok(scope_text) = std::str::from_utf8(scope) else {
+            return Poll::Ready(FieldsAnswer::Failed(Cow::Borrowed(
+                "the call's token-exchange scope is not UTF-8; the call is refused rather than exchanged with a changed scope",
+            )));
+        };
         let key = x.scope_key(scope);
         // The lookup and the park are one critical section with the cache (instance.rs).
         // A call parks only when it would wait: not on a usable token, nor on a scope backing off
         // after a failed exchange (that call fails at once, below).
         let cell = match self.exchange_cell(
             key,
-            || x.minter(scope),
+            || x.minter(scope_text),
             ticket,
             |c| c.usable(now) || c.backing_off(now),
             |c| x.owns(c),
@@ -303,11 +308,6 @@ impl Oauth {
                 self.unpark_exchange(key, ticket);
                 Poll::Ready(FieldsAnswer::Failed(Cow::Borrowed(why)))
             }
-            // An on-demand cell presents only a usable token: unreachable, refused all the same.
-            Read::Nothing => {
-                self.unpark_exchange(key, ticket);
-                Poll::Ready(FieldsAnswer::Failed(Cow::Borrowed(mint::NO_TOKEN)))
-            }
             Read::Wait => {
                 self.mint_soon(host);
                 Poll::Pending
@@ -322,9 +322,10 @@ impl Oauth {
         ticket: Ticket,
         now: u64,
         host: Option<&Host>,
-        present: &mut dyn FnMut(&str),
+        present: &mut dyn FnMut(&Cred),
     ) -> Poll<FieldsAnswer> {
         if let Some(a) = m.read(now, |r| ready_answer(r, &mut *present)) {
+            self.unpark_mint(ticket);
             return Poll::Ready(a);
         }
         if ticket.is_none() {
@@ -434,7 +435,11 @@ impl OutboundPlugin for Oauth {
             timestamp: request.timestamp(),
         };
         let answer = self.answer(&ask, op.host(), &mut |h| {
-            out.push(b"authorization", h.as_bytes(), FIELD_FLAGS);
+            out.push_sealed(
+                b"authorization",
+                Parts::new().sealed(h.bearer()),
+                FIELD_FLAGS,
+            );
         });
         match &answer {
             Poll::Ready(FieldsAnswer::Refused) => tracing::info!(

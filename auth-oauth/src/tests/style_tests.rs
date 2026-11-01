@@ -500,7 +500,7 @@ fn max_response_bytes_reaches_the_cell() {
     ) else {
         panic!("the exchange binding opens")
     };
-    assert_eq!(x.minter(b"s").1, 8192);
+    assert_eq!(x.minter("s").1, 8192);
 }
 
 #[test]

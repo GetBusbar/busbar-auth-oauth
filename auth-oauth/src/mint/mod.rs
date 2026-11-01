@@ -25,13 +25,12 @@ pub(crate) mod token_exchange;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
-use busbar_contract::abi::sdk::cred::{FormBody, SealedWrite};
+use busbar_contract::abi::sdk::cred::{Cred, FormBody, SealedWrite};
 use busbar_contract::conn::{ConnError, ConnId, PieceKind};
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::token_response::{default_expires_in, deserialize_expires_in, wiped_member};
 use busbar_contract::abi::sdk::auth_kit::json_error;
-use busbar_contract::header::{is_legal_header_value, token_value};
 
 /// Refresh this many seconds BEFORE the token's stated expiry, so a request never races an expired
 /// token across the refresh boundary.
@@ -123,7 +122,6 @@ impl std::fmt::Debug for Read<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Header(_) => f.write_str("Header([REDACTED])"),
-            Self::Nothing => f.write_str("Nothing"),
             Self::Refuse(why) => f.debug_tuple("Refuse").field(why).finish(),
             Self::Wait => f.write_str("Wait"),
         }
@@ -143,12 +141,10 @@ impl Minter {
 /// A minted access token and the wall-clock epoch second it expires at.
 pub(crate) struct CachedToken {
     /// The minted bearer, wiped on drop (no `Debug` of it: [`CachedToken`]'s own prints none).
-    pub(crate) token: Zeroizing<String>,
+    pub(crate) token: Cred,
     pub(crate) expires_at: u64,
-    /// The `Bearer <token>` value, pre-built ONCE here (at mint time) rather than on every request.
-    /// `None` when `token` is empty (the pre-first-mint sentinel) or contains bytes invalid for an
-    /// header value — both cases mean "emit no auth header".
-    header: Option<Zeroizing<String>>,
+    /// Whether this token may be presented; the SDK builds its sealed Bearer field at delivery.
+    presentable: bool,
     /// The reply's `token_type`, as it stated it (`None`: it stated none).
     pub(crate) token_type: Option<String>,
     /// An RFC 8693 reply's `issued_token_type` (`None`: it stated none).
@@ -165,27 +161,20 @@ impl std::fmt::Debug for CachedToken {
 }
 
 impl CachedToken {
-    /// Construct a `CachedToken`, building its header once here. The second value is whether the
+    /// Construct a `CachedToken`, capturing its credential without a plaintext header copy. The second value is whether the
     /// token was omitted for bytes invalid in a header value (the caller reports it). The token
     /// arrives already wiped on drop (a response's token is read into a wiped buffer and moved
     /// here, [`access_token`]).
-    pub(crate) fn new(token: Zeroizing<String>, expires_at: u64) -> (Self, bool) {
-        let (header, invalid) = if token.is_empty() {
-            (None, false)
-        } else {
-            let mut v = token_value(&token);
-            if is_legal_header_value(&v) {
-                (Some(Zeroizing::new(v)), false)
-            } else {
-                v.zeroize();
-                (None, true)
-            }
-        };
+    pub(crate) fn new(mut token: Zeroizing<String>, expires_at: u64) -> (Self, bool) {
+        let token = Cred::captured(Zeroizing::new(std::mem::take(&mut *token).into_bytes()))
+            .require_secure();
+        let invalid = !token.is_field_value();
+        let presentable = !token.is_empty() && !invalid;
         (
             Self {
                 token,
                 expires_at,
-                header,
+                presentable,
                 token_type: None,
                 issued_token_type: None,
             },
@@ -228,9 +217,9 @@ impl CachedToken {
         ))
     }
 
-    /// The header value, when there is one to present.
-    pub(crate) fn header(&self) -> Option<&str> {
-        self.header.as_ref().map(|h| h.as_str())
+    /// The sealed credential, when there is one to present.
+    pub(crate) fn header(&self) -> Option<&Cred> {
+        self.presentable.then_some(&self.token)
     }
 }
 
@@ -556,12 +545,8 @@ pub(crate) const UNPRESENTABLE: &str = "the minted OAuth token holds bytes inval
 /// The answer the per-request call reads. No `Debug`: it carries the bearer.
 #[derive(PartialEq, Eq)]
 pub(crate) enum Read<'a> {
-    /// Present this header value (`Bearer <token>`).
-    Header(&'a str),
-    /// No header: the boot window before the first mint is attempted (READY with no fields, the
-    /// contract's rule at this pin: `busbar-test-kit` outbound script, "fields before the first
-    /// mint").
-    Nothing,
+    /// Present this credential through the SDK's sealed Bearer field recipe.
+    Header(&'a Cred),
     /// Nothing can be presented after a mint: the call is FAILED, saying why (never sent
     /// unauthenticated).
     Refuse(&'static str),
@@ -757,15 +742,10 @@ impl Minted {
         // `usable_until`, so a read that finds the cell usable snapshots the stored token, never
         // an older (empty or expired) one an exchange landing in between has replaced.
         let tok = self.current();
-        // Before the first mint is attempted a scheduled cell presents nothing (the contract's
-        // boot window); once a mint has failed with no token held, the call is refused, saying
-        // why, never sent unauthenticated.
+        // No token is never a successful presentation, including before the first scheduled
+        // mint. The driver still mints on its schedule; this request is not sent anonymously.
         if tok.token.is_empty() {
-            return if self.refresh_failed.load(Ordering::Acquire) {
-                f(Read::Refuse(NO_TOKEN))
-            } else {
-                f(Read::Nothing)
-            };
+            return f(Read::Refuse(NO_TOKEN));
         }
         if now >= tok.expires_at && self.refresh_failed.load(Ordering::Acquire) {
             return f(Read::Wait);
@@ -928,13 +908,16 @@ impl Minted {
                     }
                     if got.kind == PieceKind::Completion || (got.kind == PieceKind::Body && got.end)
                     {
-                        break Ok((status.unwrap_or(0), std::mem::take(body)));
+                        break match *status {
+                            Some(status) => Ok((status, std::mem::take(body))),
+                            None => Err((
+                                "token endpoint response ended without a response head; refusing to parse a partial token response".to_string(),
+                                true,
+                            )),
+                        };
                     }
                 }
                 Err(ConnError::Pending) => return (now_ns.saturating_add(IN_FLIGHT_POLL_NS), None),
-                Err(ConnError::Closed) if status.is_some() && !body.is_empty() => {
-                    break Ok((status.unwrap_or(0), std::mem::take(body)))
-                }
                 Err(ConnError::Closed) => {
                     break Err((
                         "token endpoint connection failed mid-response; refusing to parse \

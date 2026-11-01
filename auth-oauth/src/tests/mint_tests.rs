@@ -12,7 +12,7 @@ use std::collections::VecDeque;
 /// A read as the tests compare it: the header value shown (`Read`'s own `Debug` redacts it).
 pub(crate) fn seen(r: Read<'_>) -> String {
     match r {
-        Read::Header(h) => format!("Header({h:?})"),
+        Read::Header(h) => format!("Header({:?})", crate::test_support::bearer_text(h)),
         other => format!("{other:?}"),
     }
 }
@@ -188,13 +188,13 @@ fn a_cached_token_is_redacted_in_debug() {
 fn a_cached_token_omits_the_header_for_bytes_invalid_in_a_header_value() {
     let (t, invalid) = CachedToken::new(Zeroizing::new("tok\r\nen".to_string()), 5);
     assert!(invalid);
-    assert_eq!(t.header(), None);
+    assert!(t.header().is_none());
     let (t, invalid) = CachedToken::new(Zeroizing::new(String::new()), 0);
     assert!(
         !invalid,
         "the pre-first-mint sentinel is not a reportable token"
     );
-    assert_eq!(t.header(), None);
+    assert!(t.header().is_none());
 }
 
 /// The texts a failed exchange names: the status line plus, only when the body is JSON with an
@@ -223,7 +223,10 @@ fn a_refused_or_malformed_response_is_named_in_1_5_5_words() {
     assert!(e.starts_with("token response JSON invalid: "), "{e}");
     let (t, _) = parse_response(200, br#"{"access_token":"a","expires_in":"7200"}"#, 10).unwrap();
     assert_eq!(t.expires_at, 7210);
-    assert_eq!(t.header(), Some("Bearer a"));
+    assert_eq!(
+        t.header().map(crate::test_support::bearer_text).as_deref(),
+        Some("Bearer a")
+    );
 }
 
 /// `expires_in` tolerates a number, a numeric string, a float, a decimal string and absence.
@@ -291,7 +294,10 @@ fn an_escaped_access_token_is_read_into_one_wiped_buffer_never_by_the_decoder() 
     );
     let (t, invalid) = parse_response(200, body.as_bytes(), 0).expect("a minted token");
     assert!(!invalid);
-    assert_eq!(t.header(), Some("Bearer ya29.a/bAc"));
+    assert_eq!(
+        t.header().map(crate::test_support::bearer_text).as_deref(),
+        Some("Bearer ya29.a/bAc")
+    );
     assert_eq!(t.expires_at, 60);
     // A nested `access_token` is not the response's.
     let nested = r#"{"x":{"access_token":"no"},"l":["access_token"],"access_token":"yes\n"}"#;
@@ -317,8 +323,8 @@ fn the_first_tick_mints_and_the_request_path_presents_it() {
     assert!(!m.is_ready());
     assert_eq!(
         m.read(now_epoch(), seen),
-        "Nothing",
-        "nothing minted yet: READY with no fields (the upstream answers 401, as in 1.5.5)"
+        format!("Refuse({NO_TOKEN:?})"),
+        "nothing minted yet: refuse locally rather than sending an anonymous request"
     );
     let (due, report) = m.tick(1_000, now_epoch(), Some(&w));
     assert_eq!(report, Some(Report::Minted));
@@ -419,10 +425,10 @@ fn a_dropped_or_refused_exchange_is_a_failure() {
     );
 }
 
-/// A CLOSE-DELIMITED RESPONSE: a head, a complete token body, then the connection closing (no end
-/// marker) is the whole response, and mints the token.
+/// A connection close before the protocol's terminal piece is an outage, even when the
+/// partial response body happens to be complete JSON.
 #[test]
-fn a_close_after_a_complete_body_mints_the_token() {
+fn a_close_before_the_terminal_piece_is_an_outage() {
     let w = Scripted::default();
     w.push(vec![
         Step::Head(200),
@@ -434,8 +440,16 @@ fn a_close_after_a_complete_body_mints_the_token() {
     ]);
     let m = Minted::new(client_credentials(), DEFAULT_MAX_RESPONSE_BYTES);
     let (_, report) = m.tick(0, now_epoch(), Some(&w));
-    assert_eq!(report, Some(Report::Minted));
-    assert!(m.is_ready());
+    assert_eq!(
+        report,
+        Some(Report::MintFailed(
+            "token endpoint connection failed mid-response; refusing to parse a partial token response"
+                .to_string()
+        ))
+    );
+    assert!(!m.is_ready());
+    assert!(m.outage());
+    assert_eq!(*w.closed.lock().unwrap(), 1);
 }
 
 /// An exchange still unread at the mint deadline is abandoned in 1.5.5's words.

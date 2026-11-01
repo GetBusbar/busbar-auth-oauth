@@ -149,13 +149,11 @@ fn oauth_client_credentials_mints_on_tick_and_honours_the_expired_token_rule() {
         "client-abc:s3cr&t",
         r#"{"token_url":"https://login.example.com/tenant/oauth2/v2.0/token","scope":"https://cognitiveservices.azure.com/.default"}"#,
     );
-    // BEFORE THE FIRST MINT: READY with zero fields, so the upstream answers 401, as 1.5.5 did
-    // (THE DESIGN §11.11; App. A B.3; contract `abi/auth` `fields`). RED before the fix: the call
-    // parked until the first mint landed.
+    // Before the first mint, refuse locally without presenting or parking the request.
     assert_eq!(
         fields(&o, &host, h, Ticket::NONE),
-        (Outcome::Ready, String::new()),
-        "before the first mint, ticket-less: READY, no fields"
+        (Outcome::Failed, String::new()),
+        "before the first mint, ticket-less: failed closed"
     );
     let first = Ticket {
         slot: 2,
@@ -163,8 +161,8 @@ fn oauth_client_credentials_mints_on_tick_and_honours_the_expired_token_rule() {
     };
     assert_eq!(
         fields(&o, &host, h, first),
-        (Outcome::Ready, String::new()),
-        "before the first mint, on a ticket: READY, no fields, nothing parked"
+        (Outcome::Failed, String::new()),
+        "before the first mint, on a ticket: failed closed, nothing parked"
     );
 
     // THE FIRST MINT, on the first tick: a ten-minute token, so the rule can run on the wall
@@ -545,7 +543,7 @@ fn a_cell_settled_between_the_lookup_and_the_park_is_not_a_lost_wake() {
             oauth
                 .exchange_cell(
                     key,
-                    || binding.minter(b"s"),
+                    || binding.minter("s"),
                     call,
                     |_| {
                         entered.send(()).unwrap();
@@ -664,7 +662,7 @@ fn fields_at(
         timestamp,
     };
     let answer = o.answer(&ask, Some(&host.host), &mut |h| {
-        written.push(format!("authorization: {h}"));
+        written.push(format!("authorization: {}", test_support::bearer_text(h)));
     });
     match answer {
         std::task::Poll::Ready(busbar_contract::abi::sdk::auth_outbound::FieldsAnswer::Ready) => {

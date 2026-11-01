@@ -6,7 +6,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
-description = "The OAuth self-minting auth styles (jwt-bearer, oauth-client-credentials), as one auth-kind plugin on the auth kind's memory ABI."
+description = "The OAuth self-minting auth styles (jwt-bearer, oauth-client-credentials, oauth-token-exchange), as one auth-kind plugin on the auth kind's memory ABI."
 
 # MOVED from busbar (crates/busbar-auth-oauth at busbar bb0c7f71d4, history imported;
 # BUSBAR-1.6.0.md §9: every plugin lives in its own repo). The source is busbar's verbatim.

@@ -336,7 +336,7 @@ fn validate_never_echoes_a_byte_of_the_service_account_key() {
     let e = pem_to_pkcs8_der("-----BEGIN PRIVATE KEY-----\nAz==\n-----END PRIVATE KEY-----\n")
         .expect_err("`Az==` has nonzero trailing bits");
     assert!(
-        !e.contains("122"),
+        !e.contains("'z'") && !e.contains("0x7a") && !e.contains("Invalid last symbol"),
         "the helper must not name a byte of the key either, got: {e}"
     );
 }

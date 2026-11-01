@@ -862,3 +862,47 @@ fn invalid_scope_bytes_are_refused_before_any_exchange_or_token_presentation() {
     assert_eq!(wire.sent.lock().unwrap().len(), 1);
     assert!(form(&wire.sent.lock().unwrap()[0].2).contains(&("scope".into(), "read write".into())));
 }
+
+#[test]
+fn a_configured_subject_token_type_reaches_the_actual_exchange() {
+    let host = TestHost::new();
+    let wire = Arc::new(Scripted::default());
+    let oauth = instance(&wire);
+    let settings = serde_json::json!({
+        "token_url": "https://as.example/token",
+        "resource": "https://tools.example/rpc",
+        "subject_token_type": JWT_TOKEN_TYPE,
+    });
+    let binding = style::open(
+        style::OAUTH_TOKEN_EXCHANGE,
+        Some(SUBJECT.as_bytes()),
+        Some(&serde_json::to_vec(&settings).unwrap()),
+        &oauth,
+    )
+    .unwrap_or_else(|_| panic!("the JWT subject binding opens"));
+    let handle = oauth.keep_binding(binding);
+    let call = ticket(1910);
+    assert_eq!(
+        fields(&oauth, &host, handle, call, Some("read")).0,
+        Outcome::Pending
+    );
+    wire.ok(r#"{"access_token":"jwt-subject-result","expires_in":3600}"#);
+    oauth.tick(1_000, Ticket::NONE, Some(&host.host), &mut Diags::default());
+    assert_eq!(host.take(), [call]);
+    assert_eq!(
+        fields(&oauth, &host, handle, call, Some("read")),
+        (
+            Outcome::Ready,
+            "authorization: Bearer jwt-subject-result".to_string()
+        )
+    );
+    let sent = wire.sent.lock().unwrap();
+    assert_eq!(sent.len(), 1);
+    let body = form(&sent[0].2);
+    assert!(body.contains(&("subject_token_type".to_string(), JWT_TOKEN_TYPE.to_string())));
+    assert!(body.contains(&("subject_token".to_string(), SUBJECT.to_string())));
+    assert!(body.contains(&(
+        "requested_token_type".to_string(),
+        ACCESS_TOKEN_TYPE.to_string()
+    )));
+}

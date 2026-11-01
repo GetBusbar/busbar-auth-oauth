@@ -41,7 +41,11 @@ fn top_level_string<'a>(json: &'a [u8], name: &[u8]) -> Option<&'a [u8]> {
                 if depth == 1 && want_value {
                     return Some(s);
                 }
-                want_value = depth == 1 && expect_name && s == name;
+                want_value = depth == 1
+                    && expect_name
+                    && (s == name
+                        || (s.contains(&b'\\')
+                            && unescape(s).is_some_and(|key| key.as_bytes() == name)));
                 expect_name = false;
                 i = j + 1;
                 continue;
@@ -103,6 +107,9 @@ fn unescape(raw: &[u8]) -> Option<Zeroizing<String>> {
                 let hi = hex4(i + 2)?;
                 if (0xD800..0xDC00).contains(&hi) && raw.get(i + 6..i + 8) == Some(&b"\\u"[..]) {
                     let lo = hex4(i + 8)?;
+                    if !(0xDC00..=0xDFFF).contains(&lo) {
+                        return None;
+                    }
                     i += 6;
                     char::from_u32(0x10000 + ((hi - 0xD800) << 10) + (lo.checked_sub(0xDC00)?))?
                 } else {
