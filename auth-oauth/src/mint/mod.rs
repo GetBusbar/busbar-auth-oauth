@@ -597,6 +597,8 @@ pub(crate) struct Minted {
     failure: Mutex<Option<String>>,
     /// When a request last used this on-demand cell, as the instance's use count stamps it.
     last_used: AtomicU64,
+    #[cfg(test)]
+    before_usable: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 impl Minted {
@@ -619,6 +621,8 @@ impl Minted {
             retry_at: AtomicU64::new(0),
             failure: Mutex::new(None),
             last_used: AtomicU64::new(0),
+            #[cfg(test)]
+            before_usable: Mutex::new(None),
         }
     }
 
@@ -648,6 +652,13 @@ impl Minted {
 
     /// An on-demand cell holds a token it presents at wall-clock `now`.
     pub(crate) fn usable(&self, now: u64) -> bool {
+        #[cfg(test)]
+        {
+            let hook = self.before_usable.lock().unwrap().take();
+            if let Some(hook) = hook {
+                hook();
+            }
+        }
         self.is_ready() && now < self.usable_until.load(Ordering::Acquire)
     }
 

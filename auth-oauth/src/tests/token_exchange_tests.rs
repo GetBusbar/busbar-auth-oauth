@@ -818,3 +818,47 @@ fn an_unscoped_exchange_sends_no_scope_parameter() {
     );
     assert!(form.iter().all(|(k, _)| k != "scope"), "{form:?}");
 }
+
+#[test]
+fn invalid_scope_bytes_are_refused_before_any_exchange_or_token_presentation() {
+    let host = TestHost::new();
+    let wire = Arc::new(Scripted::default());
+    let oauth = instance(&wire);
+    let handle = open(&oauth);
+    for (slot, scope) in [b"read\xff".as_slice(), b"read\xfe".as_slice()]
+        .into_iter()
+        .enumerate()
+    {
+        let ask = crate::Ask {
+            handle,
+            own: true,
+            scope: Some(scope),
+            ticket: ticket(1800 + slot as u32),
+            timestamp: now_epoch(),
+        };
+        let mut presented = false;
+        let answer = oauth.answer(&ask, Some(&host.host), &mut |_| presented = true);
+        assert!(
+            matches!(answer, std::task::Poll::Ready(busbar_contract::abi::sdk::auth_outbound::FieldsAnswer::Failed(ref reason)) if !reason.is_empty())
+        );
+        assert!(!presented);
+        oauth.tick(0, Ticket::NONE, Some(&host.host), &mut Diags::default());
+        assert!(
+            wire.sent.lock().unwrap().is_empty(),
+            "refused bytes must never become a lossy exchange"
+        );
+    }
+    let call = ticket(1810);
+    assert_eq!(
+        fields(&oauth, &host, handle, call, Some("read write")).0,
+        Outcome::Pending
+    );
+    wire.ok(r#"{"access_token":"valid-scope","expires_in":3600}"#);
+    oauth.tick(1, Ticket::NONE, Some(&host.host), &mut Diags::default());
+    assert_eq!(
+        fields(&oauth, &host, handle, call, Some("read write")).1,
+        "authorization: Bearer valid-scope"
+    );
+    assert_eq!(wire.sent.lock().unwrap().len(), 1);
+    assert!(form(&wire.sent.lock().unwrap()[0].2).contains(&("scope".into(), "read write".into())));
+}

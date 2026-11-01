@@ -332,6 +332,13 @@ impl Oauth {
             // a ticket.
             return Poll::Pending;
         }
+        #[cfg(test)]
+        {
+            let hook = self.before_mint_park.lock().unwrap().take();
+            if let Some(hook) = hook {
+                hook();
+            }
+        }
         self.park(ticket);
         if let Some(a) = m.read(now, |r| ready_answer(r, &mut *present)) {
             self.unpark_mint(ticket);

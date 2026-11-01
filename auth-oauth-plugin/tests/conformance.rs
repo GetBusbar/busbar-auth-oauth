@@ -573,6 +573,7 @@ fn red_a_writer_that_ignores_the_host_capacity_faults() {
 // exactly this file). The scripted connection-table double mints, then refreshes, the bearer.
 mod mint_door {
     use std::collections::{HashMap, VecDeque};
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
@@ -594,6 +595,35 @@ mod mint_door {
     const TOKEN_URL: &str = "https://login.example.com/tenant/oauth2/v2.0/token";
     const SCOPE: &str = "https://cognitiveservices.azure.com/.default";
     const CREDENTIAL: &str = "oracle-client-0001:oracle:secret:with:colons";
+    static SEALED_REQUIRED: AtomicBool = AtomicBool::new(false);
+
+    extern "C" fn observed_fields(
+        inst: *mut std::ffi::c_void,
+        input: *const std::ffi::c_void,
+        output: *mut std::ffi::c_void,
+    ) -> busbar_contract::abi::mechanism::call::RawOutcome {
+        let result = super::real_fields()(inst, input, output);
+        // SAFETY: this is the real OAuth door's live FieldsOut. The observation copies only its
+        // small static protocol extension during the call, never a credential or a borrowed ptr.
+        let out = unsafe { &*output.cast::<busbar_contract::abi::auth::FieldsOut>() };
+        if result.outcome() == busbar_contract::abi::mechanism::call::Outcome::Ready
+            && out.fields_len > 0
+        {
+            let ext = out.head.extensions;
+            let secure = !ext.ptr.is_null() && ext.len <= 128 && {
+                // SAFETY: the real door's extension bytes are live for this call.
+                let bytes = unsafe { std::slice::from_raw_parts(ext.ptr, ext.len) };
+                busbar_contract::abi::mechanism::extensions::get(bytes, "auth.sealed_fields")
+                    == Some(&[1][..])
+            };
+            SEALED_REQUIRED.store(secure, Ordering::SeqCst);
+        }
+        result
+    }
+
+    extern "C" fn observed_door() -> &'static busbar_contract::abi::mechanism::door::Door {
+        super::door_with_fields(observed_fields)
+    }
 
     struct Clock(Instant);
 
@@ -621,6 +651,8 @@ mod mint_door {
         declared: Mutex<Vec<(u32, ReadNeed, Option<String>)>>,
         opened: Mutex<Vec<Opened>>,
         replies: Mutex<Replies>,
+        // The test observes the first token before it permits a refresh reply to land.
+        refresh_allowed: AtomicBool,
     }
 
     fn piece(kind: PieceKind, len: usize, status: Option<u32>) -> Piece {
@@ -724,6 +756,10 @@ mod mint_door {
             buf: &mut [u8],
         ) -> Result<Piece, ConnError> {
             self.slab.get(c, id)?;
+            if self.opened.lock().unwrap().len() > 1 && !self.refresh_allowed.load(Ordering::SeqCst)
+            {
+                return Err(ConnError::Pending);
+            }
             let (p, bytes) = self
                 .replies
                 .lock()
@@ -766,12 +802,13 @@ mod mint_door {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_binding_presents_its_minted_bearer_then_the_refreshed_one() {
+        SEALED_REQUIRED.store(false, Ordering::SeqCst);
         let table = Arc::new(TokenEndpoint::default());
         let dispatcher = Arc::new(Dispatcher::with_services(
             DispatchConfig::default(),
             Arc::new(Clock(Instant::now())),
         ));
-        let row = LinkedRow::of(busbar_auth_oauth::door).expect("the door states its Statement");
+        let row = LinkedRow::of(observed_door).expect("the door states its Statement");
         let plugin = load_linked::<Auth>(
             &row,
             Bind {
@@ -841,6 +878,10 @@ mod mint_door {
         .await
         .expect("the first mint lands");
         assert!(
+            SEALED_REQUIRED.load(Ordering::SeqCst),
+            "the actual minted bearer must carry its secure-field requirement to the host"
+        );
+        assert!(
             presents(&first, "Bearer oracle-minted-1"),
             "the first upstream request carries the first token: {first:?}"
         );
@@ -853,6 +894,10 @@ mod mint_door {
             ),
             "the cached bearer answers in place, one call"
         );
+
+        // Release the second response only after the first token and cache hit were
+        // observed. A slow runner cannot miss the first token's two-second window.
+        table.refresh_allowed.store(true, Ordering::SeqCst);
 
         // THE REFRESH AHEAD OF EXPIRY: `expires_in: 2` re-mints after one second (1.5.5's
         // `next_refresh_secs`), and the next request carries the refreshed token.

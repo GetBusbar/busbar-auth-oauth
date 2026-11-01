@@ -502,3 +502,91 @@ fn max_response_bytes_reaches_the_cell() {
     };
     assert_eq!(x.minter(b"s").1, 8192);
 }
+
+#[test]
+fn a_present_blank_client_credential_is_reported_with_the_missing_endpoint() {
+    for credential in ["", " \t "] {
+        let refused = lines(open(OAUTH_CLIENT_CREDENTIALS, Some(credential), "{}"));
+        assert!(refused
+            .iter()
+            .any(|line| line.starts_with("settings:") && line.contains("token_url")));
+        assert!(refused.iter().any(
+            |line| line.starts_with("credential:") && line.contains("client_id:client_secret")
+        ));
+    }
+    assert!(open(
+        OAUTH_CLIENT_CREDENTIALS,
+        Some("id:secret"),
+        r#"{"token_url":"https://idp.example/token"}"#
+    )
+    .is_ok());
+}
+
+#[test]
+fn jwt_and_exchange_cache_identity_includes_credential_and_settings() {
+    let cache = Cache::default();
+    let sa = |email: &str| {
+        serde_json::json!({"client_email":email, "private_key":include_str!("fixtures/test_sa_key.pem"), "token_uri":"https://idp.example/token"}).to_string()
+    };
+    let first = sa("first@example.com");
+    let second = sa("second@example.com");
+    let jwt = |credential: &str, settings: &str| {
+        open_binding(
+            JWT_BEARER,
+            Some(credential.as_bytes()),
+            Some(settings.as_bytes()),
+            &cache,
+        )
+        .unwrap_or_else(|_| panic!("valid signing binding"))
+    };
+    let a = jwt(&first, r#"{"scope":"read","subject":"a@example.com"}"#);
+    assert!(Arc::ptr_eq(
+        &a,
+        &jwt(&first, r#"{"scope":"read","subject":"a@example.com"}"#)
+    ));
+    for (credential, settings) in [
+        (
+            second.as_str(),
+            r#"{"scope":"read","subject":"a@example.com"}"#,
+        ),
+        (
+            first.as_str(),
+            r#"{"scope":"write","subject":"a@example.com"}"#,
+        ),
+        (
+            first.as_str(),
+            r#"{"scope":"read","subject":"b@example.com"}"#,
+        ),
+    ] {
+        assert!(!Arc::ptr_eq(&a, &jwt(credential, settings)));
+    }
+    let exchange = |credential: &str, resource: &str| {
+        let settings =
+            serde_json::json!({"token_url":"https://idp.example/token", "resource":resource})
+                .to_string();
+        let Binding::Exchange(binding) = super::open(
+            OAUTH_TOKEN_EXCHANGE,
+            Some(credential.as_bytes()),
+            Some(settings.as_bytes()),
+            &cache,
+        )
+        .unwrap_or_else(|_| panic!("valid exchange binding")) else {
+            panic!("exchange")
+        };
+        binding
+    };
+    let a = exchange("first-subject", "https://one.example");
+    assert_eq!(
+        a.scope_key(b"read"),
+        exchange("first-subject", "https://one.example").scope_key(b"read")
+    );
+    assert_ne!(
+        a.scope_key(b"read"),
+        exchange("second-subject", "https://one.example").scope_key(b"read")
+    );
+    assert_ne!(
+        a.scope_key(b"read"),
+        exchange("first-subject", "https://two.example").scope_key(b"read")
+    );
+    assert_ne!(a.scope_key(b"read"), a.scope_key(b"write"));
+}

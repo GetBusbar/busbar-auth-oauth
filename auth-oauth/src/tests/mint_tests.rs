@@ -168,8 +168,7 @@ fn next_refresh_never_sleeps_past_a_live_token_expiry() {
     // A short-lived token refreshes at half its life, never past it.
     for ttl in [1, 2, 10, 59, 299, 300] {
         let sleep = next_refresh_secs(now + ttl, now);
-        assert!(sleep < ttl || ttl == 1, "ttl {ttl}: slept {sleep}");
-        assert!(sleep >= 1);
+        assert_eq!(sleep, (ttl / 2).max(1), "ttl {ttl}");
     }
     // An expired token backs off rather than spinning.
     assert_eq!(next_refresh_secs(now, now), MIN_SLEEP_SECS);
@@ -668,51 +667,39 @@ fn an_exchange_in_flight_reserves_no_buffer_the_size_of_the_cap() {
 /// AN ON-DEMAND READ NEVER PRESENTS A TOKEN SNAPSHOTTED BEFORE THE EXCHANGE LANDED: a read racing
 /// the tick that stores the token either waits or presents the new token. It never answers
 /// `Nothing` (an unauthenticated token-exchange call) for a cell whose exchange succeeds.
-/// A bounded stress run: the interleaving cannot be forced without a production hook.
+/// A test-only callback pins the usability judgement while the real mint publishes its token;
+/// release builds carry neither this callback nor a synchronization field.
 #[test]
 fn an_on_demand_read_racing_the_exchange_never_presents_nothing() {
-    use std::sync::atomic::{AtomicBool, AtomicU64};
     let exchange = Arc::new(token_exchange::build(
         "subject",
         "https://as.example/token",
         token_exchange::ACCESS_TOKEN_TYPE,
         "https://tools.example/rpc",
     ));
-    const READERS: usize = 6;
-    let nothing = AtomicU64::new(0);
-    for _ in 0..30_000 {
-        let w = Scripted::default();
-        w.ok(r#"{"access_token":"tok-x","expires_in":3600}"#);
-        let m = Minted::new(
-            Minter::TokenExchange(token_exchange::Scoped::new(exchange.clone(), "s")),
-            DEFAULT_MAX_RESPONSE_BYTES,
-        );
-        let stop = AtomicBool::new(false);
-        let spinning = std::sync::atomic::AtomicUsize::new(0);
-        std::thread::scope(|s| {
-            for _ in 0..READERS {
-                s.spawn(|| {
-                    spinning.fetch_add(1, Ordering::AcqRel);
-                    while !stop.load(Ordering::Acquire) {
-                        if m.read(now_epoch(), |r| matches!(r, Read::Nothing)) {
-                            nothing.fetch_add(1, Ordering::Relaxed);
-                        }
-                    }
-                });
-            }
-            while spinning.load(Ordering::Acquire) < READERS {
-                std::hint::spin_loop();
-            }
-            let (_, report) = m.tick(1_000, now_epoch(), Some(&w));
-            assert_eq!(report, Some(Report::Minted));
-            stop.store(true, Ordering::Release);
-        });
-    }
-    assert_eq!(
-        nothing.load(Ordering::Relaxed),
-        0,
-        "an on-demand read presented no authorization while its exchange landed"
+    let wire = Scripted::default();
+    wire.ok(r#"{"access_token":"tok-x","expires_in":3600}"#);
+    let cell = Minted::new(
+        Minter::TokenExchange(token_exchange::Scoped::new(exchange, "s")),
+        DEFAULT_MAX_RESPONSE_BYTES,
     );
+    let (entered, arrived) = std::sync::mpsc::sync_channel(0);
+    let (release, resume) = std::sync::mpsc::sync_channel(0);
+    *cell.before_usable.lock().unwrap() = Some(Box::new(move || {
+        entered.send(()).unwrap();
+        resume.recv().unwrap();
+    }));
+    let answer = std::thread::scope(|threads| {
+        let reader = threads.spawn(|| cell.read(now_epoch(), seen));
+        // An old snapshot-before-usability implementation already captured the empty
+        // token here. Publish the actual mint before the usability judgement resumes.
+        arrived.recv().unwrap();
+        let report = cell.tick(1_000, now_epoch(), Some(&wire)).1;
+        release.send(()).unwrap();
+        assert_eq!(report, Some(Report::Minted));
+        reader.join().unwrap()
+    });
+    assert_eq!(answer, "Header(\"Bearer tok-x\")");
 }
 
 /// O8, NO MINT WITHOUT A PLAUSIBLE WALL CLOCK: with the host's wall clock unknown (`0`) or before
@@ -921,4 +908,140 @@ fn a_reply_that_never_ends_is_bounded_in_one_tick() {
         bare.reads.load(Ordering::Acquire)
     );
     assert!(!m.idle(), "the exchange goes on at the next tick");
+}
+
+#[test]
+fn escaped_member_names_mint_the_exact_token_and_keep_error_redaction() {
+    let wire = Scripted::default();
+    wire.ok(r#"{"access\u005ftoken":"a\/b\u00e9","expires_in":3600}"#);
+    let cell = Minted::new(client_credentials(), DEFAULT_MAX_RESPONSE_BYTES);
+    assert_eq!(
+        cell.tick(0, now_epoch(), Some(&wire)).1,
+        Some(Report::Minted)
+    );
+    assert_eq!(cell.read(now_epoch(), seen), "Header(\"Bearer a/bé\")");
+    assert_eq!(*wire.closed.lock().unwrap(), 1);
+    let reason = parse_response(
+        400,
+        br#"{"err\u006fr":"invalid_client","error_description":"never-echo-me"}"#,
+        0,
+    )
+    .unwrap_err();
+    assert!(reason.contains("invalid_client"));
+    assert!(!reason.contains("never-echo-me"));
+}
+
+#[test]
+fn invalid_surrogate_pairs_never_become_a_different_minted_token() {
+    for escaped in [
+        r"\uD800\uE000",
+        r"\uD800\uFFFF",
+        r"\uDBFF\uE000",
+        r"\uD800\u0041",
+        r"\uD800",
+        r"\uDC00",
+    ] {
+        let wire = Scripted::default();
+        wire.ok(&format!(
+            r#"{{"access_token":"{escaped}","expires_in":3600}}"#
+        ));
+        let cell = Minted::new(client_credentials(), DEFAULT_MAX_RESPONSE_BYTES);
+        assert!(
+            matches!(
+                cell.tick(0, now_epoch(), Some(&wire)).1,
+                Some(Report::MintFailed(_))
+            ),
+            "invalid surrogate was minted: {escaped}"
+        );
+        assert!(!cell.is_ready());
+        assert_eq!(*wire.closed.lock().unwrap(), 1);
+    }
+    for (escaped, expected) in [
+        (r"\uD800\uDC00", "𐀀"),
+        (r"\uDBFF\uDFFF", "\u{10ffff}"),
+        (r"\uD83D\uDE00", "😀"),
+    ] {
+        let body = format!(r#"{{"access_token":"{escaped}","expires_in":3600}}"#);
+        let (token, invalid) = parse_response(200, body.as_bytes(), 0).unwrap();
+        assert!(!invalid);
+        assert_eq!(
+            seen(Read::Header(token.header().unwrap())),
+            format!("Header({:?})", format!("Bearer {expected}"))
+        );
+    }
+}
+
+#[test]
+fn response_cap_accepts_exact_length_and_refuses_the_next_byte_across_chunks() {
+    const CAP: usize = 1024;
+    for (size, accepted) in [(CAP - 1, true), (CAP, true), (CAP + 1, false)] {
+        let wire = Scripted::default();
+        let mut body = br#"{"access_token":"exact-cap","expires_in":3600}"#.to_vec();
+        body.resize(size, b' ');
+        let mut steps = vec![Step::Head(200)];
+        for chunk in body.chunks(127) {
+            steps.push(Step::Body(chunk.to_vec(), false));
+        }
+        steps.push(Step::Done);
+        wire.push(steps);
+        let cell = Minted::new(client_credentials(), CAP);
+        let report = cell.tick(0, now_epoch(), Some(&wire)).1;
+        if accepted {
+            assert_eq!(report, Some(Report::Minted));
+            assert_eq!(cell.read(now_epoch(), seen), "Header(\"Bearer exact-cap\")");
+        } else {
+            assert!(
+                matches!(report, Some(Report::MintFailed(ref reason)) if reason.contains("1024-byte cap"))
+            );
+            assert!(!cell.is_ready());
+        }
+        assert_eq!(*wire.closed.lock().unwrap(), 1);
+    }
+}
+
+#[test]
+fn a_closed_token_response_needs_its_protocol_end_and_a_head() {
+    for steps in [
+        vec![
+            Step::Head(200),
+            Step::Body(
+                br#"{"access_token":"complete-json-but-no-end","expires_in":3600}"#.to_vec(),
+                false,
+            ),
+            Step::Fail(ConnError::Closed),
+        ],
+        vec![Step::Body(
+            br#"{"access_token":"body-without-head","expires_in":3600}"#.to_vec(),
+            true,
+        )],
+    ] {
+        let wire = Scripted::default();
+        wire.push(steps);
+        let cell = Minted::new(client_credentials(), DEFAULT_MAX_RESPONSE_BYTES);
+        assert!(matches!(
+            cell.tick(0, now_epoch(), Some(&wire)).1,
+            Some(Report::MintFailed(_))
+        ));
+        assert!(!cell.is_ready());
+        assert!(
+            cell.outage(),
+            "an incomplete protocol response is an outage"
+        );
+        assert_eq!(*wire.closed.lock().unwrap(), 1);
+    }
+    let wire = Scripted::default();
+    wire.push(vec![
+        Step::Head(200),
+        Step::Body(
+            br#"{"access_token":"ended","expires_in":3600}"#.to_vec(),
+            false,
+        ),
+        Step::Done,
+    ]);
+    let cell = Minted::new(client_credentials(), DEFAULT_MAX_RESPONSE_BYTES);
+    assert_eq!(
+        cell.tick(0, now_epoch(), Some(&wire)).1,
+        Some(Report::Minted)
+    );
+    assert_eq!(cell.read(now_epoch(), seen), "Header(\"Bearer ended\")");
 }

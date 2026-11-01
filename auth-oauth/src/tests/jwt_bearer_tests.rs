@@ -333,8 +333,8 @@ fn validate_never_echoes_a_byte_of_the_service_account_key() {
 
     // The private helper underneath it, same discipline, so a future caller that reaches
     // `pem_to_pkcs8_der` by another route inherits the redaction rather than re-introducing it.
-    let e = pem_to_pkcs8_der("-----BEGIN PRIVATE KEY-----\nAz\n-----END PRIVATE KEY-----\n")
-        .expect_err("`Az` is not decodable base64");
+    let e = pem_to_pkcs8_der("-----BEGIN PRIVATE KEY-----\nAz==\n-----END PRIVATE KEY-----\n")
+        .expect_err("`Az==` has nonzero trailing bits");
     assert!(
         !e.contains("122"),
         "the helper must not name a byte of the key either, got: {e}"
@@ -446,4 +446,13 @@ fn an_assertion_at_an_overflowing_time_is_refused() {
     let signer = test_signer("https://oauth2.googleapis.com/token", None);
     assert!(signer.signing_input(u64::MAX - 10).is_err());
     assert!(signer.signing_input(1_800_000_000).is_ok());
+}
+
+#[test]
+fn an_escaped_private_key_member_opens_the_same_signing_identity() {
+    let ordinary = serde_json::json!({"client_email":"svc@proj.iam.gserviceaccount.com", "private_key":TEST_PRIVATE_KEY_PEM, "token_uri":"https://oauth2.googleapis.com/token"}).to_string();
+    let escaped = ordinary.replace("\"private_key\"", r#""private\u005fkey""#);
+    assert_ne!(ordinary, escaped);
+    assert!(build(&ordinary, None, None).is_ok());
+    assert!(build(&escaped, None, None).is_ok());
 }

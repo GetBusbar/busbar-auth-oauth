@@ -82,6 +82,8 @@ pub struct Oauth {
     /// The instance's own random key the token cache keys are derived under (HMAC-SHA-256), so no
     /// cache key is a plain digest of a credential; wiped on drop.
     cache_secret: Zeroizing<[u8; 32]>,
+    #[cfg(test)]
+    pub(crate) before_mint_park: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 impl crate::style::TokenCache for Oauth {
@@ -180,6 +182,8 @@ impl Oauth {
     ) -> Self {
         Self {
             cache_secret,
+            #[cfg(test)]
+            before_mint_park: Mutex::new(None),
             wire,
             driver: Mutex::new(Ticket::NONE),
             issued: AtomicU32::new(0),

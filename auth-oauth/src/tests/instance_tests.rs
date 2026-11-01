@@ -21,9 +21,12 @@ use crate::mint::tests::{now_epoch, Scripted, Step};
 use crate::mint::TokenRequest;
 use crate::style;
 use crate::test_support::{self, TestHost};
+use crate::Ask;
 use busbar_contract::abi::mechanism::call::Outcome;
+use busbar_contract::abi::sdk::auth_outbound::FieldsAnswer;
 use busbar_contract::abi::sdk::cred::SealedWrite;
 use busbar_contract::conn::{ConnError, ConnId};
+use std::task::Poll;
 
 /// The scripted need, shared so the test reads what was sent.
 struct Shared(Arc<Scripted>);
@@ -74,6 +77,66 @@ fn capture(name: &str, w: &Scripted) {
 }
 
 const NS: u64 = 1_000_000_000;
+
+#[test]
+fn a_scheduled_binding_refuses_before_its_first_mint_without_presenting_or_parking() {
+    let host = TestHost::new();
+    let wire = Arc::new(Scripted::default());
+    let oauth = instance(&wire);
+    let handle = open(
+        &oauth,
+        style::OAUTH_CLIENT_CREDENTIALS,
+        "client:secret",
+        r#"{"token_url":"https://issuer.example/token"}"#,
+    );
+    let mut reasons = Vec::new();
+    for ticket in [
+        Ticket::NONE,
+        Ticket {
+            slot: 7,
+            generation: 1,
+        },
+    ] {
+        let mut presented = 0;
+        let answer = oauth.answer(
+            &Ask {
+                handle,
+                own: true,
+                scope: None,
+                ticket,
+                timestamp: now_epoch(),
+            },
+            Some(&host.host),
+            &mut |_| presented += 1,
+        );
+        let Poll::Ready(FieldsAnswer::Failed(reason)) = answer else {
+            panic!("an unminted binding must fail closed: {answer:?}");
+        };
+        assert!(!reason.trim().is_empty());
+        reasons.push(reason.into_owned());
+        assert_eq!(
+            presented, 0,
+            "no anonymous or speculative credential presentation"
+        );
+        assert!(!oauth.ready(handle));
+    }
+    assert_eq!(
+        reasons[0], reasons[1],
+        "the first-mint refusal is stable on both call paths"
+    );
+    assert!(
+        wire.sent.lock().unwrap().is_empty(),
+        "requests do not start a scheduled mint"
+    );
+    assert!(host.take().is_empty(), "a refused call parks no ticket");
+    wire.ok(r#"{"access_token":"minted","expires_in":600}"#);
+    oauth.tick(1000, Ticket::NONE, Some(&host.host), &mut Diags::default());
+    assert_eq!(
+        fields(&oauth, &host, handle, Ticket::NONE),
+        (Outcome::Ready, "authorization: Bearer minted".into())
+    );
+    assert_eq!(wire.sent.lock().unwrap().len(), 1);
+}
 
 #[test]
 fn oauth_client_credentials_mints_on_tick_and_honours_the_expired_token_rule() {
@@ -418,18 +481,22 @@ fn a_mint_landing_between_the_read_and_the_park_is_not_a_lost_wake() {
         slot: 7,
         generation: 1,
     };
-    let answered = std::thread::scope(|s| {
-        let held = o.waiters.lock().unwrap();
-        let caller = s.spawn(|| fields(&o, &host, h, call));
-        // The call reads the expired token and stops at its park.
-        std::thread::sleep(std::time::Duration::from_millis(500));
-        // THE MINT LANDS: its token is stored, and its drain finds no one parked.
+    let (entered, arrived) = std::sync::mpsc::sync_channel(0);
+    let (release, resume) = std::sync::mpsc::sync_channel(0);
+    *o.before_mint_park.lock().unwrap() = Some(Box::new(move || {
+        entered.send(()).unwrap();
+        resume.recv().unwrap();
+    }));
+    let answered = std::thread::scope(|threads| {
+        let caller = threads.spawn(|| fields(&o, &host, h, call));
+        arrived.recv().unwrap();
         w.ok(r#"{"access_token":"tok-2","expires_in":3600}"#);
         let wire = Shared(Arc::clone(&w));
-        let (_, report) = cell.tick(u64::MAX / 2, now_epoch(), Some(&wire as &dyn Wire));
-        assert_eq!(report, Some(Report::Minted), "the mint landed");
-        assert!(held.is_empty(), "the drain finds no one parked yet");
-        drop(held);
+        let report = cell.tick(u64::MAX / 2, now_epoch(), Some(&wire)).1;
+        let unparked = o.waiters.lock().unwrap().is_empty();
+        release.send(()).unwrap();
+        assert_eq!(report, Some(Report::Minted));
+        assert!(unparked, "the drain finds no one parked yet");
         caller.join().unwrap()
     });
     assert_eq!(
@@ -467,19 +534,36 @@ fn a_cell_settled_between_the_lookup_and_the_park_is_not_a_lost_wake() {
         slot: 301,
         generation: 1,
     };
-    let first = std::thread::scope(|s| {
-        let held = o.exchange_waiters.lock().unwrap();
-        let caller = s.spawn(|| test_support::fields(&o, &host, h, call, Some("s")));
-        std::thread::sleep(std::time::Duration::from_millis(500));
-        // THE SETTLING TICK, where the cache lets it: the cell is idle, holds no usable token and
-        // no one waits on it yet, so it is dropped.
-        if let Ok(mut cache) = o.cache.try_write() {
-            cache.remove(&key);
-        }
-        drop(held);
-        caller.join().unwrap()
+    // The cell's usability judgement runs exactly at the lookup/park boundary. The
+    // callback pins that boundary without a sleep or a conditional missed window.
+    let (entered, arrived) = std::sync::mpsc::sync_channel(0);
+    let (release, resume) = std::sync::mpsc::sync_channel(0);
+    std::thread::scope(|threads| {
+        let oauth = &o;
+        let binding = &x;
+        let caller = threads.spawn(move || {
+            oauth
+                .exchange_cell(
+                    key,
+                    || binding.minter(b"s"),
+                    call,
+                    |_| {
+                        entered.send(()).unwrap();
+                        resume.recv().unwrap();
+                        false
+                    },
+                    |cell| binding.owns(cell),
+                )
+                .unwrap_or_else(|_| panic!("room for one scope"))
+        });
+        arrived.recv().unwrap();
+        // A settling tick can remove this idle cell only if lookup and parking have
+        // been split. In the fixed path the cache remains held until the park.
+        let removed = o.cache.try_write().ok().map(|mut cache| cache.remove(&key));
+        release.send(()).unwrap();
+        assert!(!matches!(removed, Some(None)), "the exact cell was reached");
+        drop(caller.join().unwrap());
     });
-    assert_eq!(first.0, Outcome::Pending, "the call waits for its exchange");
     w.ok(r#"{"access_token":"tok-s","expires_in":3600}"#);
     o.tick(1_000, Ticket::NONE, Some(&host.host), &mut Diags::default());
     assert_eq!(
@@ -905,16 +989,37 @@ fn a_failed_mint_is_logged_an_outage_at_warn_or_a_refusal_at_info() {
         });
         cap.messages()
     };
-    for status in [503, 429] {
+    for status in [429, 500, 502, 503, 504, 599] {
         let warn = WarnCapture::default();
         let m = mint_with(
             &warn,
             vec![Step::Head(status), Step::Body(b"busy".to_vec(), true)],
         );
-        assert!(
+        assert_eq!(
             m.iter()
-                .any(|l| l.contains("outage") && l.contains("module=oauth")),
-            "{status} at WARN: {m:?}"
+                .filter(|l| l.contains("outage") && l.contains("module=oauth"))
+                .count(),
+            1,
+            "{status} at WARN exactly once: {m:?}"
+        );
+    }
+    for status in [400, 499, 600] {
+        let warn = WarnCapture::default();
+        assert!(mint_with(
+            &warn,
+            vec![Step::Head(status), Step::Body(b"refused".to_vec(), true)]
+        )
+        .is_empty());
+    }
+    for failure in [ConnError::Timeout, ConnError::Closed, ConnError::Fault] {
+        let warn = WarnCapture::default();
+        let messages = mint_with(&warn, vec![Step::Fail(failure)]);
+        assert_eq!(
+            messages
+                .iter()
+                .filter(|line| line.contains("outage") && line.contains("module=oauth"))
+                .count(),
+            1
         );
     }
     let refused = || {
@@ -1210,4 +1315,35 @@ fn an_empty_or_unpresentable_scheduled_token_is_logged_at_warn() {
         assert_eq!(cap.count("module=oauth"), 1, "{body}: {m:?}");
         assert!(m[0].contains(named), "{body}: {m:?}");
     }
+}
+
+#[test]
+fn a_resumed_mint_call_that_can_answer_forgets_its_parked_ticket() {
+    let host = TestHost::new();
+    let wire = Arc::new(Scripted::default());
+    let (oauth, handle) = expired_and_failed(&wire, &host);
+    let call = Ticket {
+        slot: 1901,
+        generation: 1,
+    };
+    assert_eq!(fields(&oauth, &host, handle, call).0, Outcome::Pending);
+    let Some(Binding::Minted(cell)) = oauth.bound(handle) else {
+        panic!("scheduled binding")
+    };
+    wire.ok(r#"{"access_token":"resumed","expires_in":3600}"#);
+    // The cell has published its result; the instance has not yet drained/woken its waiters.
+    assert_eq!(
+        cell.tick(u64::MAX / 2, now_epoch(), Some(&Shared(wire.clone())))
+            .1,
+        Some(Report::Minted)
+    );
+    assert!(oauth.waiters.lock().unwrap().contains(&call));
+    assert_eq!(
+        fields(&oauth, &host, handle, call).1,
+        "authorization: Bearer resumed"
+    );
+    assert!(
+        !oauth.waiters.lock().unwrap().contains(&call),
+        "an answered call no longer waits"
+    );
 }
