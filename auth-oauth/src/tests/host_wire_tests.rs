@@ -131,7 +131,7 @@ const fn span(offset: u64, len: u64) -> FrameSpan {
 fn the_host_clock_reads_whole_wall_seconds() {
     let host = FakeHost::new().serve(fake::host::CLOCK_NOW, Clock);
     let tables = host.lent();
-    let h = Host::of(&tables);
+    let h = Host::of(tables);
     let issued = AtomicU32::new(0);
     let wire = HostWire::new(&h, Ticket::NONE, &issued);
     assert_eq!(
@@ -144,7 +144,7 @@ fn the_host_clock_reads_whole_wall_seconds() {
     // A host with no clock answers none.
     let bare = FakeHost::new();
     let tables = bare.lent();
-    let h = Host::of(&tables);
+    let h = Host::of(tables);
     assert_eq!(HostWire::new(&h, Ticket::NONE, &issued).clock(), None);
 }
 
@@ -252,7 +252,7 @@ fn a_jwt_bearer_mint_runs_over_the_host_wire_at_the_hosts_wall_seconds() {
     }
     let host = fake_host();
     let tables = host.lent();
-    let h = Host::of(&tables);
+    let h = Host::of(tables);
 
     // The read mapping, piece by piece, through the wire itself.
     let issued = AtomicU32::new(0);

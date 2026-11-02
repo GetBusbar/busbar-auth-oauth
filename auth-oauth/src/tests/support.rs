@@ -11,7 +11,7 @@ use std::sync::Mutex;
 use std::task::Poll;
 
 use busbar_contract::abi::mechanism::call::Outcome;
-use busbar_contract::abi::mechanism::ticket::{HostCtx, HostTables, Ticket};
+use busbar_contract::abi::mechanism::ticket::{HostCtx, Ticket};
 use busbar_contract::abi::sdk::auth_outbound::FieldsAnswer;
 use busbar_contract::abi::sdk::conn::Host;
 
@@ -40,19 +40,8 @@ pub(crate) struct TestHost {
 impl TestHost {
     pub(crate) fn new() -> Self {
         let id = NEXT.fetch_add(1, Ordering::Relaxed);
-        let tables = HostTables {
-            size: u32::try_from(std::mem::size_of::<HostTables>()).unwrap(),
-            _reserved: 0,
-            ctx: HostCtx { handle: id },
-            wake: Some(wake),
-            conns: std::ptr::null(),
-            services: std::ptr::null(),
-            io: std::ptr::null(),
-        };
-        Self {
-            host: Host::of(&tables),
-            id,
-        }
+        let host = Host::wake_only(HostCtx { handle: id }, wake);
+        Self { host, id }
     }
 
     /// The tickets this host woke since the last take, in order.

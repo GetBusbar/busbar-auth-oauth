@@ -486,12 +486,15 @@ fn real_fields() -> Op {
     }
 }
 
-extern "C" fn insensitive_fields(
+// SAFETY CONTRACT: installed only in the typed auth fields slot; the dispatcher lends the real
+// instance and live FieldsIn/FieldsOut buffers for this crossing.
+unsafe extern "C" fn insensitive_fields(
     inst: *mut c_void,
     i: *const c_void,
     o: *mut c_void,
 ) -> RawOutcome {
-    let r = real_fields()(inst, i, o);
+    // SAFETY: this wrapper forwards the same live instance and typed fields-slot buffers.
+    let r = unsafe { real_fields()(inst, i, o) };
     // SAFETY: the host's live `FieldsIn`/`FieldsOut` for this call.
     unsafe {
         let (i, o) = (&*i.cast::<FieldsIn>(), &*o.cast::<FieldsOut>());
@@ -535,7 +538,12 @@ async fn red_a_field_without_the_sensitive_flag() {
     mint_door::check_binding(insensitive_door, false).await;
 }
 
-extern "C" fn overrunning_fields(_: *mut c_void, i: *const c_void, o: *mut c_void) -> RawOutcome {
+// SAFETY CONTRACT: the dispatcher calls this only as the typed fields slot with live input/output.
+unsafe extern "C" fn overrunning_fields(
+    _: *mut c_void,
+    i: *const c_void,
+    o: *mut c_void,
+) -> RawOutcome {
     // SAFETY: the host's live `FieldsOut` for this call; nothing is written past its `out`.
     unsafe {
         let (i, o) = (&*i.cast::<FieldsIn>(), &mut *o.cast::<FieldsOut>());
@@ -593,12 +601,14 @@ mod mint_door {
     const CREDENTIAL: &str = "oracle-client-0001:oracle:secret:with:colons";
     static SEALED_REQUIRED: AtomicBool = AtomicBool::new(false);
 
-    extern "C" fn observed_fields(
+    // SAFETY CONTRACT: installed only in the real auth fields slot and forwarded unchanged.
+    unsafe extern "C" fn observed_fields(
         inst: *mut std::ffi::c_void,
         input: *const std::ffi::c_void,
         output: *mut std::ffi::c_void,
     ) -> busbar_contract::abi::mechanism::call::RawOutcome {
-        let result = super::real_fields()(inst, input, output);
+        // SAFETY: the typed fields-slot dispatcher owns these live buffers and instance.
+        let result = unsafe { super::real_fields()(inst, input, output) };
         // SAFETY: this is the real OAuth door's live FieldsOut. The observation copies only its
         // small static protocol extension during the call, never a credential or a borrowed ptr.
         let out = unsafe { &*output.cast::<busbar_contract::abi::auth::FieldsOut>() };
