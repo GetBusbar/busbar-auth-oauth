@@ -22,12 +22,15 @@ use crate::mint::{RetryAfter, TokenRequest};
 /// The host's wall clock, in nanoseconds: 2027-01-15T08:00:00.999999999Z.
 const WALL_NS: u64 = 1_800_000_000_999_999_999;
 
+type OpenedRequest = (Vec<u8>, Vec<u8>, Vec<(String, Vec<u8>)>, Vec<u8>);
+
 /// What this host I/O script receives and answers (one test drives it).
 struct Script {
     /// `(target, need)` of each ESTABLISH.
     established: Vec<(String, u32)>,
+    deadlines: Vec<(u64, u64)>,
     /// `(piece kind, bytes)` of each WRITE_REQUEST.
-    opened: Vec<(Vec<u8>, Vec<u8>, Vec<(String, Vec<u8>)>, Vec<u8>)>,
+    opened: Vec<OpenedRequest>,
     /// The reply pieces READ_REPLY answers, in order.
     replies: VecDeque<(ReplyPiece, Vec<u8>)>,
     /// How many CLOSEs.
@@ -36,6 +39,7 @@ struct Script {
 
 static SCRIPT: Mutex<Script> = Mutex::new(Script {
     established: Vec::new(),
+    deadlines: Vec::new(),
     opened: Vec::new(),
     replies: VecDeque::new(),
     closed: 0,
@@ -72,6 +76,9 @@ impl HostServices for WireEndpoint {
         }
     }
 
+    fn dest_judge(&self, _dest: &str, _class: u32, _flags: u32, _later: Option<Later>) -> Ran {
+        Ran::Now(Stored::refused(UNSERVED))
+    }
     fn records_get(&self, _caller: &Caller, _kind: &str, _key: &[u8], _later: Later) -> Ran {
         Ran::Now(Stored::refused(UNSERVED))
     }
@@ -253,6 +260,27 @@ impl DeclaredConns for WireEndpoint {
     fn framed(&self, _: InstanceId, _: NeedId) -> bool {
         true
     }
+    fn open_request(
+        &self,
+        owner: InstanceId,
+        need: NeedId,
+        desc: &OpenDesc<'_>,
+        require_secure: bool,
+        dial_timeout_ms: u64,
+    ) -> Result<ConnId, ConnError> {
+        // This local host-value script has no secure network connection. Preserve fail-closed
+        // custody, while treating dial and request deadlines as the two distinct ABI values.
+        if require_secure {
+            return Err(ConnError::AuthRefused);
+        }
+        self.slab.check_need(owner, need)?;
+        SCRIPT
+            .lock()
+            .unwrap()
+            .deadlines
+            .push((dial_timeout_ms, desc.timeout_ms));
+        self.open(owner, need, desc)
+    }
     fn serves_scheme(&self, scheme: &str) -> bool {
         scheme == "http"
     }
@@ -280,12 +308,13 @@ impl Conns for WireEndpoint {
     }
     fn write(
         &self,
-        _: InstanceId,
-        _: ConnId,
+        owner: InstanceId,
+        id: ConnId,
         bytes: &[u8],
         _: bool,
         _: bool,
     ) -> Result<usize, ConnError> {
+        self.slab.get(owner, id)?;
         Ok(bytes.len())
     }
     fn read(
@@ -357,7 +386,14 @@ impl SafeSlot for CaptureHost {
 mod host_bridge {
     busbar_contract::plugin_door! { ops:busbar_contract::abi::auth::Ops, statement:crate::STATEMENT,
     lifecycle:life(busbar_contract::abi::sdk::auth_outbound::Outbound<crate::instance::Oauth>),
-    kind_ops:{outbound_ready:busbar_contract::abi::sdk::Safe<super::CaptureHost>}, }
+    kind_ops:{
+        verify:busbar_contract::abi::sdk::Safe<busbar_contract::abi::sdk::auth_outbound::NotServed<busbar_contract::abi::sdk::auth_outbound::Outbound<crate::instance::Oauth>,busbar_contract::abi::auth::VerifyIn,busbar_contract::abi::auth::IdentifyOut>>,
+        begin_login:busbar_contract::abi::sdk::Safe<busbar_contract::abi::sdk::auth_outbound::NotServed<busbar_contract::abi::sdk::auth_outbound::Outbound<crate::instance::Oauth>,busbar_contract::abi::auth::BeginLoginIn,busbar_contract::abi::auth::BeginLoginOut>>,
+        complete_login:busbar_contract::abi::sdk::Safe<busbar_contract::abi::sdk::auth_outbound::NotServed<busbar_contract::abi::sdk::auth_outbound::Outbound<crate::instance::Oauth>,busbar_contract::abi::auth::CompleteLoginIn,busbar_contract::abi::auth::IdentifyOut>>,
+        open_outbound:busbar_contract::abi::sdk::Safe<busbar_contract::abi::sdk::auth_outbound::OpenOutboundSlot<crate::instance::Oauth>>,
+        outbound_ready:busbar_contract::abi::sdk::Safe<super::CaptureHost>,
+        fields:busbar_contract::abi::sdk::Safe<busbar_contract::abi::sdk::auth_outbound::FieldsSlot<crate::instance::Oauth>>,
+    }, }
 }
 struct HostedWire {
     host: Host,
@@ -417,7 +453,7 @@ const fn span(offset: u64, len: u64) -> FrameSpan {
 #[test]
 fn the_host_clock_reads_whole_wall_seconds() {
     let hosted = host_wire();
-    let h = hosted.host.clone();
+    let h = hosted.host;
     let issued = AtomicU32::new(0);
     let wire = HostWire::new(&h, Ticket::NONE, &issued);
     assert_eq!(
@@ -529,15 +565,18 @@ fn a_jwt_bearer_mint_runs_over_the_host_wire_at_the_hosts_wall_seconds() {
         ));
     }
     let hosted = host_wire();
-    let h = hosted.host.clone();
+    let h = hosted.host;
 
     let issued = AtomicU32::new(0);
-    let driver = Ticket::NONE;
+    let driver = hosted
+        ._dispatcher
+        .driver(&hosted._plugin, 0)
+        .expect("the actual host mints this instance's driver ticket");
     let wire = HostWire::new(&h, driver, &issued);
     let mut connector = h.connector_from(driver, 0);
     let stream = match connector.establish(1, Some("https://oauth2.googleapis.com/token"), "") {
         std::task::Poll::Ready(Ok(id)) => id,
-        _ => panic!("declared stream"),
+        other => panic!("declared stream: {other:?}"),
     };
     let req = TokenRequest {
         need: 1,
@@ -597,6 +636,12 @@ fn a_jwt_bearer_mint_runs_over_the_host_wire_at_the_hosts_wall_seconds() {
     wire.close(ConnId(stream));
     {
         let mut s = SCRIPT.lock().unwrap();
+        assert_eq!(
+            s.deadlines,
+            [(0, 0)],
+            "the probe keeps need-default dial and request deadlines distinct"
+        );
+        s.deadlines.clear();
         s.established.clear();
         s.opened.clear();
         s.closed = 0;
@@ -636,11 +681,26 @@ fn a_jwt_bearer_mint_runs_over_the_host_wire_at_the_hosts_wall_seconds() {
     let cell = crate::style::open_binding(crate::style::JWT_BEARER, Some(sa.as_bytes()), None, &o)
         .expect("the binding opens");
     let handle = o.keep(cell);
-    o.tick(1_000, driver, Some(&h), &mut Diags::default());
+    // This mint has its own issued-service sequence starting at zero. A fresh real ticket
+    // prevents replay of the independent probe's already completed/closed service handles.
+    let mint_driver = hosted
+        ._dispatcher
+        .driver(&hosted._plugin, 0)
+        .expect("the actual host mints a distinct driver for the mint");
+    assert_ne!(
+        mint_driver, driver,
+        "independent service sequences cannot share completion handles"
+    );
+    o.tick(1_000, mint_driver, Some(&h), &mut Diags::default());
     let s = SCRIPT.lock().unwrap();
     assert_eq!(
         s.established,
         [("https://oauth2.googleapis.com/token".to_string(), 1)]
+    );
+    assert_eq!(
+        s.deadlines,
+        [(0, 30_000)],
+        "the actual OAuth need's default dial and mint request deadlines"
     );
     assert_eq!(s.opened.len(), 1);
     let (method, path, fields, body) = &s.opened[0];
@@ -648,10 +708,13 @@ fn a_jwt_bearer_mint_runs_over_the_host_wire_at_the_hosts_wall_seconds() {
     assert_eq!(path, b"/token");
     assert_eq!(
         fields,
-        &[(
-            "content-type".to_owned(),
-            b"application/x-www-form-urlencoded".to_vec()
-        )]
+        &[
+            (
+                "content-type".to_owned(),
+                b"application/x-www-form-urlencoded".to_vec()
+            ),
+            ("accept".to_owned(), b"*/*".to_vec()),
+        ]
     );
     assert_eq!(s.closed, 1, "the connection is closed");
     let form = String::from_utf8(body.clone()).expect("a form");

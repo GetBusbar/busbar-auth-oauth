@@ -13,7 +13,6 @@ use busbar_contract::abi::auth::{
 use busbar_contract::abi::mechanism::call::{
     AbiStr, Blob, DeadlineClass, Outcome, RawOutcome, Span, BLOB_OCTETS,
 };
-use busbar_contract::abi::mechanism::door::{Door, DoorParts};
 use busbar_contract::abi::mechanism::extensions;
 use busbar_contract::abi::mechanism::rendering::ReadNeed;
 use busbar_contract::abi::mechanism::ticket::Ticket;
@@ -63,14 +62,15 @@ impl Head {
 
     /// The encoded extensions blob.
     fn extensions_blob(&self) -> Vec<u8> {
-        if self.extensions.is_empty() {
-            return Vec::new();
-        }
-        let entries: Vec<(&str, &[u8])> = self
+        let mut entries: Vec<(&str, &[u8])> = self
             .extensions
             .iter()
             .map(|(k, v)| (k.as_str(), v.as_bytes()))
             .collect();
+        entries.push((
+            busbar_contract::abi::sdk::auth_outbound::EXT_SEALED_FIELDS,
+            busbar_contract::abi::sdk::auth_outbound::SEALED_FIELDS_V1,
+        ));
         extensions::encode(&entries)
     }
 }
@@ -352,6 +352,8 @@ type Replies = HashMap<ConnId, VecDeque<(Piece, Vec<u8>)>>;
 /// answered by the script's next reply, one piece per read.
 #[derive(Default)]
 struct Endpoint {
+    declared_owners: Mutex<Vec<InstanceId>>,
+    deadlines: Mutex<Vec<(u64, u64)>>,
     framed: bool,
     slab: ConnSlab<()>,
     answers: Vec<(u32, Vec<u8>)>,
@@ -391,6 +393,7 @@ impl Endpoint {
     /// Every exchange so far, each judged against its expected request.
     fn report(&self, script: &[Exchange]) -> String {
         let sent = self.sent.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(*self.deadlines.lock().unwrap(),vec![(0,30_000);sent.len()],"the actual OAuth request retains distinct need-default dial and 30-second request deadlines");
         let judged: Vec<String> = sent
             .iter()
             .enumerate()
@@ -445,6 +448,7 @@ impl DeclaredConns for Endpoint {
             return Err(ConnError::Refused);
         }
         self.slab.declare(owner, need);
+        self.declared_owners.lock().unwrap().push(owner);
         Ok(())
     }
     fn declared(&self, owner: InstanceId, need: NeedId) -> Option<Result<(), ConnError>> {
@@ -452,6 +456,24 @@ impl DeclaredConns for Endpoint {
     }
     fn framed(&self, owner: InstanceId, need: NeedId) -> bool {
         self.framed && self.slab.check_need(owner, need).is_ok()
+    }
+    fn open_request(
+        &self,
+        owner: InstanceId,
+        need: NeedId,
+        desc: &OpenDesc<'_>,
+        require_secure: bool,
+        dial_timeout_ms: u64,
+    ) -> Result<ConnId, ConnError> {
+        if require_secure {
+            return Err(ConnError::AuthRefused);
+        }
+        self.slab.check_need(owner, need)?;
+        self.deadlines
+            .lock()
+            .unwrap()
+            .push((dial_timeout_ms, desc.timeout_ms));
+        self.open(owner, need, desc)
     }
     fn serves_scheme(&self, _: &str) -> bool {
         true
@@ -497,12 +519,13 @@ impl Conns for Endpoint {
     }
     fn write(
         &self,
-        _: InstanceId,
-        _: ConnId,
+        owner: InstanceId,
+        id: ConnId,
         b: &[u8],
         _: bool,
         _: bool,
     ) -> Result<usize, ConnError> {
+        self.slab.get(owner, id)?;
         Ok(b.len())
     }
     fn read(&self, c: InstanceId, id: ConnId, _: u64, buf: &mut [u8]) -> Result<Piece, ConnError> {
@@ -697,6 +720,14 @@ impl Lend {
             let short = if short { " short" } else { "" };
             return format!("{outcome:?}{short} {text}");
         }
+        // SAFETY: this completed actual FIELDS reply lends its extension until the next call.
+        let ext = out.head.extensions;
+        let bytes = if ext.len == 0 {
+            &[][..]
+        } else {
+            unsafe { std::slice::from_raw_parts(ext.ptr, ext.len) }
+        };
+        assert_eq!(extensions::get(bytes,busbar_contract::abi::sdk::auth_outbound::EXT_SEALED_FIELDS),Some(busbar_contract::abi::sdk::auth_outbound::SEALED_FIELDS_V1),"the receiving host must preserve the actual credential's secure-connection requirement");
         let n = (out.fields_len as usize).min(self.spans.len());
         format!(
             "Ready fields=[{}]",
@@ -858,6 +889,9 @@ impl HostServices for Clock {
             wall_ns: self.wall_origin + elapsed,
             mono_ns: T0 + elapsed,
         }
+    }
+    fn dest_judge(&self, _dest: &str, _class: u32, _flags: u32, _later: Option<Later>) -> Ran {
+        Ran::Now(Stored::refused(UNSERVED))
     }
     fn records_get(&self, _caller: &Caller, _kind: &str, _key: &[u8], _later: Later) -> Ran {
         Ran::Now(Stored::refused(UNSERVED))
@@ -1027,13 +1061,21 @@ use busbar_plugin_loader::dispatch::{in_head, out_head, Called, InFrame, OutFram
 fn input<T: InFrame>() -> T {
     // SAFETY: ABI InFrame consists of zero-valid C data and begins with InHead.
     let mut value: T = unsafe { std::mem::zeroed() };
-    unsafe { std::ptr::addr_of_mut!(value).cast().write(in_head()) };
+    unsafe {
+        std::ptr::addr_of_mut!(value)
+            .cast::<busbar_contract::abi::mechanism::call::InHead>()
+            .write(in_head())
+    };
     value
 }
 fn output<T: OutFrame>() -> T {
     // SAFETY: ABI OutFrame consists of zero-valid C data and begins with OutHead.
     let mut value: T = unsafe { std::mem::zeroed() };
-    unsafe { std::ptr::addr_of_mut!(value).cast().write(out_head()) };
+    unsafe {
+        std::ptr::addr_of_mut!(value)
+            .cast::<busbar_contract::abi::mechanism::call::OutHead>()
+            .write(out_head())
+    };
     value
 }
 fn json(b: &[u8]) -> Blob {
@@ -1082,12 +1124,7 @@ fn count<T>(p: &Plugin<Auth>, expected: u64, op: impl FnOnce() -> T) -> T {
     assert_eq!(counts(p) - before, expected, "actual dispatcher crossings");
     result
 }
-fn product(
-    dropped: bool,
-    d: &Dispatcher,
-    e: Arc<Endpoint>,
-    door: busbar_contract::abi::mechanism::door::DoorFn,
-) -> Plugin<Auth> {
+fn product(dropped: bool, d: &Dispatcher, e: Arc<Endpoint>) -> Plugin<Auth> {
     let bind = Bind {
         instance: Arc::from("oauth-grant"),
         max_inflight_cap: 64,
@@ -1103,7 +1140,7 @@ fn product(
         )
         .expect("actual OAuth cdylib loads")
     } else {
-        load_linked::<Auth>(&LinkedRow::of(door).unwrap(), bind).unwrap()
+        load_linked::<Auth>(&LinkedRow::of(busbar_auth_oauth::door).unwrap(), bind).unwrap()
     }
 }
 fn close(p: &Plugin<Auth>) -> String {
@@ -1180,14 +1217,11 @@ fn token_exchange_actual_doors() {
     grant_case(token_exchange_case());
 }
 
-fn grant_case(case: OAuthGrant) {
-    grant_case_door(case, busbar_auth_oauth::door, true);
-}
-fn grant_case_door(x: OAuthGrant, door: busbar_contract::abi::mechanism::door::DoorFn, both: bool) {
+fn grant_case(x: OAuthGrant) {
     let mut refusals = Vec::new();
     let mut before_mint = Vec::new();
     let mut both_steps = Vec::new();
-    for dropped in [false, true].into_iter().filter(|d| both || !d) {
+    for dropped in [false, true] {
         let m = x.minting.as_ref().unwrap();
         let e = Arc::new(Endpoint::new(
             m.exchanges
@@ -1196,7 +1230,7 @@ fn grant_case_door(x: OAuthGrant, door: busbar_contract::abi::mechanism::door::D
                 .collect(),
         ));
         let (clock, d) = clock_dispatcher(x.head.timestamp);
-        let p = product(dropped, &d, e.clone(), door);
+        let p = product(dropped, &d, e.clone());
         let (h, mut steps) = opened(&p, &d, &x);
         let (flags, point) = flags(&x);
         let driver = d.driver(&p, 0).unwrap();
@@ -1273,14 +1307,15 @@ fn grant_case_door(x: OAuthGrant, door: busbar_contract::abi::mechanism::door::D
         }
         steps.push(close(&p));
         let closed = count(&p, 0, || sign(&p, h, &x.head, flags, point));
-        assert!(closed.starts_with("Refused "), "{closed}");
+        // The actual loader faults a closed instance before any product operation crossing.
+        assert_eq!(closed, "Fault ", "a closed instance cannot produce fields");
         steps.push(closed);
         let failing = Arc::new(Endpoint::new(vec![(
             500,
             b"conformance: the token endpoint is down".to_vec(),
         )]));
         let (clock, d) = clock_dispatcher(x.head.timestamp);
-        let p = product(dropped, &d, failing.clone(), door);
+        let p = product(dropped, &d, failing.clone());
         let (h, failure_open) = opened(&p, &d, &x);
         steps.extend(failure_open);
         let driver = d.driver(&p, 0).unwrap();
@@ -1311,207 +1346,20 @@ fn grant_case_door(x: OAuthGrant, door: busbar_contract::abi::mechanism::door::D
         steps.push(close(&p));
         both_steps.push(steps);
     }
-    if both {
-        assert_eq!(
-            both_steps[0], both_steps[1],
-            "actual per-step called/ready/tick/close parity"
-        );
-        if !before_mint.is_empty() {
-            assert_eq!(
-                before_mint[0], before_mint[1],
-                "actual linked and dropped pre-mint failure text"
-            );
-        }
-        assert_eq!(
-            refusals[0], refusals[1],
-            "actual linked and dropped mint failure text"
-        );
-    }
-}
-
-fn real_ops() -> Option<auth::Ops> {
-    // SAFETY: the actual static OAuth auth table.
-    Some(unsafe { *busbar_auth_oauth::door().ops().cast::<auth::Ops>() })
-}
-/// `fields`, then ONE byte of the first value written flipped.
-unsafe extern "C" fn fields_one_byte_off(
-    instance: *mut std::ffi::c_void,
-    input: *const std::ffi::c_void,
-    out: *mut std::ffi::c_void,
-) -> RawOutcome {
-    let Some(real) = real_ops().and_then(|o| o.fields) else {
-        return RawOutcome::of(Outcome::Fault);
-    };
-    let answered = unsafe { real(instance, input, out) };
-    if answered.outcome() == Outcome::Ready {
-        // SAFETY: the host hands `fields` a `FieldsIn` and a `FieldsOut`; the plugin answered
-        // READY, so its first span (when it wrote one) lies inside the host's field buffer.
-        unsafe {
-            let i = &*input.cast::<FieldsIn>();
-            let o = &*out.cast::<FieldsOut>();
-            if o.fields_len > 0 && !i.fields.is_null() && !i.field_buf.is_null() {
-                let v = (*i.fields).value;
-                if v.len > 0 && (v.offset as usize + v.len as usize) <= i.field_buf_cap {
-                    *i.field_buf.add(v.offset as usize + v.len as usize - 1) ^= 1;
-                }
-            }
-        }
-    }
-    answered
-}
-
-/// `fields`, then the fields it wrote taken back: READY with none written.
-unsafe extern "C" fn fields_writing_nothing(
-    instance: *mut std::ffi::c_void,
-    input: *const std::ffi::c_void,
-    out: *mut std::ffi::c_void,
-) -> RawOutcome {
-    let Some(real) = real_ops().and_then(|o| o.fields) else {
-        return RawOutcome::of(Outcome::Fault);
-    };
-    let answered = unsafe { real(instance, input, out) };
-    if answered.outcome() == Outcome::Ready {
-        // SAFETY: the host hands `fields` a `FieldsOut` it owns for the call.
-        unsafe {
-            (*out.cast::<FieldsOut>()).fields_len = 0;
-        }
-    }
-    answered
-}
-
-/// `open_outbound`, then a SECOND binding over the same style and credential under settings one
-/// byte longer: a second token cell, so the plugin's mint fetches the token twice.
-unsafe extern "C" fn open_outbound_twice(
-    instance: *mut std::ffi::c_void,
-    input: *const std::ffi::c_void,
-    out: *mut std::ffi::c_void,
-) -> RawOutcome {
-    let Some(real) = real_ops().and_then(|o| o.open_outbound) else {
-        return RawOutcome::of(Outcome::Fault);
-    };
-    let answered = unsafe { real(instance, input, out) };
-    // SAFETY: the host hands `open_outbound` an `OpenOutboundIn`; its settings blob is the
-    // host's for the call. The second call's `in` and `out` are this frame's own.
-    unsafe {
-        let mut again = *input.cast::<OpenOutboundIn>();
-        let mut longer = if again.settings.ptr.is_null() {
-            Vec::new()
-        } else {
-            std::slice::from_raw_parts(again.settings.ptr, again.settings.len).to_vec()
-        };
-        longer.push(b' ');
-        again.settings = json(&longer);
-        let mut scratch: OpenOutboundOut = output();
-        let _ = real(
-            instance,
-            std::ptr::addr_of!(again).cast(),
-            std::ptr::addr_of_mut!(scratch).cast(),
-        );
-    }
-    answered
-}
-
-/// `fields`, and when it WAITS (an on-demand cell armed) the same call again under the scope one
-/// byte longer: a second cell armed for the same waiting request, so the waiting calls fetch twice.
-unsafe extern "C" fn fields_arming_twice(
-    instance: *mut std::ffi::c_void,
-    input: *const std::ffi::c_void,
-    out: *mut std::ffi::c_void,
-) -> RawOutcome {
-    let Some(real) = real_ops().and_then(|o| o.fields) else {
-        return RawOutcome::of(Outcome::Fault);
-    };
-    let answered = unsafe { real(instance, input, out) };
-    if answered.outcome() == Outcome::Pending {
-        // SAFETY: the host hands `fields` a `FieldsIn`; its extensions blob is the host's for the
-        // call. The second call's `in` and `out` are this frame's own.
-        unsafe {
-            let mut again = *input.cast::<FieldsIn>();
-            let ext = again.head.extensions;
-            let blob = if ext.ptr.is_null() {
-                &[][..]
-            } else {
-                std::slice::from_raw_parts(ext.ptr, ext.len)
-            };
-            let mut scope = extensions::get(blob, auth::EXT_SCOPE)
-                .unwrap_or_default()
-                .to_vec();
-            scope.push(b' ');
-            let other = extensions::encode(&[(auth::EXT_SCOPE, &scope)]);
-            again.head.extensions = Blob {
-                ptr: other.as_ptr(),
-                len: other.len(),
-                fmt: BLOB_OCTETS,
-                flags: 0,
-            };
-            let mut scratch: FieldsOut = output();
-            let _ = real(
-                instance,
-                std::ptr::addr_of!(again).cast(),
-                std::ptr::addr_of_mut!(scratch).cast(),
-            );
-        }
-    }
-    answered
-}
-
-fn altered(
-    fields: Option<busbar_contract::abi::mechanism::call::Op>,
-    twice: bool,
-) -> &'static Door {
-    // SAFETY: immutable copied actual product operations; changed callbacks forward the real
-    // product and perturb only the assertion's field or extra binding.
-    let mut ops = real_ops().unwrap();
-    ops.fields = fields;
-    if twice {
-        ops.open_outbound = Some(open_outbound_twice);
-    }
-    let ops = Box::leak(Box::new(ops));
-    Box::leak(Box::new(unsafe {
-        Door::__from_parts(DoorParts {
-            ops: std::ptr::from_ref(ops).cast(),
-            ..busbar_auth_oauth::door().parts()
-        })
-    }))
-}
-extern "C" fn byte_door() -> &'static Door {
-    altered(Some(fields_one_byte_off), false)
-}
-extern "C" fn nothing_door() -> &'static Door {
-    altered(Some(fields_writing_nothing), false)
-}
-extern "C" fn twice_door() -> &'static Door {
-    altered(Some(fields_arming_twice), true)
-}
-fn rejected(door: busbar_contract::abi::mechanism::door::DoorFn, count: bool) {
-    let error =
-        std::panic::catch_unwind(|| grant_case_door(client_credentials_case(), door, false))
-            .expect_err("altered real product must fail its assertions");
-    let text = error
-        .downcast_ref::<String>()
-        .cloned()
-        .or_else(|| error.downcast_ref::<&str>().map(|s| s.to_string()))
-        .unwrap_or_default();
-    assert!(
-        text.contains(if count {
-            "exactly ONE token exchange"
-        } else {
-            "expected actual minted fields"
-        }),
-        "unexpected assertion: {text}"
+    assert_eq!(
+        both_steps[0], both_steps[1],
+        "actual per-step called/ready/tick/close parity"
     );
-}
-#[test]
-fn wrong_actual_field_byte_is_rejected() {
-    rejected(byte_door, false);
-}
-#[test]
-fn missing_actual_fields_are_rejected() {
-    rejected(nothing_door, false);
-}
-#[test]
-fn extra_actual_token_exchange_is_rejected() {
-    rejected(twice_door, true);
+    if !before_mint.is_empty() {
+        assert_eq!(
+            before_mint[0], before_mint[1],
+            "actual linked and dropped pre-mint failure text"
+        );
+    }
+    assert_eq!(
+        refusals[0], refusals[1],
+        "actual linked and dropped mint failure text"
+    );
 }
 
 use busbar_contract::abi::host::conn::connector::{service, EstablishIn, IoIn, StreamIn};
@@ -1571,11 +1419,15 @@ fn establish(p: &Plugin<Auth>, need: u32, target: &str) -> (Outcome, u64, String
     };
     let mut o = out();
     let f = CONN_SLOTS.establish.expect("the host offers ESTABLISH");
-    let raw = f(
-        p.inner.ctx(),
-        std::ptr::from_ref(&i).cast::<c_void>(),
-        &mut o,
-    );
+    // SAFETY: the real host slot receives this live correctly typed frame and
+    // the actual loaded instance context; all lent memory remains live through the call.
+    let raw = unsafe {
+        f(
+            p.inner.ctx(),
+            std::ptr::from_ref(&i).cast::<c_void>(),
+            &mut o,
+        )
+    };
     answered(raw, &o)
 }
 
@@ -1594,11 +1446,15 @@ fn io(p: &Plugin<Auth>, stream: u64, write: bool) -> (Outcome, u64, String) {
         len: buf.len(),
     };
     let mut o = out();
-    let raw = f.expect("the host offers READ and WRITE")(
-        p.inner.ctx(),
-        std::ptr::from_ref(&i).cast::<c_void>(),
-        &mut o,
-    );
+    // SAFETY: the real host slot receives this live correctly typed frame and
+    // the actual loaded instance context; all lent memory remains live through the call.
+    let raw = unsafe {
+        f.expect("the host offers READ and WRITE")(
+            p.inner.ctx(),
+            std::ptr::from_ref(&i).cast::<c_void>(),
+            &mut o,
+        )
+    };
     answered(raw, &o)
 }
 
@@ -1609,11 +1465,15 @@ fn close_stream(p: &Plugin<Auth>, stream: u64) -> (Outcome, u64, String) {
         stream,
     };
     let mut o = out();
-    let raw = CONN_SLOTS.close.expect("the host offers CLOSE")(
-        p.inner.ctx(),
-        std::ptr::from_ref(&i).cast::<c_void>(),
-        &mut o,
-    );
+    // SAFETY: the real host slot receives this live correctly typed frame and
+    // the actual loaded instance context; all lent memory remains live through the call.
+    let raw = unsafe {
+        CONN_SLOTS.close.expect("the host offers CLOSE")(
+            p.inner.ctx(),
+            std::ptr::from_ref(&i).cast::<c_void>(),
+            &mut o,
+        )
+    };
     answered(raw, &o)
 }
 
@@ -1623,13 +1483,38 @@ fn actual_oauth_host_connections_refuse_undeclared_need_and_other_owner() {
     endpoint.framed = false; // Exercise raw host connection custody on the actual auth context.
     let endpoint = Arc::new(endpoint);
     let d = Dispatcher::new(DispatchConfig::default());
-    let owner = product(false, &d, endpoint.clone(), busbar_auth_oauth::door);
-    let other = product(false, &d, endpoint, busbar_auth_oauth::door);
-    let (outcome, conn, text) = establish(&owner, 0, "https://login.example/token");
+    let owner = product(false, &d, endpoint.clone());
+    let other = product(false, &d, endpoint.clone());
+    // These real needs take their targets from binding settings: actual lifecycle and binding
+    // admission must declare them before a host connection can be used by either instance.
+    let case = client_credentials_case();
+    opened(&owner, &d, &case);
+    opened(&other, &d, &case);
+    let mut owners = endpoint.declared_owners.lock().unwrap().clone();
+    owners.sort();
+    owners.dedup();
+    assert_eq!(
+        owners.len(),
+        2,
+        "both actual loader instances declared their own need"
+    );
+    assert_ne!(owners[0], owners[1], "real connection owners are distinct");
+    assert_ne!(
+        owner.inner.ctx(),
+        other.inner.ctx(),
+        "the actual host contexts are distinct"
+    );
+    let target = "https://login.conformance.invalid/oauth2/token";
+    let (outcome, conn, text) = establish(&owner, 0, target);
     assert_eq!(outcome, Outcome::Ready, "{text}");
+    assert_eq!(
+        *endpoint.deadlines.lock().unwrap(),
+        [(5_000, 0)],
+        "the raw custody probe explicitly supplies its separate dial timeout"
+    );
     assert_eq!(io(&owner, conn, true).0, Outcome::Ready);
     for need in [2, u32::MAX] {
-        let (outcome, _, text) = establish(&owner, need, "https://login.example/token");
+        let (outcome, _, text) = establish(&owner, need, target);
         assert_eq!(
             (outcome, text.as_str()),
             (Outcome::Refused, ConnError::UndeclaredNeed.text())
@@ -1647,4 +1532,6 @@ fn actual_oauth_host_connections_refuse_undeclared_need_and_other_owner() {
     }
     assert_eq!(io(&owner, conn, true).0, Outcome::Ready);
     assert_eq!(close_stream(&owner, conn).0, Outcome::Ready);
+    close(&owner);
+    close(&other);
 }

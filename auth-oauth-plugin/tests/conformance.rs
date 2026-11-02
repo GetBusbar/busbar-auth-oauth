@@ -617,6 +617,9 @@ mod mint_door {
                 mono_ns: elapsed,
             }
         }
+        fn dest_judge(&self, _dest: &str, _class: u32, _flags: u32, _later: Option<Later>) -> Ran {
+            Ran::Now(Stored::refused(UNSERVED))
+        }
         fn records_get(&self, _caller: &Caller, _kind: &str, _key: &[u8], _later: Later) -> Ran {
             Ran::Now(Stored::refused(UNSERVED))
         }
@@ -1193,9 +1196,22 @@ fn actual_product_admission_negative_cases() {
     let path = built_plugin_image();
     linked(&f, &d);
     dropped(&f, &d);
-    let mut lie = stated.clone();
-    let last = lie.len() - 1;
-    lie[last] ^= 1;
+    // Change only the actual product's version and render a fully valid, different Statement.
+    // Flipping an arbitrary byte can corrupt rendering syntax and tests a different refusal.
+    // SAFETY: the real static Statement is copied; all nested static data stays unchanged.
+    let statement = unsafe { actual.statement.read_unaligned() };
+    let other = Box::leak(Box::new(busbar_contract::abi::mechanism::door::Statement {
+        version: s("99.0.0-conformance"),
+        ..statement
+    }));
+    restate(DoorParts {
+        statement: other,
+        ..actual
+    });
+    let lie = rendering_of(restated_door).expect("the altered-version actual door renders");
+    busbar_contract::abi::mechanism::rendering::read(&lie)
+        .expect("the different Statement is valid rendering");
+    assert_ne!(lie, stated);
     assert_eq!(
         load_linked::<Auth>(
             &LinkedRow {
@@ -1211,16 +1227,6 @@ fn actual_product_admission_negative_cases() {
         load_dropped::<Auth>(&path, &lie, bind(&f, &d)).err(),
         Some(LoadError::StatementMismatch)
     );
-    // SAFETY: the product's Statement is static and copied before changing only version.
-    let statement = unsafe { actual.statement.read_unaligned() };
-    let other = Box::leak(Box::new(busbar_contract::abi::mechanism::door::Statement {
-        version: s("conformance-other-version"),
-        ..statement
-    }));
-    restate(DoorParts {
-        statement: other,
-        ..actual
-    });
     assert_eq!(
         load_linked::<Auth>(
             &LinkedRow {
@@ -1459,6 +1465,13 @@ fn actual_oauth_refuses_undeclared_inbound_and_login_operations() {
     let d = Dispatcher::new(DispatchConfig::default());
     let folds = Arc::new(Folds::default());
     let mut answers = Vec::new();
+    let stated = rendering_of(busbar_auth_oauth::door).unwrap();
+    let facts = busbar_contract::abi::mechanism::rendering::read(&stated).unwrap();
+    let tail =
+        busbar_contract::abi::mechanism::rendering::read_auth_tail(&facts.kind_tail).unwrap();
+    assert_eq!(tail.caps & auth::CAP_INBOUND, 0);
+    assert_eq!(tail.login_kind, auth::LOGIN_KIND_NONE);
+    // The loader refuses undeclared families before entering an operation: exactly zero crossings.
     for p in [linked(&folds, &d), dropped(&folds, &d)] {
         let mut verify: Frame<VerifyIn, IdentifyOut> = Frame::new(z(), z());
         verify.input.head = in_head();
@@ -1475,7 +1488,7 @@ fn actual_oauth_refuses_undeclared_inbound_and_login_operations() {
             p.inner.crossings.load(std::sync::atomic::Ordering::SeqCst)
                 - p.inner.resumes.load(std::sync::atomic::Ordering::SeqCst)
                 - before,
-            1
+            0
         );
         let mut begin: Frame<BeginLoginIn, BeginLoginOut> = Frame::new(z(), z());
         begin.input.head = in_head();
@@ -1492,7 +1505,7 @@ fn actual_oauth_refuses_undeclared_inbound_and_login_operations() {
             p.inner.crossings.load(std::sync::atomic::Ordering::SeqCst)
                 - p.inner.resumes.load(std::sync::atomic::Ordering::SeqCst)
                 - before,
-            1
+            0
         );
         let mut complete: Frame<CompleteLoginIn, IdentifyOut> = Frame::new(z(), z());
         complete.input.head = in_head();
@@ -1509,7 +1522,7 @@ fn actual_oauth_refuses_undeclared_inbound_and_login_operations() {
             p.inner.crossings.load(std::sync::atomic::Ordering::SeqCst)
                 - p.inner.resumes.load(std::sync::atomic::Ordering::SeqCst)
                 - before,
-            1
+            0
         );
     }
     assert_eq!(

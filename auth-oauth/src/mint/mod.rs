@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex, RwLock};
 
 use busbar_contract::abi::sdk::cred::{Cred, FormBody, SealedWrite};
 use busbar_contract::conn::{ConnError, ConnId, PieceKind};
-use zeroize::{Zeroize, Zeroizing};
+use zeroize::Zeroizing;
 
 use crate::token_response::{default_expires_in, deserialize_expires_in, wiped_member};
 use busbar_contract::abi::sdk::auth_kit::json_error;

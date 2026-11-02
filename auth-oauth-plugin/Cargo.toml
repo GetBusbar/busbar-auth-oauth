@@ -27,4 +27,5 @@ busbar-plugin-loader = { workspace = true }
 # `tests/conformance.rs`: the instance's tick schedule runs on a runtime, as the composition root
 # runs it, and its token responses are JSON.
 serde_json = { workspace = true }
+base64 = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
