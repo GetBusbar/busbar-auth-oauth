@@ -18,9 +18,9 @@ use busbar_contract::abi::mechanism::call::Outcome;
 use busbar_contract::abi::mechanism::ticket::Ticket;
 use busbar_contract::abi::sdk::auth_outbound::Diags;
 use busbar_contract::abi::sdk::conn::{ConnFailure, Host};
-use busbar_contract::abi::sdk::test_support::fake::{self, FakeHost, FakeService, ServiceCall};
 use busbar_contract::abi::transport::FrameSpan;
 use busbar_contract::conn::ConnError;
+use busbar_test_kit::test_support::fake::{self, FakeHost, FakeService, ServiceCall};
 
 use super::*;
 use crate::mint::{RetryAfter, TokenRequest};

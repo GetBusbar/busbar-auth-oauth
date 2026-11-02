@@ -633,7 +633,7 @@ mod mint_door {
 
     struct Clock(Instant);
 
-    impl busbar_contract::services::double::ServicesDouble for Clock {
+    impl busbar_test_kit::services_double::ServicesDouble for Clock {
         fn now(&self) -> busbar_contract::services::Reading {
             let elapsed = u64::try_from(self.0.elapsed().as_nanos()).expect("test clock fits");
             busbar_contract::services::Reading {
@@ -821,7 +821,9 @@ mod mint_door {
         let table = Arc::new(TokenEndpoint::default());
         let dispatcher = Arc::new(Dispatcher::with_services(
             DispatchConfig::default(),
-            Arc::new(Clock(Instant::now())),
+            Arc::new(busbar_test_kit::services_double::Double(Clock(
+                Instant::now(),
+            ))),
         ));
         let row = LinkedRow::of(door).expect("the door states its Statement");
         let plugin = load_linked::<Auth>(
@@ -872,10 +874,28 @@ mod mint_door {
             .expect("the binding opens");
 
         // Before the first mint, fail locally; no upstream request may be sent anonymously.
+        // The in-place API returns None when it has no READY answer; the ticketed call carries
+        // the terminal failure. Check both before starting the mint driver.
         let request = FieldsRequest::default();
         assert!(
-            matches!(instance.fields_now(handle, &request), Some(Fields::Failed)),
+            instance.fields_now(handle, &request).is_none(),
+            "nothing minted yet: no cached credential is presented"
+        );
+        assert!(!instance.ready(handle), "nothing minted yet: not ready");
+        let before_mint = tokio::time::timeout(
+            Duration::from_secs(10),
+            instance.fields(handle, FieldsRequest::default(), 0),
+        )
+        .await
+        .expect("the pre-mint fields failure answers without a token exchange");
+        assert_eq!(
+            before_mint,
+            Fields::Failed,
             "nothing minted yet: failed closed"
+        );
+        assert!(
+            table.opened.lock().unwrap().is_empty(),
+            "the pre-mint failure must not open a token endpoint connection"
         );
 
         // THE TICK SCHEDULE: the first mint lands, and the next call presents it.
