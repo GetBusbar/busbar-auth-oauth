@@ -109,38 +109,14 @@ struct OnDemand {
     expired: String,
 }
 
-/// One `auth.outbound` entry.
-struct Style {
+/// Fixed inputs for the three actual OAuth grants below.
+struct OAuthGrant {
     style: String,
     credential: Option<Vec<u8>>,
     settings: Vec<u8>,
     head: Head,
     expect: String,
     minting: Option<Minting>,
-}
-
-fn str_of<'a>(v: &'a serde_json::Value, what: &str) -> &'a str {
-    v.as_str()
-        .unwrap_or_else(|| panic!("conformance.json: {what} must be a string"))
-}
-
-fn pairs(v: &serde_json::Value, what: &str) -> Vec<(String, String)> {
-    match v {
-        serde_json::Value::Null => Vec::new(),
-        serde_json::Value::Array(a) => a
-            .iter()
-            .map(|p| {
-                let p = p.as_array().unwrap_or_else(|| {
-                    panic!("conformance.json: {what} holds [name, value] pairs")
-                });
-                (
-                    str_of(&p[0], what).to_string(),
-                    str_of(&p[1], what).to_string(),
-                )
-            })
-            .collect(),
-        _ => panic!("conformance.json: {what} is an array of [name, value] pairs"),
-    }
 }
 
 /// The transcript's spelling of written fields: `name: value (flags=N)`, in order.
@@ -157,170 +133,204 @@ fn listing<'a>(fields: impl Iterator<Item = (&'a [u8], &'a [u8], u32)>) -> Strin
         .join("; ")
 }
 
-/// The answer a `fields` call writing exactly `v`'s fields reads as.
-fn expected(v: &serde_json::Value, what: &str) -> String {
-    let a = v.as_array().unwrap_or_else(|| {
-        panic!("conformance.json: {what} is an array of [name, value(, flags)]")
-    });
-    let owned: Vec<(Vec<u8>, Vec<u8>, u32)> = a
-        .iter()
-        .map(|p| {
-            let p = p
-                .as_array()
-                .unwrap_or_else(|| panic!("conformance.json: {what} holds [name, value(, flags)]"));
-            (
-                str_of(&p[0], what).as_bytes().to_vec(),
-                str_of(&p[1], what).as_bytes().to_vec(),
-                match p.get(2) {
-                    // No third element: the field carries no flag.
-                    None => 0,
-                    Some(f) => f
-                        .as_u64()
-                        .and_then(|n| u32::try_from(n).ok())
-                        .unwrap_or_else(|| {
-                            panic!("conformance.json: {what}'s flags must be a u32")
-                        }),
+fn client_credentials_case() -> OAuthGrant {
+    OAuthGrant {
+        style: "oauth-client-credentials".into(),
+        credential: Some("conformance-client:conformance:secret".as_bytes().to_vec()),
+        settings: concat!("{\"token_url\":\"https://login.conformance.invalid/oauth2/token\",\"scope\":",
+        "\"https://api.conformance.invalid/.default\"}").as_bytes().to_vec(),
+        head: Head {
+            method: "POST".into(),
+            authority: "runtime.signer.example".into(),
+            path: "/model/m/converse".into(),
+            query: None,
+            timestamp: 1440938160,
+            fields: vec![("content-type".into(),
+            "application/json".into())],
+            body: "{}".as_bytes().to_vec(),
+            extensions: vec![]
+        },
+        expect: "Ready fields=[authorization: Bearer conformance-token-1 (flags=1)]".into(),
+        minting: Some(Minting {
+            exchanges: vec![Exchange {
+                expect: ExpectRequest {
+                    method: "POST".into(),
+                    target: "https://login.conformance.invalid/oauth2/token".into(),
+                    fields_subset: vec![("content-type".into(),
+                    "application/x-www-form-urlencoded".into())],
+                    body: Some(concat!("grant_type=client_credentials&client_id=conformance-client&client_secr",
+                    "et=conformance%3Asecret&scope=https%3A%2F%2Fapi.conformance.invalid%2F",
+                    ".default").into()),
+                    body_prefix: None
                 },
-            )
-        })
-        .collect();
-    // A style whose expectation is no field at all would pass a door that writes nothing: every
-    // outbound style presents something (a header, a query parameter), so an empty list is refused
-    // here rather than let the script compare nothing with nothing.
-    assert!(
-        !owned.is_empty(),
-        "conformance.json: {what} is empty: an outbound style writes at least one field, and an \
-         empty expectation would pass a door that writes none"
-    );
-    format!(
-        "Ready fields=[{}]",
-        listing(
-            owned
-                .iter()
-                .map(|(n, v, f)| (n.as_slice(), v.as_slice(), *f))
+                status: 200,
+                body: concat!("{\"access_token\": \"conformance-token-1\", \"expires_in\": 3600, \"token_typ",
+                "e\": \"Bearer\"}").as_bytes().to_vec()
+            },
+            Exchange {
+                expect: ExpectRequest {
+                    method: "POST".into(),
+                    target: "https://login.conformance.invalid/oauth2/token".into(),
+                    fields_subset: vec![("content-type".into(),
+                    "application/x-www-form-urlencoded".into())],
+                    body: Some(concat!("grant_type=client_credentials&client_id=conformance-client&client_secr",
+                    "et=conformance%3Asecret&scope=https%3A%2F%2Fapi.conformance.invalid%2F",
+                    ".default").into()),
+                    body_prefix: None
+                },
+                status: 200,
+                body: concat!("{\"access_token\": \"conformance-token-2\", \"expires_in\": 3600, \"token_typ",
+                "e\": \"Bearer\"}").as_bytes().to_vec()
+            }
+            ],
+            expires_in: 3600,
+            refreshed: "Ready fields=[authorization: Bearer conformance-token-2 (flags=1)]".into(),
+            refusal: "Failed".into(),
+            on_demand: None
+        }
         )
-    )
-}
-
-fn settings_of(v: &serde_json::Value) -> Vec<u8> {
-    match v {
-        serde_json::Value::Null => b"{}".to_vec(),
-        serde_json::Value::String(s) => s.as_bytes().to_vec(),
-        other => other.to_string().into_bytes(),
     }
 }
-
-impl Style {
-    fn parse(v: &serde_json::Value) -> Self {
-        let style = str_of(&v["style"], "auth.outbound[].style").to_string();
-        let h = &v["head"];
-        assert!(
-            h.is_object(),
-            "conformance.json: style `{style}` has no `head`"
-        );
-        let target = str_of(&h["target"], "head.target");
-        let (path, query) = match target.split_once('?') {
-            Some((p, q)) => (p.to_string(), Some(q.to_string())),
-            None => (target.to_string(), None),
-        };
-        let head = Head {
-            method: str_of(&h["method"], "head.method").to_string(),
-            authority: str_of(&h["authority"], "head.authority").to_string(),
-            path,
-            query,
-            timestamp: h["timestamp"].as_u64().unwrap_or_else(|| {
-                panic!("conformance.json: style `{style}`'s head.timestamp must be epoch seconds")
-            }),
-            fields: pairs(&h["fields"], "head.fields"),
-            body: h["body"].as_str().unwrap_or("").as_bytes().to_vec(),
-            extensions: match &h["extensions"] {
-                serde_json::Value::Null => Vec::new(),
-                serde_json::Value::Object(m) => m
-                    .iter()
-                    .map(|(k, v)| (k.clone(), str_of(v, "head.extensions").to_string()))
-                    .collect(),
-                _ => panic!("conformance.json: style `{style}`'s head.extensions is an object"),
+fn jwt_bearer_case() -> OAuthGrant {
+    OAuthGrant {
+        style: "jwt-bearer".into(),
+        credential: Some(serde_json::from_str::<serde_json::Value>(include_str!("../conformance.json")).unwrap()["auth"]["outbound"][1]["credential"].as_str().unwrap().as_bytes().to_vec()),
+        settings: concat!("{\"token_uri\":\"https://oauth2.conformance.invalid/token\",\"scope\":\"https",
+        "://www.googleapis.com/auth/cloud-platform\"}").as_bytes().to_vec(),
+        head: Head {
+            method: "POST".into(),
+            authority: "runtime.signer.example".into(),
+            path: "/model/m/converse".into(),
+            query: None,
+            timestamp: 1440938160,
+            fields: vec![("content-type".into(),
+            "application/json".into())],
+            body: "{}".as_bytes().to_vec(),
+            extensions: vec![]
+        },
+        expect: "Ready fields=[authorization: Bearer conformance-token-1 (flags=1)]".into(),
+        minting: Some(Minting {
+            exchanges: vec![Exchange {
+                expect: ExpectRequest {
+                    method: "POST".into(),
+                    target: "https://oauth2.conformance.invalid/token".into(),
+                    fields_subset: vec![("content-type".into(),
+                    "application/x-www-form-urlencoded".into())],
+                    body: None,
+                    body_prefix: Some("grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion=eyJ".into())
+                },
+                status: 200,
+                body: concat!("{\"access_token\": \"conformance-token-1\", \"expires_in\": 3600, \"token_typ",
+                "e\": \"Bearer\"}").as_bytes().to_vec()
             },
-        };
-        let on_demand = match v["mint"].as_str() {
-            None => false,
-            Some("on_demand") => true,
-            Some(other) => panic!(
-                "conformance.json: style `{style}` states mint `{other}`; the outbound script \
-                 knows a tick-driven style (no `mint`) and `on_demand`"
-            ),
-        };
-        let minting = match &v["token_endpoint"] {
-            serde_json::Value::Null => None,
-            serde_json::Value::Array(a) => {
-                assert!(
-                    !a.is_empty(),
-                    "conformance.json: style `{style}`'s token_endpoint is empty"
-                );
-                let exchanges = a
-                    .iter()
-                    .map(|x| {
-                        let e = &x["expect_request"];
-                        let r = &x["respond"];
-                        Exchange {
-                            expect: ExpectRequest {
-                                method: str_of(&e["method"], "expect_request.method").to_string(),
-                                target: str_of(&e["target"], "expect_request.target").to_string(),
-                                fields_subset: pairs(
-                                    &e["fields_subset"],
-                                    "expect_request.fields_subset",
-                                ),
-                                body: e["body"].as_str().map(String::from),
-                                body_prefix: e["body_prefix"].as_str().map(String::from),
-                            },
-                            status: r["status"]
-                                .as_u64()
-                                .unwrap_or_else(|| panic!("conformance.json: respond.status"))
-                                as u32,
-                            body: str_of(&r["body"], "respond.body").as_bytes().to_vec(),
-                        }
-                    })
-                    .collect();
-                let on_demand = on_demand.then(|| {
-                    assert!(
-                        a.len() >= 3,
-                        "conformance.json: on-demand style `{style}`'s token_endpoint scripts \
-                         three exchanges (S, the second scope, S once expired)"
-                    );
-                    OnDemand {
-                        second_scope: str_of(&v["second_scope"], "second_scope").to_string(),
-                        second: expected(&v["second_scope_fields"], "second_scope_fields"),
-                        expired: expected(&v["expired_fields"], "expired_fields"),
-                    }
-                });
-                Some(Minting {
-                    exchanges,
-                    expires_in: v["expires_in"].as_u64().unwrap_or_else(|| {
-                        panic!("conformance.json: minting style `{style}` states `expires_in`")
-                    }),
-                    refreshed: if on_demand.is_some() {
-                        String::new()
-                    } else {
-                        expected(&v["refreshed_fields"], "refreshed_fields")
-                    },
-                    refusal: str_of(&v["refusal"], "refusal").to_string(),
-                    on_demand,
-                })
+            Exchange {
+                expect: ExpectRequest {
+                    method: "POST".into(),
+                    target: "https://oauth2.conformance.invalid/token".into(),
+                    fields_subset: vec![("content-type".into(),
+                    "application/x-www-form-urlencoded".into())],
+                    body: None,
+                    body_prefix: Some("grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion=eyJ".into())
+                },
+                status: 200,
+                body: concat!("{\"access_token\": \"conformance-token-2\", \"expires_in\": 3600, \"token_typ",
+                "e\": \"Bearer\"}").as_bytes().to_vec()
             }
-            _ => panic!("conformance.json: style `{style}`'s token_endpoint is an array"),
-        };
-        assert!(
-            !on_demand || minting.is_some(),
-            "conformance.json: on-demand style `{style}` scripts its token_endpoint"
-        );
-        Style {
-            credential: v["credential"].as_str().map(|c| c.as_bytes().to_vec()),
-            settings: settings_of(&v["settings"]),
-            head,
-            expect: expected(&v["expect_fields"], "expect_fields"),
-            minting,
-            style,
+            ],
+            expires_in: 3600,
+            refreshed: "Ready fields=[authorization: Bearer conformance-token-2 (flags=1)]".into(),
+            refusal: "Failed".into(),
+            on_demand: None
         }
+        )
+    }
+}
+fn token_exchange_case() -> OAuthGrant {
+    OAuthGrant {
+        style: "oauth-token-exchange".into(),
+        credential: Some("conformance-subject-token".as_bytes().to_vec()),
+        settings: concat!("{\"token_url\":\"https://sts.conformance.invalid/token\",\"resource\":\"https",
+        "://api.conformance.invalid/\"}").as_bytes().to_vec(),
+        head: Head {
+            method: "POST".into(),
+            authority: "runtime.signer.example".into(),
+            path: "/model/m/converse".into(),
+            query: None,
+            timestamp: 1440938160,
+            fields: vec![("content-type".into(),
+            "application/json".into())],
+            body: "{}".as_bytes().to_vec(),
+            extensions: vec![("scope".into(),
+            "read:things".into())]
+        },
+        expect: "Ready fields=[authorization: Bearer conformance-token-1 (flags=1)]".into(),
+        minting: Some(Minting {
+            exchanges: vec![Exchange {
+                expect: ExpectRequest {
+                    method: "POST".into(),
+                    target: "https://sts.conformance.invalid/token".into(),
+                    fields_subset: vec![("content-type".into(),
+                    "application/x-www-form-urlencoded".into())],
+                    body: Some(concat!("grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Atoken-exchange&s",
+                    "ubject_token=conformance-subject-token&subject_token_type=urn%3Aietf%3",
+                    "Aparams%3Aoauth%3Atoken-type%3Aaccess_token&requested_token_type=urn%3",
+                    "Aietf%3Aparams%3Aoauth%3Atoken-type%3Aaccess_token&resource=https%3A%2",
+                    "F%2Fapi.conformance.invalid%2F&scope=read%3Athings").into()),
+                    body_prefix: None
+                },
+                status: 200,
+                body: concat!("{\"access_token\": \"conformance-token-1\", \"expires_in\": 3600, \"token_typ",
+                "e\": \"Bearer\", \"issued_token_type\": \"urn:ietf:params:oauth:token-type:a",
+                "ccess_token\"}").as_bytes().to_vec()
+            },
+            Exchange {
+                expect: ExpectRequest {
+                    method: "POST".into(),
+                    target: "https://sts.conformance.invalid/token".into(),
+                    fields_subset: vec![("content-type".into(),
+                    "application/x-www-form-urlencoded".into())],
+                    body: Some(concat!("grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Atoken-exchange&s",
+                    "ubject_token=conformance-subject-token&subject_token_type=urn%3Aietf%3",
+                    "Aparams%3Aoauth%3Atoken-type%3Aaccess_token&requested_token_type=urn%3",
+                    "Aietf%3Aparams%3Aoauth%3Atoken-type%3Aaccess_token&resource=https%3A%2",
+                    "F%2Fapi.conformance.invalid%2F&scope=read%3Athings+write%3Athings").into()),
+                    body_prefix: None
+                },
+                status: 200,
+                body: concat!("{\"access_token\": \"conformance-token-2\", \"expires_in\": 3600, \"token_typ",
+                "e\": \"Bearer\", \"issued_token_type\": \"urn:ietf:params:oauth:token-type:a",
+                "ccess_token\"}").as_bytes().to_vec()
+            },
+            Exchange {
+                expect: ExpectRequest {
+                    method: "POST".into(),
+                    target: "https://sts.conformance.invalid/token".into(),
+                    fields_subset: vec![("content-type".into(),
+                    "application/x-www-form-urlencoded".into())],
+                    body: Some(concat!("grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Atoken-exchange&s",
+                    "ubject_token=conformance-subject-token&subject_token_type=urn%3Aietf%3",
+                    "Aparams%3Aoauth%3Atoken-type%3Aaccess_token&requested_token_type=urn%3",
+                    "Aietf%3Aparams%3Aoauth%3Atoken-type%3Aaccess_token&resource=https%3A%2",
+                    "F%2Fapi.conformance.invalid%2F&scope=read%3Athings").into()),
+                    body_prefix: None
+                },
+                status: 200,
+                body: concat!("{\"access_token\": \"conformance-token-3\", \"expires_in\": 7200, \"token_typ",
+                "e\": \"Bearer\", \"issued_token_type\": \"urn:ietf:params:oauth:token-type:a",
+                "ccess_token\"}").as_bytes().to_vec()
+            }
+            ],
+            expires_in: 3600,
+            refreshed: "".into(),
+            refusal: "Failed".into(),
+            on_demand: Some(OnDemand {
+                second_scope: "read:things write:things".into(),
+                second: "Ready fields=[authorization: Bearer conformance-token-2 (flags=1)]".into(),
+                expired: "Ready fields=[authorization: Bearer conformance-token-3 (flags=1)]".into()
+            }
+            )
+        }
+        )
     }
 }
 
@@ -544,7 +554,7 @@ const NO_STR: AbiStr = AbiStr {
 };
 
 /// `open_outbound` of `x`: its answer and the handle.
-fn open_outbound(p: &Plugin<Auth>, x: &Style) -> (String, u64) {
+fn open_outbound(p: &Plugin<Auth>, x: &OAuthGrant) -> (String, u64) {
     let mut f: Frame<OpenOutboundIn, OpenOutboundOut> = Frame::new(input(), output());
     f.input.style = abi_str(x.style.as_bytes());
     f.input.credential = x.credential.as_deref().map_or(Blob::ABSENT, secret);
@@ -808,7 +818,18 @@ fn tick_driver(
         return ("no answer".to_string(), 0);
     };
     let next = done.frame.as_ref().map_or(0, |f| f.out.next_tick_ns);
-    (format!("{:?}", done.outcome), next)
+    (
+        format!(
+            "{:?} lease={} {}",
+            done.outcome,
+            done.frame.as_ref().is_some_and(|f| f.out.head.lease != 0),
+            done.error
+                .as_deref()
+                .map(String::from_utf8_lossy)
+                .unwrap_or_default()
+        ),
+        next,
+    )
 }
 
 const T0: u64 = 1_000_000_000_000;
@@ -1085,45 +1106,44 @@ fn product(
         load_linked::<Auth>(&LinkedRow::of(door).unwrap(), bind).unwrap()
     }
 }
-fn close(p: &Plugin<Auth>) {
-    let mut f = Frame::new(in_head(), out_head());
-    assert_eq!(
-        count(p, 1, || p.call(
+fn close(p: &Plugin<Auth>) -> String {
+    let mut frame = Frame::new(in_head(), out_head());
+    let answer = count(p, 1, || {
+        p.call(
             busbar_contract::abi::mechanism::lifecycle::slot::CLOSE,
-            &mut f
-        ))
-        .outcome,
-        Outcome::Ready
-    );
+            &mut frame,
+        )
+    });
+    assert_eq!(answer.outcome, Outcome::Ready);
+    called(&answer)
 }
-fn opened(p: &Plugin<Auth>, d: &Dispatcher, x: &Style) -> u64 {
+fn opened(p: &Plugin<Auth>, d: &Dispatcher, x: &OAuthGrant) -> (u64, Vec<String>) {
     use busbar_contract::abi::mechanism::lifecycle::{slot as life, OpenIn, OpenOut, ValidateIn};
-    let mut v = Frame::new(
+    let mut steps = Vec::new();
+    let mut validate = Frame::new(
         ValidateIn {
             settings: json(&x.settings),
             ..input()
         },
         out_head(),
     );
-    assert_eq!(
-        count(p, 1, || p.call(life::VALIDATE, &mut v)).outcome,
-        Outcome::Ready
-    );
-    let mut f: Frame<OpenIn, OpenOut> = Frame::new(input(), output());
-    f.input.settings = json(&x.settings);
-    assert_eq!(
-        count(p, 1, || p.call(life::OPEN, &mut f)).outcome,
-        Outcome::Ready
-    );
-    assert_eq!(
-        count(p, u64::from(p.has_ready()), || p.ready(d, TICK_WAIT)),
-        Ok(())
-    );
-    let (answer, h) = count(p, 1, || open_outbound(p, x));
+    let answer = count(p, 1, || p.call(life::VALIDATE, &mut validate));
+    assert_eq!(answer.outcome, Outcome::Ready);
+    steps.push(called(&answer));
+    let mut open: Frame<OpenIn, OpenOut> = Frame::new(input(), output());
+    open.input.settings = json(&x.settings);
+    let answer = count(p, 1, || p.call(life::OPEN, &mut open));
+    assert_eq!(answer.outcome, Outcome::Ready);
+    steps.push(called(&answer));
+    let answer = count(p, u64::from(p.has_ready()), || p.ready(d, TICK_WAIT));
+    assert_eq!(answer, Ok(()));
+    steps.push(format!("has_ready={} {answer:?}", p.has_ready()));
+    let (answer, handle) = count(p, 1, || open_outbound(p, x));
     assert!(answer.starts_with("Ready "), "{answer}");
-    h
+    steps.push(answer);
+    (handle, steps)
 }
-fn flags(x: &Style) -> (u32, u32) {
+fn flags(x: &OAuthGrant) -> (u32, u32) {
     // SAFETY: the real product Statement owns the static auth tail and style declarations.
     unsafe {
         let t = &*busbar_auth_oauth::STATEMENT
@@ -1138,7 +1158,7 @@ fn flags(x: &Style) -> (u32, u32) {
         (decl.flags, decl.points)
     }
 }
-fn fields_checked(p: &Plugin<Auth>, h: u64, x: &Style, head: &Head, expected: &str) {
+fn fields_checked(p: &Plugin<Auth>, h: u64, x: &OAuthGrant, head: &Head, expected: &str) {
     let (flags, point) = flags(x);
     assert_eq!(
         count(p, 1, || sign(p, h, head, flags, point)),
@@ -1149,26 +1169,24 @@ fn fields_checked(p: &Plugin<Auth>, h: u64, x: &Style, head: &Head, expected: &s
 
 #[test]
 fn oauth_client_credentials_actual_doors() {
-    grant_case(0);
+    grant_case(client_credentials_case());
 }
 #[test]
 fn jwt_bearer_actual_doors() {
-    grant_case(1);
+    grant_case(jwt_bearer_case());
 }
 #[test]
 fn token_exchange_actual_doors() {
-    grant_case(2);
+    grant_case(token_exchange_case());
 }
 
-fn grant_case(index: usize) {
-    grant_case_door(index, busbar_auth_oauth::door, true);
+fn grant_case(case: OAuthGrant) {
+    grant_case_door(case, busbar_auth_oauth::door, true);
 }
-fn grant_case_door(index: usize, door: busbar_contract::abi::mechanism::door::DoorFn, both: bool) {
-    let cases: serde_json::Value =
-        serde_json::from_str(include_str!("../conformance.json")).unwrap();
-    let x = Style::parse(&cases["auth"]["outbound"][index]);
+fn grant_case_door(x: OAuthGrant, door: busbar_contract::abi::mechanism::door::DoorFn, both: bool) {
     let mut refusals = Vec::new();
     let mut before_mint = Vec::new();
+    let mut both_steps = Vec::new();
     for dropped in [false, true].into_iter().filter(|d| both || !d) {
         let m = x.minting.as_ref().unwrap();
         let e = Arc::new(Endpoint::new(
@@ -1179,7 +1197,7 @@ fn grant_case_door(index: usize, door: busbar_contract::abi::mechanism::door::Do
         ));
         let (clock, d) = clock_dispatcher(x.head.timestamp);
         let p = product(dropped, &d, e.clone(), door);
-        let h = opened(&p, &d, &x);
+        let (h, mut steps) = opened(&p, &d, &x);
         let (flags, point) = flags(&x);
         let driver = d.driver(&p, 0).unwrap();
         if let Some(od) = &m.on_demand {
@@ -1194,8 +1212,9 @@ fn grant_case_door(index: usize, door: busbar_contract::abi::mechanism::door::Do
             assert!(a.waiting());
             assert!(b.waiting());
             assert_eq!(e.count(), 0);
-            let (answer, _) = count(&p, 1, || tick_driver(&p, &d, &clock, driver, T0));
-            assert_eq!(answer, "Ready");
+            let (answer, tick_next) = count(&p, 1, || tick_driver(&p, &d, &clock, driver, T0));
+            assert!(answer.starts_with("Ready "));
+            steps.push(format!("{answer} next={tick_next}"));
             assert_eq!(a.answered(), x.expect);
             assert_eq!(b.answered(), x.expect);
             assert_eq!(e.count(), 1, "exactly ONE token exchange");
@@ -1206,9 +1225,11 @@ fn grant_case_door(index: usize, door: busbar_contract::abi::mechanism::door::Do
                 "Ready lease=false  ready=1"
             );
             assert_eq!(e.report(&m.exchanges), "exchanges=1 [ok]");
-            count(&p, 1, || {
+            let (answer, tick_next) = count(&p, 1, || {
                 tick_driver(&p, &d, &clock, driver, T0 + m.expires_in / 2 * NS)
             });
+            assert!(answer.starts_with("Ready "));
+            steps.push(format!("{answer} next={tick_next}"));
             assert_eq!(e.count(), 1, "on-demand token not refreshed before expiry");
             let second = x.head.with_extension(auth::EXT_SCOPE, &od.second_scope);
             assert_eq!(
@@ -1233,7 +1254,8 @@ fn grant_case_door(index: usize, door: busbar_contract::abi::mechanism::door::Do
             assert!(!before.split_once(' ').unwrap().1.is_empty());
             before_mint.push(before);
             let (answer, next) = count(&p, 1, || tick_driver(&p, &d, &clock, driver, T0));
-            assert_eq!(answer, "Ready");
+            assert!(answer.starts_with("Ready "));
+            steps.push(format!("{answer} next={next}"));
             assert_eq!(e.count(), 1, "exactly ONE token exchange");
             fields_checked(&p, h, &x, &x.head, &x.expect);
             fields_checked(&p, h, &x, &x.head, &x.expect);
@@ -1243,23 +1265,28 @@ fn grant_case_door(index: usize, door: busbar_contract::abi::mechanism::door::Do
                 "Ready lease=false  ready=1"
             );
             assert!(next > T0 && next <= T0 + m.expires_in * NS);
-            let (answer, _) = count(&p, 1, || tick_driver(&p, &d, &clock, driver, next));
-            assert_eq!(answer, "Ready");
+            let (answer, tick_next) = count(&p, 1, || tick_driver(&p, &d, &clock, driver, next));
+            assert!(answer.starts_with("Ready "));
+            steps.push(format!("{answer} next={tick_next}"));
             fields_checked(&p, h, &x, &x.head, &m.refreshed);
             assert_eq!(e.report(&m.exchanges), "exchanges=2 [ok, ok]");
         }
-        close(&p);
-        assert!(!count(&p, 0, || sign(&p, h, &x.head, flags, point)).starts_with("Ready"));
+        steps.push(close(&p));
+        let closed = count(&p, 0, || sign(&p, h, &x.head, flags, point));
+        assert!(closed.starts_with("Refused "), "{closed}");
+        steps.push(closed);
         let failing = Arc::new(Endpoint::new(vec![(
             500,
             b"conformance: the token endpoint is down".to_vec(),
         )]));
         let (clock, d) = clock_dispatcher(x.head.timestamp);
         let p = product(dropped, &d, failing.clone(), door);
-        let h = opened(&p, &d, &x);
+        let (h, failure_open) = opened(&p, &d, &x);
+        steps.extend(failure_open);
         let driver = d.driver(&p, 0).unwrap();
-        let (answer, _) = count(&p, 1, || tick_driver(&p, &d, &clock, driver, T0));
-        assert_eq!(answer, "Ready");
+        let (answer, tick_next) = count(&p, 1, || tick_driver(&p, &d, &clock, driver, T0));
+        assert!(answer.starts_with("Ready "));
+        steps.push(format!("{answer} next={tick_next}"));
         let failure = if m.on_demand.is_some() {
             assert_eq!(failing.count(), 0);
             count(&p, 2, || {
@@ -1281,9 +1308,14 @@ fn grant_case_door(index: usize, door: busbar_contract::abi::mechanism::door::Do
             );
         }
         refusals.push(failure);
-        close(&p);
+        steps.push(close(&p));
+        both_steps.push(steps);
     }
     if both {
+        assert_eq!(
+            both_steps[0], both_steps[1],
+            "actual per-step called/ready/tick/close parity"
+        );
         if !before_mint.is_empty() {
             assert_eq!(
                 before_mint[0], before_mint[1],
@@ -1452,8 +1484,9 @@ extern "C" fn twice_door() -> &'static Door {
     altered(Some(fields_arming_twice), true)
 }
 fn rejected(door: busbar_contract::abi::mechanism::door::DoorFn, count: bool) {
-    let error = std::panic::catch_unwind(|| grant_case_door(0, door, false))
-        .expect_err("altered real product must fail its assertions");
+    let error =
+        std::panic::catch_unwind(|| grant_case_door(client_credentials_case(), door, false))
+            .expect_err("altered real product must fail its assertions");
     let text = error
         .downcast_ref::<String>()
         .cloned()

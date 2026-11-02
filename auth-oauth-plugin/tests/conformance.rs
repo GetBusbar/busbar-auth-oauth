@@ -1337,12 +1337,14 @@ fn actual_product_admission_negative_cases() {
     wrong_kind!(Transport, KindCode::Transport);
 }
 
+static READY_INVOCATIONS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 // SAFETY CONTRACT: this callback only receives the dispatcher's live lifecycle buffers.
 unsafe extern "C" fn failing_ready(
     _: *mut c_void,
     _: *const c_void,
     out: *mut c_void,
 ) -> RawOutcome {
+    READY_INVOCATIONS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let failure = RawOutcome::of(Outcome::Failed);
     // SAFETY: ready's output begins with the host's writable OutHead.
     unsafe {
@@ -1363,6 +1365,7 @@ extern "C" fn ready_failure_door() -> &'static Door {
 }
 #[test]
 fn actual_oauth_ready_failure_refuses_boot_once() {
+    READY_INVOCATIONS.store(0, std::sync::atomic::Ordering::SeqCst);
     let d = Dispatcher::new(DispatchConfig::default());
     let f = Arc::new(Folds::default());
     let p = load_linked::<Auth>(&row(ready_failure_door), bind(&f, &d)).unwrap();
@@ -1384,6 +1387,10 @@ fn actual_oauth_ready_failure_refuses_boot_once() {
         p.inner.crossings.load(std::sync::atomic::Ordering::SeqCst)
             - p.inner.resumes.load(std::sync::atomic::Ordering::SeqCst)
             - before,
+        1
+    );
+    assert_eq!(
+        READY_INVOCATIONS.load(std::sync::atomic::Ordering::SeqCst),
         1
     );
 }
@@ -1428,12 +1435,12 @@ fn oauth_statement_needs_match_manifest() {
         .collect();
     declared.sort();
     declared.dedup();
-    let mut actual: Vec<_> = busbar_auth_oauth::NEEDS
+    let bytes = rendering_of(busbar_auth_oauth::door).unwrap();
+    let parsed = busbar_contract::abi::mechanism::rendering::read(&bytes).unwrap();
+    let mut actual: Vec<_> = parsed
+        .needs
         .iter()
-        .map(|n| {
-            // SAFETY: the product's static need contains a static ABI string.
-            unsafe { n.transport.as_str().unwrap().to_owned() }
-        })
+        .map(|need| need.transport.clone())
         .collect();
     actual.sort();
     actual.dedup();
@@ -1451,26 +1458,65 @@ fn actual_oauth_refuses_undeclared_inbound_and_login_operations() {
     use busbar_contract::abi::auth::{BeginLoginIn, BeginLoginOut, CompleteLoginIn};
     let d = Dispatcher::new(DispatchConfig::default());
     let folds = Arc::new(Folds::default());
+    let mut answers = Vec::new();
     for p in [linked(&folds, &d), dropped(&folds, &d)] {
         let mut verify: Frame<VerifyIn, IdentifyOut> = Frame::new(z(), z());
         verify.input.head = in_head();
         verify.out.head = out_head();
-        assert_eq!(p.call(slot::VERIFY, &mut verify).outcome, Outcome::Refused);
+        let before = p.inner.crossings.load(std::sync::atomic::Ordering::SeqCst)
+            - p.inner.resumes.load(std::sync::atomic::Ordering::SeqCst);
+        let call = p.call(slot::VERIFY, &mut verify);
+        assert_eq!(call.outcome, Outcome::Refused);
+        answers.push(format!(
+            "{:?} lease={} {:?}",
+            call.outcome, call.lease, call.error
+        ));
+        assert_eq!(
+            p.inner.crossings.load(std::sync::atomic::Ordering::SeqCst)
+                - p.inner.resumes.load(std::sync::atomic::Ordering::SeqCst)
+                - before,
+            1
+        );
         let mut begin: Frame<BeginLoginIn, BeginLoginOut> = Frame::new(z(), z());
         begin.input.head = in_head();
         begin.out.head = out_head();
+        let before = p.inner.crossings.load(std::sync::atomic::Ordering::SeqCst)
+            - p.inner.resumes.load(std::sync::atomic::Ordering::SeqCst);
+        let call = p.call(slot::BEGIN_LOGIN, &mut begin);
+        assert_eq!(call.outcome, Outcome::Refused);
+        answers.push(format!(
+            "{:?} lease={} {:?}",
+            call.outcome, call.lease, call.error
+        ));
         assert_eq!(
-            p.call(slot::BEGIN_LOGIN, &mut begin).outcome,
-            Outcome::Refused
+            p.inner.crossings.load(std::sync::atomic::Ordering::SeqCst)
+                - p.inner.resumes.load(std::sync::atomic::Ordering::SeqCst)
+                - before,
+            1
         );
         let mut complete: Frame<CompleteLoginIn, IdentifyOut> = Frame::new(z(), z());
         complete.input.head = in_head();
         complete.out.head = out_head();
+        let before = p.inner.crossings.load(std::sync::atomic::Ordering::SeqCst)
+            - p.inner.resumes.load(std::sync::atomic::Ordering::SeqCst);
+        let call = p.call(slot::COMPLETE_LOGIN, &mut complete);
+        assert_eq!(call.outcome, Outcome::Refused);
+        answers.push(format!(
+            "{:?} lease={} {:?}",
+            call.outcome, call.lease, call.error
+        ));
         assert_eq!(
-            p.call(slot::COMPLETE_LOGIN, &mut complete).outcome,
-            Outcome::Refused
+            p.inner.crossings.load(std::sync::atomic::Ordering::SeqCst)
+                - p.inner.resumes.load(std::sync::atomic::Ordering::SeqCst)
+                - before,
+            1
         );
     }
+    assert_eq!(
+        &answers[..3],
+        &answers[3..],
+        "undeclared operation full called parity"
+    );
 }
 
 #[test]
@@ -1495,4 +1541,35 @@ fn every_actual_outbound_style_has_a_grant_case() {
     declared.sort();
     cases.sort();
     assert_eq!(declared, cases);
+}
+
+#[test]
+fn actual_oauth_images_and_loaded_facts_are_distinct_and_equal() {
+    use busbar_contract::abi::mechanism::{rendering, KindCode};
+    use busbar_plugin_loader::dispatch::load::{door_addresses_of_library, rendering_of_library};
+    let path = built_plugin_image();
+    let (door, ops) = door_addresses_of_library(&path)
+        .unwrap()
+        .expect("actual cdylib exports door");
+    assert_ne!(door, std::ptr::from_ref(busbar_auth_oauth::door()) as usize);
+    assert_ne!(ops, busbar_auth_oauth::door().ops() as usize);
+    let linked_bytes = rendering_of(busbar_auth_oauth::door).unwrap();
+    let dropped_bytes = rendering_of_library(&path)
+        .unwrap()
+        .expect("actual cdylib Statement");
+    assert_eq!(linked_bytes, dropped_bytes);
+    let linked = rendering::read(&linked_bytes).unwrap();
+    let dropped = rendering::read(&dropped_bytes).unwrap();
+    let a = rendering::read_auth_tail(&linked.kind_tail).unwrap();
+    let b = rendering::read_auth_tail(&dropped.kind_tail).unwrap();
+    assert_eq!(a.caps, b.caps);
+    assert_eq!(a.caps, auth::CAP_OUTBOUND);
+    let d = Dispatcher::new(DispatchConfig::default());
+    let folds = Arc::new(Folds::default());
+    for p in [self::linked(&folds, &d), self::dropped(&folds, &d)] {
+        assert_eq!(p.kind(), KindCode::from_raw(linked.kind).unwrap());
+        assert_eq!(p.kind(), KindCode::Auth);
+        assert_eq!(p.name(), linked.name);
+        assert_eq!(p.max_inflight(), linked.max_inflight);
+    }
 }
