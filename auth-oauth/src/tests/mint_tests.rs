@@ -2,8 +2,6 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! The self-minting machinery over a scripted need: the refresh schedule (ported from
-//! `bearer_token_tests.rs`), the token response texts and cap (ported from the two mint bodies'
-//! tests), and the tick-driven exchange with THE EXPIRED-TOKEN RULE.
 
 use super::*;
 use busbar_contract::abi::sdk::cred::SealedWrite;
@@ -18,7 +16,6 @@ pub(crate) fn seen(r: Read<'_>) -> String {
 }
 
 /// The unit tests' wall clock (epoch seconds): their doubles stand in for the host's `clock.now`.
-/// The plugin itself reads no clock (THE DESIGN §1: "one clock"); see [`HostClock`].
 pub(crate) fn now_epoch() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -163,17 +160,17 @@ const S: u64 = NS;
 #[test]
 fn next_refresh_never_sleeps_past_a_live_token_expiry() {
     let now = 1_000_000;
-    // A normally-lived token refreshes a full skew early.
+
     assert_eq!(next_refresh_secs(now + 3600, now), 3600 - REFRESH_SKEW_SECS);
-    // A short-lived token refreshes at half its life, never past it.
+
     for ttl in [1, 2, 10, 59, 299, 300] {
         let sleep = next_refresh_secs(now + ttl, now);
         assert_eq!(sleep, (ttl / 2).max(1), "ttl {ttl}");
     }
-    // An expired token backs off rather than spinning.
+
     assert_eq!(next_refresh_secs(now, now), MIN_SLEEP_SECS);
     assert_eq!(next_refresh_secs(now - 5, now), MIN_SLEEP_SECS);
-    // Near the skew boundary the floor holds.
+
     assert_eq!(next_refresh_secs(now + 301, now), 1.max(MIN_SLEEP_SECS));
 }
 
@@ -198,8 +195,6 @@ fn a_cached_token_omits_the_header_for_bytes_invalid_in_a_header_value() {
 }
 
 /// The texts a failed exchange names: the status line plus, only when the body is JSON with an
-/// RFC 6749 section 5.2 `error` code, that code; never other body text (a server may reflect the
-/// request, client secret and assertion included, into the diag channel).
 #[test]
 fn a_refused_or_malformed_response_is_named_in_1_5_5_words() {
     let long = "x".repeat(500);
@@ -210,7 +205,7 @@ fn a_refused_or_malformed_response_is_named_in_1_5_5_words() {
     assert!(!e.contains("SECRETX"), "{e}");
     let e = parse_response(400, b"SECRETY", 0).unwrap_err();
     assert!(!e.contains("SECRETY"), "{e}");
-    // A reflected secret in the `error` member is not an RFC code: no charset (quote), too long.
+
     for body in [
         r#"{"error":"bad \"SECRETZ\""}"#.to_string(),
         format!(r#"{{"error":"{}"}}"#, "SECRETZ".repeat(10)),
@@ -245,7 +240,6 @@ fn token_response_tolerates_expires_in_as_number_string_or_absent() {
 }
 
 /// `expires_in` that is not a non-negative finite number is a mint failure, never a token: a
-/// negative number, a NaN or infinite string and a non-numeric string are each refused.
 #[test]
 fn token_response_refuses_an_expires_in_that_is_not_a_non_negative_number() {
     for body in [
@@ -266,13 +260,6 @@ fn token_response_refuses_an_expires_in_that_is_not_a_non_negative_number() {
     }
 }
 
-/// THE ACCESS TOKEN IS UNESCAPED BY THE PLUGIN, NEVER BY THE JSON DECODER (THE DESIGN §6: "auth
-/// material is zeroised"): `serde_json` unescapes a string that carries an escape into a scratch
-/// buffer of its own that it frees unwiped, so the decode skips the token (its field is
-/// `IgnoredAny`: skipping copies nothing) and `access_token` reads the top-level member into one
-/// buffer, sized once and wiped on drop, with every escape resolved as the decoder resolves it.
-/// The crate forbids `unsafe`, so no test allocator can watch the freed bytes; what this holds is
-/// that no decoded field can carry the token and that the one buffer that does is the wiping one.
 #[test]
 fn an_escaped_access_token_is_read_into_one_wiped_buffer_never_by_the_decoder() {
     fn held_as<T>(_: &T) -> &'static str {
@@ -299,22 +286,21 @@ fn an_escaped_access_token_is_read_into_one_wiped_buffer_never_by_the_decoder() 
         Some("Bearer ya29.a/bAc")
     );
     assert_eq!(t.expires_at, 60);
-    // A nested `access_token` is not the response's.
+
     let nested = r#"{"x":{"access_token":"no"},"l":["access_token"],"access_token":"yes\n"}"#;
     assert_eq!(access_token(nested).expect("the token").as_str(), "yes\n");
-    // A token that is not a string is refused without the decoder's text.
+
     assert_eq!(
         parse_response(200, br#"{"access_token":1}"#, 0).unwrap_err(),
         "token response JSON invalid: a field is missing or has the wrong type (the decoder's \
          text is withheld)"
     );
-    // A missing one is still the decoder's own missing-field text.
+
     let e = parse_response(200, br#"{"expires_in":60}"#, 0).unwrap_err();
     assert!(e.contains("missing field `access_token`"), "{e}");
 }
 
 /// A token landed on the first tick: the header is presented, the cell is ready, and the next tick
-/// is scheduled a skew ahead of expiry.
 #[test]
 fn the_first_tick_mints_and_the_request_path_presents_it() {
     let w = Scripted::default();
@@ -341,7 +327,6 @@ fn the_first_tick_mints_and_the_request_path_presents_it() {
 }
 
 /// A token endpoint's `expires_in` is untrusted: one so large that `ahead * NS` would overflow
-/// u64 schedules the refresh a day on (L4), never a wrapped (arbitrary) instant.
 #[test]
 fn a_huge_expires_in_schedules_no_overflowed_refresh() {
     let w = Scripted::default();
@@ -374,7 +359,6 @@ fn a_pending_read_is_finished_on_a_later_tick() {
 }
 
 /// THE CAP: a body past the kernel's `max_response_bytes` is refused before any JSON parse, in
-/// 1.5.5's words.
 #[test]
 fn a_response_body_over_the_cap_is_refused() {
     let w = Scripted::default();
@@ -426,7 +410,6 @@ fn a_dropped_or_refused_exchange_is_a_failure() {
 }
 
 /// A connection close before the protocol's terminal piece is an outage, even when the
-/// partial response body happens to be complete JSON.
 #[test]
 fn a_close_before_the_terminal_piece_is_an_outage() {
     let w = Scripted::default();
@@ -484,9 +467,6 @@ fn an_empty_token_is_a_failure_not_a_token() {
     assert!(!m.is_ready());
 }
 
-/// THE EXPIRED-TOKEN RULE (BUSBAR-1.6.0.md THE DESIGN, §6.5): an expired token whose refresh FAILED answers WAIT;
-/// an expired token whose refresh has not failed is still presented (1.5.5 served the current token
-/// until a refresh replaced it); a landed mint clears the wait.
 #[test]
 fn an_expired_token_whose_refresh_failed_answers_wait_until_a_mint_lands() {
     let w = Scripted::default();
@@ -519,7 +499,6 @@ fn an_expired_token_whose_refresh_failed_answers_wait_until_a_mint_lands() {
 }
 
 /// A reply code too large for 16 bits is not read as another code: 65736 is 200 modulo 65536, but
-/// it is no success, so its (valid-looking) body is not taken as a token.
 #[test]
 fn a_reply_code_past_sixteen_bits_is_a_failure_not_a_token() {
     let w = Scripted::default();
@@ -533,8 +512,6 @@ fn a_reply_code_past_sixteen_bits_is_a_failure_not_a_token() {
 }
 
 /// THE LOSSY TEXT OF A TOKEN RESPONSE IS BUILT ONCE: a body with bytes that are not UTF-8 becomes
-/// the text `from_utf8_lossy` gives, in a string sized exactly first, so it never grows (a growth
-/// would free an unwiped copy of the access token).
 #[test]
 fn the_lossy_body_is_one_exactly_sized_string() {
     let raw: &[u8] = b"{\"access_token\":\"a\xffb\xc3\x28c\xe2\x82\",\"x\":\"\xf0\x90\"}";
@@ -553,19 +530,6 @@ fn no_granted_need_mints_nothing() {
     assert_eq!(m.tick(1, now_epoch(), None), (due, None));
 }
 
-/// RED: A TOKEN ENDPOINT ON A PRIVATE HOST IS REFUSED UNLESS ALLOWLISTED (security.md, "The
-/// destination guard": provider upstreams, "their `base_url` and `token_url` included", and an
-/// identity provider are refused a private, loopback, link-local, CGNAT or unique-local address
-/// unless `advanced.allow_destinations` names it; BUSBAR-3025 warns of exactly that at
-/// `--validate`). Every mint need states the `provider` class: the destination guard's default
-/// policy at the busbar pin (busbar-core-connector `guard.rs` `PRIVATE_REFUSED_IN`,
-/// `LIFTED_WHEN_CONFIGURED`) refuses a private address in it unless allowlisted, and keeps the class
-/// when the need's config names its target (`target_from`, as every mint need's does); the default
-/// class would be lifted to operator infrastructure, and `open-web` would refuse 1.5.5's plaintext
-/// to an allowlisted private token endpoint (the provider class takes the target's own scheme).
-/// The provider's own `allow_metadata_hosts` carve-out (1.5.5) reads `token_url` in this class.
-/// Before: every mint need was `operator-infrastructure` (ARCHITECT D1 2026-10-05), which admits a
-/// private address with no entry, so BUSBAR-3025's warning was false for `token_url`.
 #[test]
 fn a_token_url_on_a_private_host_is_refused_unless_allowlisted() {
     use busbar_contract::abi::host::conn::connector::{
@@ -589,9 +553,6 @@ fn a_token_url_on_a_private_host_is_refused_unless_allowlisted() {
     }
 }
 
-/// W7: A REDIRECTING TOKEN ENDPOINT FAILS THE MINT (security.md:308: redirects are refused on the
-/// OAuth token surface). A 3xx is the endpoint's answer, never followed: the mint fails naming the
-/// status, ONE request went out (no second request to the `location`), and no token is presented.
 #[test]
 fn a_redirecting_token_endpoint_fails_the_mint() {
     for (status, named) in [
@@ -621,8 +582,6 @@ fn a_redirecting_token_endpoint_fails_the_mint() {
 }
 
 /// THE TOKEN REQUEST FORM IS THE CHIP'S (`cred::FormBody`): it carries the client secret, the
-/// subject token or the signed assertion as sealed values, and is written byte for byte as
-/// `serde_urlencoded` (reqwest's `.form()`) wrote it, for every byte.
 #[test]
 fn the_form_is_serde_urlencoded_byte_for_byte() {
     use busbar_contract::abi::sdk::test_support::chip::cred;
@@ -645,10 +604,6 @@ fn the_form_is_serde_urlencoded_byte_for_byte() {
     );
 }
 
-/// THE RESPONSE BUFFER GROWS TO WHAT ARRIVES, bounded by the cap (Q128 auth-oauth MEDIUM, the
-/// per-mint reservation): an exchange in flight holds no reservation the size of the cap, so a
-/// large `upstream_error_body_max_bytes` costs nothing per mint, and a cap near `usize::MAX` is a
-/// bound, not an allocation. RED before the fix: each mint reserved `cap + READ_BUF_BYTES` at once.
 #[test]
 fn an_exchange_in_flight_reserves_no_buffer_the_size_of_the_cap() {
     let w = Scripted::default();
@@ -671,7 +626,6 @@ fn an_exchange_in_flight_reserves_no_buffer_the_size_of_the_cap() {
     let (_, report) = m.tick(IN_FLIGHT_POLL_NS, now_epoch(), Some(&w));
     assert_eq!(report, Some(Report::Minted), "the body still reads whole");
 
-    // A cap near `usize::MAX` is a bound only.
     let w = Scripted::default();
     w.ok(r#"{"access_token":"t","expires_in":3600}"#);
     let m = Minted::new(client_credentials(), usize::MAX);
@@ -679,10 +633,6 @@ fn an_exchange_in_flight_reserves_no_buffer_the_size_of_the_cap() {
 }
 
 /// AN ON-DEMAND READ NEVER PRESENTS A TOKEN SNAPSHOTTED BEFORE THE EXCHANGE LANDED: a read racing
-/// the tick that stores the token either waits or presents the new token. It never answers
-/// `Nothing` (an unauthenticated token-exchange call) for a cell whose exchange succeeds.
-/// A test-only callback pins the usability judgement while the real mint publishes its token;
-/// release builds carry neither this callback nor a synchronization field.
 #[test]
 fn an_on_demand_read_racing_the_exchange_never_presents_nothing() {
     let exchange = Arc::new(token_exchange::build(
@@ -705,8 +655,7 @@ fn an_on_demand_read_racing_the_exchange_never_presents_nothing() {
     }));
     let answer = std::thread::scope(|threads| {
         let reader = threads.spawn(|| cell.read(now_epoch(), seen));
-        // An old snapshot-before-usability implementation already captured the empty
-        // token here. Publish the actual mint before the usability judgement resumes.
+
         arrived.recv().unwrap();
         let report = cell.tick(1_000, now_epoch(), Some(&wire)).1;
         release.send(()).unwrap();
@@ -716,11 +665,6 @@ fn an_on_demand_read_racing_the_exchange_never_presents_nothing() {
     assert_eq!(answer, "Header(\"Bearer tok-x\")");
 }
 
-/// O8, NO MINT WITHOUT A PLAUSIBLE WALL CLOCK: with the host's wall clock unknown (`0`) or before
-/// the fleet's sanity floor (2026-01-01), a mint fails saying so and sends nothing (a jwt-bearer
-/// assertion would carry `iat` 0 and `exp` 3600, and a token's expiry would be judged on a clock
-/// decades off); it retries on the usual schedule and mints once the clock is plausible. RED: the
-/// mint signed and sent at whatever clock it was given.
 #[test]
 fn no_mint_without_a_plausible_wall_clock() {
     let sa = serde_json::json!({
@@ -757,10 +701,6 @@ fn no_mint_without_a_plausible_wall_clock() {
     }
 }
 
-/// T3: EVERY OUTAGE ARM OF THE EXCHANGE, and the refusals that are not one (S4): an open the host
-/// times out, closes or faults, a read that times out or faults mid-response, a connection lost
-/// after the head, and an exchange past the mint deadline are OUTAGES (logged at WARN), each
-/// named; a refused open is not.
 #[test]
 fn each_failed_exchange_arm_is_named_and_judged_outage_or_not() {
     let fail = |setup: &dyn Fn(&Scripted), later: Option<u64>| {
@@ -815,9 +755,6 @@ fn each_failed_exchange_arm_is_named_and_judged_outage_or_not() {
     assert!(outage, "the deadline is an outage");
 }
 
-/// L3, A TOKEN THAT IS ALREADY EXPIRED IS NO TOKEN: a reply whose `expires_in` is 0 (expired as it
-/// lands, or so close that clock skew ate it) is a failed mint, retried on schedule, never stored
-/// and presented as a live bearer. RED: it was stored as a success and presented for 30 s.
 #[test]
 fn an_already_expired_token_is_a_failed_mint() {
     let w = Scripted::default();
@@ -833,9 +770,6 @@ fn an_already_expired_token_is_a_failed_mint() {
     assert_eq!(m.read(now_epoch(), seen), "Refuse(\"no OAuth token could be minted for this binding (see diagnostics BUSBAR-4014/4015/4016); the call is refused rather than sent unauthenticated, and the mint retries on its schedule\")");
 }
 
-/// L4: THE REFRESH INTERVAL IS BOUNDED ABOVE: a token endpoint's `expires_in` of years (or of
-/// `u64::MAX`) still refreshes within 24 h, so a revoked token is not presented for the process's
-/// life. RED: the refresh was scheduled effectively never.
 #[test]
 fn a_huge_expires_in_refreshes_within_24_hours() {
     for expires_in in ["100000000000", "18446744073709551615", "31536000"] {
@@ -890,11 +824,6 @@ impl Wire for Endless {
     }
 }
 
-/// L5, THE READ LOOP IS BOUNDED IN ONE TICK: a reply whose pieces never end is abandoned at the
-/// mint deadline measured on the host's clock as it reads now (re-read each piece), not on the
-/// instant the tick began; with no host clock, one tick reads a bounded number of pieces and
-/// yields, the next tick judging the deadline anew. RED: the deadline was judged on the tick's
-/// fixed instant, so the loop ran on until the far end stopped.
 #[test]
 fn a_reply_that_never_ends_is_bounded_in_one_tick() {
     let clocked = Endless {

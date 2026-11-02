@@ -1,19 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
-//! THE MINT THROUGH THE INSTANCE AND THE `fields` SLOT (BUSBAR-1.6.0.md THE DESIGN, §6.5: jwt-bearer and
-//! oauth-client-credentials "mint through the plugin's own `operator-infrastructure` need and refresh ahead of
-//! expiry in the background on `tick`"), over a scripted need: the request the plugin sends, the
-//! first mint on the first tick, the per-request call presenting the minted bearer, and THE
-//! EXPIRED-TOKEN RULE end to end — an expired token whose refresh failed answers PENDING on a
-//! ticket bounded by the attempt's deadline, the next landed mint WAKES that ticket, and the resumed
-//! call presents the new token.
-//!
-//! The need is a [`Wire`] double, not the host's connector table (the twin's conformance test
-//! mints over the loader and a connection table). With
-//! `AUTH_OUT_CAPTURE_DIR` set, each request the plugin sent is written out for the 1.5.5 wire-bytes
-//! comparison through the framer door (whose defaults, `accept: */*` included, are the framer's —
-//! never this plugin's or the kernel's).
+//! Exercises minting, bearer fields, refresh waits and wakeups over a scripted host connection.
 
 use super::*;
 use crate::mint;
@@ -149,7 +137,7 @@ fn oauth_client_credentials_mints_on_tick_and_honours_the_expired_token_rule() {
         "client-abc:s3cr&t",
         r#"{"token_url":"https://login.example.com/tenant/oauth2/v2.0/token","scope":"https://cognitiveservices.azure.com/.default"}"#,
     );
-    // Before the first mint, refuse locally without presenting or parking the request.
+
     assert_eq!(
         fields(&o, &host, h, Ticket::NONE),
         (Outcome::Failed, String::new()),
@@ -165,8 +153,6 @@ fn oauth_client_credentials_mints_on_tick_and_honours_the_expired_token_rule() {
         "before the first mint, on a ticket: failed closed, nothing parked"
     );
 
-    // THE FIRST MINT, on the first tick: a ten-minute token, so the rule can run on the wall
-    // clock once the host's clock passes it (a token expired as it lands is no token, L3).
     w.ok(r#"{"access_token":"tok-1","expires_in":600}"#);
     let mut diags = Diags::default();
     let due = o.tick(1_000, Ticket::NONE, Some(&host.host), &mut diags);
@@ -209,9 +195,6 @@ fn oauth_client_credentials_mints_on_tick_and_honours_the_expired_token_rule() {
         "a ten-minute token re-mints the skew (five minutes) ahead of its expiry"
     );
 
-    // THE REFRESH FAILS, and the host's clock passes the token's expiry: the expired token
-    // answers PENDING on a ticket, bounded by the deadline; a call that may not pend answers
-    // REFUSED (the host re-submits it on a ticket).
     w.push(vec![Step::Head(503), Step::Body(b"down".to_vec(), true)]);
     o.tick(due, Ticket::NONE, Some(&host.host), &mut diags);
     o.saw_wall(now_epoch() + 3_600);
@@ -230,7 +213,6 @@ fn oauth_client_credentials_mints_on_tick_and_honours_the_expired_token_rule() {
         (Outcome::Refused, String::new())
     );
 
-    // THE NEXT MINT LANDS: the waiting ticket is woken; the resumed call presents the new token.
     w.ok(r#"{"access_token":"tok-2","expires_in":3600}"#);
     o.tick(due + 30 * NS, Ticket::NONE, Some(&host.host), &mut diags);
     assert_eq!(host.take(), vec![ticket]);
@@ -278,7 +260,6 @@ fn jwt_bearer_mints_on_tick() {
 }
 
 /// A BINDING'S SETTINGS REACH ITS ASSERTION: `jwt-bearer` opened with `scope` and `subject` settings
-/// signs an assertion whose claims carry that scope and that `sub`.
 #[test]
 fn jwt_bearer_settings_reach_the_assertion_claims() {
     use base64::Engine as _;
@@ -313,8 +294,6 @@ fn jwt_bearer_settings_reach_the_assertion_claims() {
 }
 
 /// THE DRIVER TICKET IS WOKEN when a binding opens: after a `tick` on a real driver ticket, opening
-/// a binding that wants a mint wakes that ticket on the host, so a `drive` starts the mint without
-/// waiting for the next `tick`.
 #[test]
 fn opening_a_binding_wakes_the_driver_ticket() {
     let host = TestHost::new();
@@ -366,11 +345,6 @@ impl Wire for Pinned {
     }
 }
 
-/// ONE CLOCK (THE DESIGN §1: "one clock, which also drives every plugin's `tick`"; §11.12
-/// `clock.now`; Q128 auth-oauth LOW). The assertion's `iat` is the HOST's wall time, not a clock
-/// the plugin reads for itself: a host pinned at 1_800_000_000 signs an assertion issued then (a
-/// plausible clock: O8 mints at none before 2026-01-01). RED before the fix: the plugin read
-/// `SystemTime::now()`.
 #[test]
 fn jwt_bearer_signs_at_the_hosts_wall_clock() {
     use base64::Engine as _;
@@ -403,8 +377,6 @@ fn jwt_bearer_signs_at_the_hosts_wall_clock() {
 const CC_SETTINGS: &str = r#"{"token_url":"https://login.example.com/tenant/oauth2/v2.0/token","scope":"https://cognitiveservices.azure.com/.default"}"#;
 
 /// A client-credentials binding whose token has expired and whose refresh failed: `tok-1`, ten
-/// minutes to live, a 503 on its refresh, then the host's clock past its expiry (a token expired
-/// as it lands is no token, L3).
 fn expired_and_failed(w: &Arc<Scripted>, host: &TestHost) -> (Oauth, u64) {
     let o = instance(w);
     let h = open(
@@ -423,9 +395,6 @@ fn expired_and_failed(w: &Arc<Scripted>, host: &TestHost) -> (Oauth, u64) {
 }
 
 /// THE `ready` FACT FOLLOWS THE READ (contract `abi/auth/outbound.rs`, `OutboundReadyOut::ready`:
-/// "`1` = `fields` would answer with a credential now; `0` = not yet (before the first mint, or
-/// expired with a failed refresh)"): a token that has expired and whose refresh failed is not
-/// ready, though a token is held; nor is a minted token that yields no header.
 #[test]
 fn outbound_ready_is_false_for_an_expired_token_whose_refresh_failed() {
     let host = TestHost::new();
@@ -462,11 +431,6 @@ fn outbound_ready_is_false_for_an_expired_token_whose_refresh_failed() {
     );
 }
 
-/// NO LOST WAKE (THE DESIGN §6 item 5: the wait ends when a mint lands): a call that reads no
-/// usable token while a mint lands, the mint's drain of the waiting tickets running before the call
-/// has parked, still answers with the landed token instead of parking where nothing will wake it.
-/// The test holds the instance's waiter list so the call stops at its park, lands the mint in that
-/// window (the drain finds no one waiting), then lets the call go on.
 #[test]
 fn a_mint_landing_between_the_read_and_the_park_is_not_a_lost_wake() {
     let host = TestHost::new();
@@ -506,10 +470,6 @@ fn a_mint_landing_between_the_read_and_the_park_is_not_a_lost_wake() {
 }
 
 /// NO LOST WAKE ON THE EXCHANGE PATH: a call that looks its scope's cell up while a tick settles
-/// that cell (idle, unusable, waited on by no one, so dropped from the cache) parks on a cell the
-/// tick still visits. The test holds the waiter list so the call stops between its lookup and its
-/// park, and drops the cell from the cache in that window exactly as the settling tick would when
-/// the cache lets it; the call's exchange then lands and wakes it.
 #[test]
 fn a_cell_settled_between_the_lookup_and_the_park_is_not_a_lost_wake() {
     let host = TestHost::new();
@@ -532,8 +492,7 @@ fn a_cell_settled_between_the_lookup_and_the_park_is_not_a_lost_wake() {
         slot: 301,
         generation: 1,
     };
-    // The cell's usability judgement runs exactly at the lookup/park boundary. The
-    // callback pins that boundary without a sleep or a conditional missed window.
+
     let (entered, arrived) = std::sync::mpsc::sync_channel(0);
     let (release, resume) = std::sync::mpsc::sync_channel(0);
     std::thread::scope(|threads| {
@@ -555,8 +514,7 @@ fn a_cell_settled_between_the_lookup_and_the_park_is_not_a_lost_wake() {
                 .unwrap_or_else(|_| panic!("room for one scope"))
         });
         arrived.recv().unwrap();
-        // A settling tick can remove this idle cell only if lookup and parking have
-        // been split. In the fixed path the cache remains held until the park.
+
         let removed = o.cache.try_write().ok().map(|mut cache| cache.remove(&key));
         release.send(()).unwrap();
         assert!(!matches!(removed, Some(None)), "the exact cell was reached");
@@ -576,7 +534,6 @@ fn a_cell_settled_between_the_lookup_and_the_park_is_not_a_lost_wake() {
 }
 
 /// A CANCELLED WAIT LEAVES NO ENTRY: forgetting the last ticket parked on an on-demand cell drops
-/// the cell's waiter entry, so a scope whose cell the cache then drops does not leak an empty list.
 #[test]
 fn forgetting_the_last_waiter_drops_its_exchange_entry() {
     for via_cancel in [true, false] {
@@ -643,8 +600,7 @@ impl Wire for HostClocked {
     }
 }
 
-/// One `fields` call stamped with the host's wall time `timestamp` (THE DESIGN abi/auth: "read once
-/// by the host for this call"), on `ticket`, its scope `scope`.
+/// Calls `fields` with the host's wall timestamp, ticket and scope.
 fn fields_at(
     o: &Oauth,
     host: &TestHost,
@@ -673,14 +629,6 @@ fn fields_at(
     }
 }
 
-/// ONE CLOCK, FOR EXPIRY AND CACHING (THE DESIGN §1 l.159: "one clock, which also drives every
-/// plugin's tick"; §11.12: the clock family is "wall and monotonic time from the kernel's one
-/// clock"; Q128 auth-oauth LOW, finding 3). A token's expiry and an on-demand token's cache life are
-/// judged on the HOST's wall time, never the process's: the host's clock here sits at 2026-01-02
-/// (the earliest plausible clock, O8), months behind the process clock, so a token minted on it is
-/// FRESH on the host's time though the process clock calls it long expired; and a host clock moved far into the future sees the same cached
-/// token as expired, though the process clock calls it fresh. The refresh timing is 1.5.5's,
-/// relative to the clock the plugin is given.
 #[test]
 fn token_expiry_and_caching_are_judged_on_the_hosts_clock() {
     const HOST_WALL: u64 = 1_767_312_000;
@@ -691,7 +639,6 @@ fn token_expiry_and_caching_are_judged_on_the_hosts_clock() {
     let o = Oauth::with_wire(1, Some(Box::new(HostClocked(w.clone(), wall.clone()))));
     let mut diags = Diags::default();
 
-    // A SCHEDULED STYLE: minted at the host's 2001, an hour to live, then its refresh fails.
     let h = open(
         &o,
         style::OAUTH_CLIENT_CREDENTIALS,
@@ -726,8 +673,6 @@ fn token_expiry_and_caching_are_judged_on_the_hosts_clock() {
     assert!(!o.ready(h), "not ready on the host's far-future clock");
     o.unpark(call);
 
-    // AN ON-DEMAND STYLE: a token exchange's cached token is presented on the host's clock (its own
-    // instance, so the scheduled cell's retry above never takes the exchange's scripted reply).
     let w = Arc::new(Scripted::default());
     let wall = Arc::new(AtomicU64::new(HOST_WALL));
     let o = Oauth::with_wire(1, Some(Box::new(HostClocked(w.clone(), wall))));
@@ -759,8 +704,7 @@ fn token_expiry_and_caching_are_judged_on_the_hosts_clock() {
         (Outcome::Ready, "authorization: Bearer tok-x".to_string()),
         "the cached exchange token is fresh on the host's clock (the process clock says stale)"
     );
-    // A tick before the token's refresh is due: exchanges only start in a tick, so were the
-    // fresh read to have armed one, it would start here and show in the count.
+
     o.tick(2_000, Ticket::NONE, Some(&host.host), &mut diags);
     assert_eq!(
         w.sent.lock().unwrap().len(),
@@ -784,9 +728,6 @@ fn token_expiry_and_caching_are_judged_on_the_hosts_clock() {
 }
 
 /// A TICK NEVER RESTARTS THE HANDLE COUNT (the oracle's egress.auth mint-refresh cells): the host
-/// keeps a driver ticket's answers across a tick while anything is held or pending, so a count
-/// reset at the tick reused a kept handle, and the refresh ahead of expiry never left (`fault`, or
-/// a replayed reply read as status 0) — a 2 s token was never re-minted. RED before: 9 -> 0.
 #[test]
 fn a_tick_carries_the_handle_count_on() {
     let wire = Arc::new(Scripted::default());
@@ -797,8 +738,6 @@ fn a_tick_carries_the_handle_count_on() {
 }
 
 /// A SCHEDULED CELL NO HANDLE HOLDS LEAVES THE CACHE ONCE IDLE: `retire` keeps a cell whose mint is
-/// in flight, and the tick that lands it drops the cell, so a provider a reload removed mid-mint is
-/// never ticked again nor refreshed with its secret.
 #[test]
 fn a_retired_scheduled_cell_kept_for_its_mint_leaves_the_cache_when_it_lands() {
     let host = TestHost::new();
@@ -865,9 +804,6 @@ fn a_retired_generation_leaves_a_cell_the_new_generation_holds() {
 }
 
 /// THE TOKEN CACHE KEY IS NO PLAIN DIGEST OF THE CREDENTIAL (S1, bank grade): a SHA-256 of
-/// `style\0credential\0settings` held in memory lets anyone who reads it test guesses at a
-/// low-entropy client secret offline. The key is a keyed derivation under the instance's own random
-/// key, so two instances key one binding differently. RED: every cell was keyed by the plain digest.
 #[test]
 fn the_token_cache_key_is_keyed_per_instance_never_a_plain_digest() {
     use sha2::{Digest, Sha256};
@@ -903,10 +839,6 @@ fn the_token_cache_key_is_keyed_per_instance_never_a_plain_digest() {
     assert_ne!(a[0], b[0], "two instances derive one binding's key alike");
 }
 
-/// ONE POLICY WITH THE TOKEN EXCHANGE (KIND-auth lead decision, 1.6.0): A FIRST MINT THAT FAILED
-/// FAILS THE CALL, naming why: nothing goes out unauthenticated once a mint was attempted (the
-/// token exchange's policy, and sigv4's refusal). The mint retries on its schedule; a call after a
-/// token lands presents it. RED: READY with no field.
 #[test]
 fn a_failed_first_mint_fails_the_call_rather_than_send_it_unauthenticated() {
     let host = TestHost::new();
@@ -965,9 +897,6 @@ fn a_token_that_cannot_be_presented_fails_the_call() {
 }
 
 /// THE MINT LOGS ITS OUTCOME (S4, S5): a token endpoint that answers 5xx or 429, or cannot be
-/// reached, is an OUTAGE, logged at WARN; one that refuses the credential (another 4xx) is logged
-/// at INFO. Each event carries `module = "oauth"` and the reason, never a secret. RED: the mint
-/// logged nothing (the diag channel only).
 #[test]
 fn a_failed_mint_is_logged_an_outage_at_warn_or_a_refusal_at_info() {
     use busbar_test_kit::warn_capture::WarnCapture;
@@ -1063,9 +992,6 @@ fn exchange_binding(o: &Oauth) -> u64 {
     )
 }
 
-/// O4, A REQUEST-STATED SCOPE IS BOUNDED: a scope longer than 1024 bytes is refused (FAILED,
-/// saying why) before any cell is made for it; one of exactly 1024 bytes is exchanged. RED: every
-/// scope, of any length, made its own cell and exchange.
 #[test]
 fn a_scope_longer_than_1024_bytes_is_refused() {
     let host = TestHost::new();
@@ -1089,9 +1015,6 @@ fn a_scope_longer_than_1024_bytes_is_refused() {
     );
 }
 
-/// O4, A BINDING HOLDS AT MOST 256 SCOPE CELLS: the 257th scope evicts the least recently used
-/// IDLE cell no request waits on (a cell a request just read is not it). RED: one cell per
-/// request-stated scope, unbounded.
 #[test]
 fn a_binding_holds_at_most_256_scope_cells_evicting_the_least_recently_used_idle_one() {
     let host = TestHost::new();
@@ -1114,7 +1037,7 @@ fn a_binding_holds_at_most_256_scope_cells_evicting_the_least_recently_used_idle
     }
     o.tick(1_000, Ticket::NONE, Some(&host.host), &mut Diags::default());
     assert_eq!(o.cache.read().unwrap().len(), 256, "256 scopes minted");
-    // `s0` is read again: `s1` is now the least recently used.
+
     assert_eq!(
         test_support::fields(&o, &host, h, Ticket::NONE, Some("s0")).1,
         "authorization: Bearer tok"
@@ -1136,8 +1059,6 @@ fn a_binding_holds_at_most_256_scope_cells_evicting_the_least_recently_used_idle
     assert!(cache.contains_key(&x.scope_key(b"s256")));
 }
 
-/// O4: a cell some request waits on is never evicted; with every one of the 256 cells waited on,
-/// a new scope is refused (FAILED, saying why) rather than grow the cache past its cap.
 #[test]
 fn a_scope_cell_with_waiters_is_never_evicted() {
     let host = TestHost::new();
@@ -1165,10 +1086,6 @@ fn a_scope_cell_with_waiters_is_never_evicted() {
     );
 }
 
-/// O5, THE TOKEN TYPE IS CHECKED (RFC 6749 §5.1, §7.1): a reply whose `token_type` is present and
-/// not `bearer` (any case) fails the mint, at an operator-visible WARN, and nothing is presented
-/// as a bearer; `Bearer` in any case mints; an absent `token_type` is accepted (many endpoints
-/// omit it) with ONE WARN per cell. RED: `token_type` was never read.
 #[test]
 fn a_token_type_other_than_bearer_fails_the_mint_and_an_absent_one_warns_once() {
     use busbar_test_kit::warn_capture::WarnCapture;
@@ -1238,8 +1155,6 @@ fn a_token_type_other_than_bearer_fails_the_mint_and_an_absent_one_warns_once() 
     );
 }
 
-/// O8: a mint the host's wall clock cannot date fails the call (nothing is presented) and is
-/// logged at WARN, `module = "oauth"`, naming the clock. RED: it minted at `iat` 0.
 #[test]
 fn a_mint_with_no_plausible_wall_clock_fails_at_warn() {
     use busbar_test_kit::warn_capture::WarnCapture;
@@ -1270,8 +1185,6 @@ fn a_mint_with_no_plausible_wall_clock_fails_at_warn() {
     );
 }
 
-/// L1: THE WALL CLOCK NEVER MOVES BACKWARDS: an older reading (a call's own timestamp read before
-/// a newer tick's, racing it) leaves the newest one in place. RED: the last writer won.
 #[test]
 fn an_older_wall_clock_reading_never_moves_the_clock_back() {
     let o = Oauth::new(1);
@@ -1282,9 +1195,6 @@ fn an_older_wall_clock_reading_never_moves_the_clock_back() {
     assert_eq!(o.wall_secs(), 1_800_000_100, "no reading is no reading");
 }
 
-/// L7: A SCHEDULED MINT THAT GETS AN EMPTY OR AN UNPRESENTABLE TOKEN IS LOGGED, one WARN each
-/// (`module = "oauth"`), as every other failed mint is: the calls it fails are explained in the
-/// plugin's own log, not the diagnostic channel alone. RED: neither was logged.
 #[test]
 fn an_empty_or_unpresentable_scheduled_token_is_logged_at_warn() {
     use busbar_test_kit::warn_capture::WarnCapture;
@@ -1329,7 +1239,7 @@ fn a_resumed_mint_call_that_can_answer_forgets_its_parked_ticket() {
         panic!("scheduled binding")
     };
     wire.ok(r#"{"access_token":"resumed","expires_in":3600}"#);
-    // The cell has published its result; the instance has not yet drained/woken its waiters.
+
     assert_eq!(
         cell.tick(u64::MAX / 2, now_epoch(), Some(&Shared(wire.clone())))
             .1,

@@ -2,17 +2,6 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! The plugin's own need, over the host's connector (the minting styles mint through the plugin's
-//! own `provider`-class need): [`HostWire`] is the
-//! [`Wire`] the token exchange runs over in production. The token request goes out on the framed
-//! need its style names (`ESTABLISH`, then `WRITE_REQUEST` head, body, end: the framer writes its
-//! own wire head and its client defaults), and the reply is read piece by piece (`READ_REPLY`: its
-//! head's code, its body, its terminal piece).
-//!
-//! THE REPLAY RULE (`busbar_contract::abi::sdk::conn`): every service carries the next completion
-//! handle of the op's ticket. The exchange runs on the instance's DRIVER ticket, inside `tick` and
-//! the `drive`s between ticks. The host forgets a ticket's kept answers only at a tick that
-//! starts with nothing held, so the handle count is the instance's for the ticket's life, never
-//! reset: no service is ever answered from another's kept result.
 
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::task::Poll;
@@ -103,8 +92,6 @@ const fn span(offset: usize, len: usize) -> FrameSpan {
 }
 
 /// The request's head words and field block, as `WRITE_REQUEST`'s head piece names them: the
-/// method `POST`, the target's path and query (no fragment: a client never sends one), then each
-/// field.
 fn head(req: &TokenRequest, timeout_ms: u64) -> Result<(Vec<u8>, RequestPiece), ConnError> {
     let url = busbar_contract::net::parse_url(&req.target).map_err(|_| ConnError::Refused)?;
     let words = url.path.split('#').next().unwrap_or("/");
@@ -129,9 +116,6 @@ fn head(req: &TokenRequest, timeout_ms: u64) -> Result<(Vec<u8>, RequestPiece), 
 }
 
 /// The `retry-after` of a reply head whose field block the host wrote in the first
-/// `written` bytes of `buf` at `block_span` (the only field this plugin reads beyond the code);
-/// `None` when it
-/// carries none, or the span lies outside what was written.
 fn head_retry_after(
     buf: &[u8],
     written: usize,
@@ -167,7 +151,7 @@ impl Wire for HostWire<'_> {
                 if now(c.write_request(stream, &head_piece, &head))? != head.len() {
                     return Err(ConnError::Refused);
                 }
-                // The sealed body is one piece: a framed request takes it whole.
+
                 if now(body.request(c, stream, &body_piece))? != body.len() {
                     return Err(ConnError::Refused);
                 }

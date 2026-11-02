@@ -1,22 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
-//! **THE PLUGIN TESTS ITSELF, BOTH WAYS** (BUSBAR-1.6.0.md THE DESIGN, §2; §11.4). See
-//! `busbar-auth-header/tests/conformance.rs` for the shared harness shape; this is
-//! `jwt-bearer`/`oauth-client-credentials`'s own script. The doors are bound with no connection
-//! table here, so the plugin's own needs are not granted and nothing mints: the script proves
-//! refusal shape, the not-ready answer and cache bookkeeping; `instance_tests.rs` proves the mint
-//! over a scripted need and the `mint_door` module below over the one loader and a connection table.
-//!
-//! ## The RED arms stay in the file
-//!
-//! * [`red_a_field_without_the_sensitive_flag`]
-//! * [`red_a_writer_that_ignores_the_host_capacity_faults`]
+//! Exercises OAuth auth operations through the linked and dropped-in doors.
 
-// THE PUBLISHED CONFORMANCE SUITE (busbar-plugin-loader's `conformance` feature, TODO ABI-b4): the
-// auth kind's OUTBOUND script over this crate's linked door and its dropped-in cdylib (built with
-// `dropped-in`), driven by `conformance.json`; the hand-written both-ways proof below stays beside
-// it. `plugin-ci.yml` runs the suite under `--release` once the crate lives in its own repo.
 busbar_test_kit::conformance_suite! {
     door: busbar_auth_oauth::door,
     cdylib: "busbar_auth_oauth_plugin",
@@ -101,7 +87,7 @@ fn bind(folds: &Arc<Folds>, dispatcher: &Dispatcher) -> Bind {
         max_inflight_cap: 64,
         sink: folds.clone(),
         dispatcher: dispatcher.adopter(),
-        // These rows never dial: the door's needs are not declared, bound as a probe.
+
         conns: busbar_plugin_loader::dispatch::ConnTable::Probe,
     }
 }
@@ -276,8 +262,6 @@ fn script(p: &Plugin<Auth>) -> Vec<String> {
     t.push(open_outbound(p, "bearer", Some("k"), "{}").0);
     t.push(open_outbound(p, "kerberos", Some("k"), "{}").0);
 
-    // No connection table is handed: nothing mints, so `fields` is not ready (ticket-less:
-    // REFUSED, never an empty answer).
     t.push(fields(p, oauth, MODE_OWN, z(), (256, 4)));
     t.push(fields(
         p,
@@ -370,7 +354,7 @@ const EXPECTED: &[&str] = &[
      plugin",
     "open_outbound kerberos Failed settings: outbound auth style `kerberos` is not served by this \
      plugin",
-    // Before the first mint: fail locally with the same stable reason as an unavailable token.
+
     "fields Failed no OAuth token could be minted for this binding (see diagnostics \
      BUSBAR-4014/4015/4016); the call is refused rather than sent unauthenticated, and the mint \
      retries on its schedule",
@@ -391,7 +375,6 @@ const EXPECTED: &[&str] = &[
 ];
 
 /// The folds: the declared diagnostic, and each `tracing` event the SDK captured into the
-/// plugin's log (S5: every refusal logged once, `module = "oauth"`).
 const EXPECTED_FOLDS: &[&str] = &[
     "diag 4294967295 sev=0 busbar_auth_oauth: instance settings refused module=\"oauth\" \
      reason=\"settings: must be a JSON object\"",
@@ -456,8 +439,6 @@ fn compiled_in_and_dropped_in_answer_every_op_identically() {
     }
 }
 
-// ── RED ARMS ────────────────────────────────────────────────────────────────────────────────────
-
 fn door_with_fields(op: Op) -> &'static Door {
     // SAFETY: the plugin's `'static` door and its auth table.
     let (d, ops) = unsafe {
@@ -512,7 +493,6 @@ extern "C" fn insensitive_door() -> &'static Door {
 }
 
 /// THE DIAGNOSTIC TABLE: each `diag` index names its 1.5.5 catalog code (the indices are
-/// `instance::diag`, pinned to 0, 1, 2 by the crate's own unit test).
 #[test]
 fn the_diag_indices_name_their_catalog_codes() {
     let ids: Vec<&str> = (0..busbar_auth_oauth::STATEMENT.diag_ids_len)
@@ -571,10 +551,6 @@ fn red_a_writer_that_ignores_the_host_capacity_faults() {
     assert!(fields(&red, h, MODE_OWN, z(), (256, 4)).starts_with("fields Fault"));
 }
 
-// THE MINT THROUGH THE PLUGIN'S OWN NEED, OVER THE ONE LOADER (THE DESIGN §5, §6.5, §11; TODO
-// row 22). Folded here from the former `tests/mint_door.rs` so the plugin's loader usage
-// stays in its ONE conformance witness file (THE DESIGN §2 / §11.4; the witness grant covers
-// exactly this file). The scripted connection-table double mints, then refreshes, the bearer.
 mod mint_door {
     use std::collections::{HashMap, VecDeque};
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -657,7 +633,7 @@ mod mint_door {
         declared: Mutex<Vec<(u32, ReadNeed, Option<String>)>>,
         opened: Mutex<Vec<Opened>>,
         replies: Mutex<Replies>,
-        // The test observes the first token before it permits a refresh reply to land.
+
         refresh_allowed: AtomicBool,
     }
 
@@ -690,7 +666,7 @@ mod mint_door {
                 .lock()
                 .unwrap()
                 .push((need.0, spec.clone(), target.map(str::to_owned)));
-            // A `target_from` that resolved to nothing is refused, as the connector refuses it.
+
             if !spec.target_from.is_empty() && target.is_none() {
                 return Err(ConnError::Refused);
             }
@@ -789,10 +765,6 @@ mod mint_door {
     }
 
     /// Whether one `fields` answer presents exactly `expected` as its authorization: its first
-    /// `authorization` field's value, compared with `expected`. The value is the contract's sealed
-    /// secret (busbar #1021, Part 2 #54), which a plugin's test holds no seal to read, so it is
-    /// compared through the type's own constant-time equality rather than read out. The comparison
-    /// never names the type, so it holds against the contract before and after the seal.
     fn presents(answer: &Fields, expected: &str) -> bool {
         fn same<T: PartialEq>(value: &T, expected: T) -> bool {
             *value == expected
@@ -844,9 +816,6 @@ mod mint_door {
             "its needs take their target from the binding's settings"
         );
 
-        // THE INSTANCE, OPENED OVER THE BINDING'S SETTINGS: its token_url need is declared pinned to
-        // the binding's endpoint, `provider` (a private endpoint refused unless allowlisted), over
-        // the http transport.
         let settings = serde_json::json!({ "token_url": TOKEN_URL, "scope": SCOPE });
         let instance = Arc::new(
             OutboundInstance::open_with(
@@ -873,9 +842,6 @@ mod mint_door {
             .open_outbound("oauth-client-credentials", CREDENTIAL.as_bytes(), &settings)
             .expect("the binding opens");
 
-        // Before the first mint, fail locally; no upstream request may be sent anonymously.
-        // The in-place API returns None when it has no READY answer; the ticketed call carries
-        // the terminal failure. Check both before starting the mint driver.
         let request = FieldsRequest::default();
         assert!(
             instance.fields_now(handle, &request).is_none(),
@@ -898,7 +864,6 @@ mod mint_door {
             "the pre-mint failure must not open a token endpoint connection"
         );
 
-        // THE TICK SCHEDULE: the first mint lands, and the next call presents it.
         tokio::spawn(Arc::clone(&instance).ticks());
         let first = tokio::time::timeout(Duration::from_secs(10), async {
             loop {
@@ -942,12 +907,8 @@ mod mint_door {
             "the cached bearer answers in place, one call"
         );
 
-        // Release the second response only after the first token and cache hit were
-        // observed. A slow runner cannot miss the first token's two-second window.
         table.refresh_allowed.store(true, Ordering::SeqCst);
 
-        // THE REFRESH AHEAD OF EXPIRY: `expires_in: 2` re-mints after one second (1.5.5's
-        // `next_refresh_secs`), and the next request carries the refreshed token.
         let refreshed = tokio::time::timeout(Duration::from_secs(10), async {
             loop {
                 if let Some(answer) = instance.fields_now(handle, &request) {
@@ -965,7 +926,6 @@ mod mint_door {
             "the refreshed bearer is presented: {refreshed:?}"
         );
 
-        // THE TOKEN REQUESTS, as 1.5.5 POSTed them: the mint, then the refresh, byte for byte.
         let opened = table.opened.lock().unwrap();
         assert_eq!(opened.len(), 2, "the mint and the refresh: {opened:?}");
         let form = "grant_type=client_credentials&client_id=oracle-client-0001&client_secret=\

@@ -2,9 +2,6 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! Tests for `mint/oauth_client_credentials.rs`, ported from
-//! the kernel's `egress_auth/tests/oauth_client_credentials_tests.rs`. The `token_url`
-//! https/metadata tests stay with the kernel (ARCHITECT ruling Q2 (a)); the over-cap mint is proven
-//! in `mint_tests` over the plugin's need.
 
 use super::*;
 
@@ -35,7 +32,6 @@ fn validate_credential_rejects_malformed_and_accepts_well_formed() {
 
 #[test]
 fn build_accepts_a_secret_containing_a_colon() {
-    // Only the FIRST colon splits id:secret, so a secret with colons is preserved.
     let c = build("client-abc:secret:with:colons", "https://t", Some("s")).unwrap();
     assert_eq!(
         crate::test_support::form_text(&c.request().unwrap().body),
@@ -44,7 +40,6 @@ fn build_accepts_a_secret_containing_a_colon() {
 }
 
 /// The token request: the four form pairs in 1.5.5's order, encoded by `serde_urlencoded` as
-/// reqwest's `.form()` did, POSTed to `token_url` with the form content type.
 #[test]
 fn the_token_request_is_the_form_1_5_5_posted() {
     let c = build(

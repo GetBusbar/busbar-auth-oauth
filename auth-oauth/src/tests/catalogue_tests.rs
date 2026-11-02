@@ -3,10 +3,6 @@
 const DECLARES_JSON: &str = include_str!("../../declares.json");
 
 /// NO DECLARED CODE IS ONE THE CORE'S CATALOGUE HOLDS: the core at `.busbar-ref` (`BUSBAR_CHECKOUT`,
-/// `crates/busbar-kernel/src/diagnostics/catalog.toml`) refuses a plugin that declares a code its
-/// catalogue already holds ("plugin '<name>' declares BUSBAR-NNNN: the catalogue already holds that
-/// code"), identical or not, so a collision is a busbar that does not boot. An unset variable is a
-/// failure, never a skip.
 #[test]
 fn no_declared_code_is_one_the_core_catalogue_holds() {
     let busbar = std::env::var_os("BUSBAR_CHECKOUT").expect(
@@ -40,9 +36,6 @@ fn no_declared_code_is_one_the_core_catalogue_holds() {
 }
 
 /// EVERY CODE THE PLUGIN RAISES IS DECLARED BY THE PLUGIN OR HELD BY THE CORE CATALOGUE. The
-/// Statement's diagnostic ids (`abi_str("BUSBAR-NNNN")` in `src/lib.rs`) are resolved by the host
-/// from the full catalogue (`by_code`: the core's entries plus the plugins' declared ones), so a
-/// code in neither place would log without its slug, title and action.
 #[test]
 fn every_raised_code_is_declared_here_or_held_by_the_core_catalogue() {
     let busbar = std::env::var_os("BUSBAR_CHECKOUT").expect(

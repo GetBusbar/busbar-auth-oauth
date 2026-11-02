@@ -2,8 +2,6 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! The unit tests' host: host tables whose wake records the ticket it was handed (each host its
-//! own record, so tests running side by side never read each other's wakes), and one `fields`
-//! call answered as the SDK kit's door answers it.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -56,8 +54,6 @@ impl TestHost {
 }
 
 /// One `fields` (the operator's own credential) on `ticket`, its scope `scope`, answered as the
-/// kit's door answers it: the outcome (a ticket-less PENDING is REFUSED) and the fields written,
-/// `name: value` joined by ` ; `.
 pub(crate) fn fields(
     o: &Oauth,
     host: &TestHost,

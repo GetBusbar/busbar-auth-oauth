@@ -2,14 +2,11 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! Tests for `mint/jwt_bearer.rs`, ported from the kernel's `egress_auth/tests/jwt_bearer_tests.rs`.
-//! The `token_uri` https/metadata vetting tests stay with the kernel (ARCHITECT ruling Q2 (a)).
 
 use super::*;
 
 #[test]
 fn pem_to_pkcs8_der_strips_armor_and_decodes() {
-    // The function only strips the PEM armor and base64-decodes the body — it does not require a
-    // real key, so a known base64 payload round-trips to its bytes.
     let pem = "-----BEGIN PRIVATE KEY-----\nSGVsbG8sIFBLQ1M4\n-----END PRIVATE KEY-----\n";
     assert_eq!(pem_to_pkcs8_der(pem).unwrap().as_slice(), b"Hello, PKCS8");
 }
@@ -34,18 +31,6 @@ fn read_credential_passes_inline_json_through() {
 }
 
 /// THE SIGNING KEY MUST NOT REACH THE ERROR TEXT.
-///
-/// The ONLY thing that tells the two credential forms apart is a leading `{`, so an operator who
-/// pasted the service-account key body — or a secret ref (`env:`/`file:`) that resolved to key
-/// material rather than to a filename — reaches the non-JSON refusal with the whole signing key in
-/// hand. That error is not swallowed: it reaches `--validate`'s printed report (via
-/// `config_validate`'s `errors` list) and the boot/apply `panic!` in a plane's runtime build,
-/// so interpolating the argument published an RSA private key to a terminal, a CI log and a crash
-/// report.
-///
-/// The key here is a planted marker and its ABSENCE is what is asserted — the test never prints a
-/// real key to fail informatively. `not-a-real-key-b4d7e2` is unique in this file, so a regression
-/// that reinstates `'{credential}'` fails on the very first assertion.
 #[test]
 fn read_credential_never_echoes_the_key_material_it_could_not_read() {
     const PASTED_KEY: &str =
@@ -61,17 +46,12 @@ fn read_credential_never_echoes_the_key_material_it_could_not_read() {
         !e.contains("BEGIN PRIVATE KEY"),
         "not even the armor — it names the argument as key material, got: {e}"
     );
-    // What the operator IS owed still arrives: why the credential was refused. The lane and the
-    // secret's configured source are named by the caller (`config_validate` prints
-    // "provider '<name>' jwt-bearer credential (from <source>) is invalid: <this>"), so this layer
-    // owes the refusal and nothing else.
+
     assert!(
         e.starts_with("service-account JSON is invalid: the credential is not inline JSON"),
         "the refusal must still be reported, got: {e}"
     );
 
-    // AND THROUGH THE ENTRY POINT THAT ACTUALLY RUNS ON THE `--validate` PATH, so the assertion is
-    // anchored to the reachable call and not only to the private helper underneath it.
     let e = build(PASTED_KEY, None, None)
         .err()
         .expect("pasted key material is not a readable path");
@@ -81,10 +61,6 @@ fn read_credential_never_echoes_the_key_material_it_could_not_read() {
     );
 }
 
-/// THE PLUGIN OPENS NO FILE (Q128 oauth M4, ruling (a)). A key-file credential is the host's to
-/// resolve at config time, so what reaches the plugin is the service-account JSON itself. A path
-/// that names a READABLE file holding valid JSON is still refused: had the plugin opened it, this
-/// would have answered the file's JSON. The refusal names neither the path nor its contents.
 #[test]
 fn read_credential_refuses_a_path_without_opening_it() {
     let dir = std::env::temp_dir().join(format!("oauth-m4-{}", std::process::id()));
@@ -115,8 +91,6 @@ fn build_rejects_malformed_json() {
 }
 
 /// The `scope` threaded from provider config lands VERBATIM in the assertion claims (this is
-/// the value `main.rs` now passes through as `scope_override` instead of a hardcoded `None`), and
-/// iss/aud/iat/exp are placed correctly.
 #[test]
 fn jwt_claims_place_scope_and_fields() {
     let json = jwt_claims_json(
@@ -140,10 +114,6 @@ fn jwt_claims_place_scope_and_fields() {
 }
 
 /// RFC 7523 §3: with `subject` UNSET (the default — every existing Vertex AI config, which never
-/// sets it), the claim set must contain NO `sub` key at all. This is the regression guard:
-/// unconditionally setting `sub = iss` would break every plain (non-delegated) service account,
-/// because Google service-account OAuth treats the mere PRESENCE of `sub` as a
-/// domain-wide-delegation/impersonation switch, regardless of value.
 #[test]
 fn jwt_claims_omit_sub_when_subject_unset() {
     let json = jwt_claims_json(
@@ -168,7 +138,6 @@ fn jwt_claims_omit_sub_when_subject_unset() {
 }
 
 /// RFC 7523 §3: with `subject` explicitly configured, the claim set MUST contain `sub` set to that
-/// exact value — the opt-in RFC-7523-conformant / Google-delegation-correct path.
 #[test]
 fn jwt_claims_include_sub_with_exact_value_when_subject_set() {
     let json = jwt_claims_json(
@@ -185,15 +154,13 @@ fn jwt_claims_include_sub_with_exact_value_when_subject_set() {
 }
 
 /// A quote/backslash/control char in an operator-controlled claim value is ESCAPED, not
-/// spliced — the claims are always valid JSON and the value round-trips exactly. This is what the
-/// serde serializer buys over string interpolation (which would emit malformed JSON / inject).
 #[test]
 fn jwt_claims_escape_hostile_values() {
     let nasty = "a\"b\\c\nd\tsneaky\":\"injected";
     let json = jwt_claims_json(nasty, nasty, "aud", 1, 2, None).unwrap();
-    // Parses as valid JSON (string interpolation would have produced a parse error here)...
+
     let v: serde_json::Value = serde_json::from_str(&json).expect("claims must be valid JSON");
-    // ...and the value round-trips exactly, with no injected keys.
+
     assert_eq!(v["iss"], nasty);
     assert_eq!(v["scope"], nasty);
     assert_eq!(
@@ -204,8 +171,6 @@ fn jwt_claims_escape_hostile_values() {
 }
 
 /// A test-only 2048-bit PKCS#8 RSA private key (generated for this test suite only; not used
-/// anywhere else and grants no real access) so [`Signer::mint`] can actually sign an assertion
-/// and exercise the exchange against a scripted token endpoint.
 const TEST_PRIVATE_KEY_PEM: &str = include_str!("fixtures/test_sa_key.pem");
 
 pub(crate) fn test_signer(token_uri: &str, subject: Option<&str>) -> Signer {
@@ -219,7 +184,6 @@ pub(crate) fn test_signer(token_uri: &str, subject: Option<&str>) -> Signer {
 }
 
 /// The assertion `signer` sends at `now`, read back off the token request's form as the chip
-/// writes it (its characters are all ones a form keeps as themselves).
 fn assertion(signer: &Signer, now: u64) -> String {
     let form = crate::test_support::form_text(&signer.request(now).expect("a request").body);
     form.strip_prefix("grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion=")
@@ -227,11 +191,6 @@ fn assertion(signer: &Signer, now: u64) -> String {
         .to_string()
 }
 
-/// THE RFC 7523 ASSERTION, BYTE-IDENTICAL TO 1.5.5's (BUSBAR-1.6.0.md THE DESIGN, §6's proof). RS256 over PKCS#1
-/// v1.5 is deterministic, so for a fixed key, issuer, scope, audience and `iat` the assertion is one
-/// string. The golden was produced by 1.5.5's own `mint` code (`v1.5.5:crates/busbar/src/egress_auth/
-/// jwt_bearer.rs`: the header, `jwt_claims_json`, `b64url` and the `RSA_PKCS1_SHA256` signature,
-/// extracted verbatim into a scratch program and run over this key at `iat` 1_700_000_000).
 #[test]
 fn the_rfc_7523_assertion_is_byte_identical_to_1_5_5() {
     let signer = test_signer("https://oauth2.googleapis.com/token", None);
@@ -242,7 +201,6 @@ fn the_rfc_7523_assertion_is_byte_identical_to_1_5_5() {
 }
 
 /// The token request for that assertion: a form POST to the SA's `token_uri`, the grant type and
-/// the assertion encoded by `serde_urlencoded` as reqwest's `.form()` did.
 #[test]
 fn the_token_request_is_the_form_1_5_5_posted() {
     let signer = test_signer("https://oauth2.googleapis.com/token", None);
@@ -293,7 +251,6 @@ fn the_token_request_is_the_form_1_5_5_posted() {
 /// to fail informatively.
 #[test]
 fn validate_never_echoes_a_byte_of_the_service_account_key() {
-    // (armored body, the exact fragment of it base64's Display would have named, what that is)
     let cases = [
         ("Az==", "'z'", "the final symbol of the key body itself"),
         (
@@ -310,8 +267,6 @@ fn validate_never_echoes_a_byte_of_the_service_account_key() {
         })
         .to_string();
 
-        // THE LIVE PATH: the same entry point `config_validate` calls, whose `Err` string is
-        // copied verbatim into the `errors` array of the `config/validate` response.
         let e = build(&sa, None, None)
             .err()
             .expect("a private_key that is not base64 must be refused");
@@ -323,16 +278,13 @@ fn validate_never_echoes_a_byte_of_the_service_account_key() {
             !e.contains("Invalid symbol") && !e.contains("Invalid last symbol"),
             "the base64 crate's byte-naming Display must not be interpolated, got: {e}"
         );
-        // What the caller IS owed still arrives: WHICH field failed and THAT it failed to decode,
-        // so a malformed key is still distinguishable from a missing one.
+
         assert!(
             e.contains("private_key") && e.contains("base64"),
             "the failing field and the failure must still be named, got: {e}"
         );
     }
 
-    // The private helper underneath it, same discipline, so a future caller that reaches
-    // `pem_to_pkcs8_der` by another route inherits the redaction rather than re-introducing it.
     let e = pem_to_pkcs8_der("-----BEGIN PRIVATE KEY-----\nAz==\n-----END PRIVATE KEY-----\n")
         .expect_err("`Az==` has nonzero trailing bits");
     assert!(
@@ -346,9 +298,6 @@ fn held_as<T>(_: &T) -> &'static str {
     std::any::type_name::<T>()
 }
 
-/// RED (BUSBAR-1.6.0.md THE DESIGN §6, the per-request auth call: "auth material is zeroised"):
-/// the service-account JSON (it holds the private key) and the decoded key are held in buffers
-/// wiped on drop, never plain strings and vectors.
 #[test]
 fn the_service_account_and_its_key_are_held_wiped_on_drop() {
     let json = read_credential("{\"private_key\":\"k\"}").expect("inline JSON");
@@ -360,11 +309,6 @@ fn the_service_account_and_its_key_are_held_wiped_on_drop() {
     assert!(held_as(&der).contains("Zeroizing"), "{}", held_as(&der));
 }
 
-/// THE PRIVATE KEY IS UNESCAPED BY THE PLUGIN, NEVER BY THE JSON DECODER (THE DESIGN §6: "auth
-/// material is zeroised"): a PEM in JSON always carries `\n` escapes, and the decoder unescapes a
-/// string into a scratch buffer it frees unwiped, so the decode skips the key and `private_key`
-/// reads the top-level member into one buffer, sized once and wiped on drop. Every JSON escape
-/// resolves as the decoder resolves it; a nested `private_key` is not the account's.
 #[test]
 fn the_private_key_is_read_into_one_wiped_buffer_with_every_escape_resolved() {
     let pem =
@@ -391,18 +335,10 @@ fn the_private_key_is_read_into_one_wiped_buffer_with_every_escape_resolved() {
         "A\u{1F600}/\u{8}\u{c}\r"
     );
     assert!(private_key(r#"{"private_key":1}"#).is_err());
-    // The service account still builds from the key it reads this way.
+
     let _ = test_signer("https://oauth2.googleapis.com/token", None);
 }
 
-/// THE KEY FILE IS THE HOST'S TO READ (THE DESIGN §11.11 R4 l.1464-1469: only the host's bounded
-/// disk lane may block, for the secret kind's file source among others; §6 l.825-827: the kernel
-/// resolves secret material and delivers it to the bound auth; ruling 11; Q128 auth-oauth LOW,
-/// finding 4). 1.5.5 took a key-file PATH as the credential and read it itself
-/// (`egress_auth/jwt_bearer.rs::read_credential`). Here a path that names a READABLE, VALID
-/// service-account file is refused unread (had the plugin opened it, `build` would have succeeded),
-/// and the refusal names what to configure instead: the secret kind's file source, which delivers
-/// the file's JSON bytes. The same JSON handed over as the credential's bytes builds.
 #[test]
 fn a_key_file_path_is_refused_with_the_file_secret_form_and_its_json_bytes_build() {
     let sa = serde_json::json!({
@@ -439,8 +375,6 @@ fn a_key_file_path_is_refused_with_the_file_secret_form_and_its_json_bytes_build
     assert_eq!(req.target, "https://oauth2.googleapis.com/token");
 }
 
-/// O8: `exp` is `iat + 3600` checked, never an overflow: a hostile timestamp near `u64::MAX` is
-/// refused, not wrapped (release) or panicked on (debug). RED: `now + 3600` overflowed.
 #[test]
 fn an_assertion_at_an_overflowing_time_is_refused() {
     let signer = test_signer("https://oauth2.googleapis.com/token", None);

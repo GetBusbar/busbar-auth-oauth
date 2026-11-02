@@ -2,8 +2,6 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! `open_outbound`'s body: `jwt-bearer` and `oauth-client-credentials` bind from their settings,
-//! and every refusal is 1.5.5's own words in the `credential:` / `settings:` lines the kernel
-//! composes (ARCHITECT ruling Q5).
 
 use super::*;
 use std::collections::HashMap;
@@ -80,7 +78,6 @@ fn a_blank_optional_setting_is_refused_instead_of_using_its_default() {
 }
 
 /// `oauth-client-credentials`: 1.5.5's `config_validate` findings, in its order, each the words
-/// BOOT-030 / BOOT-034 / BOOT-035 pin after the kernel's `provider '<p>' ` prefix.
 #[test]
 fn oauth_client_credentials_refuses_in_1_5_5_words_and_order() {
     assert_eq!(
@@ -91,7 +88,7 @@ fn oauth_client_credentials_refuses_in_1_5_5_words_and_order() {
             "credential: oauth-client-credentials key must be `client_id:client_secret`",
         ]
     );
-    // O7 (1.5.5-visible): no `scope` is no longer a refusal (RFC 6749 §4.4.2: OPTIONAL).
+
     assert_eq!(
         lines(open(
             OAUTH_CLIENT_CREDENTIALS,
@@ -119,7 +116,6 @@ fn oauth_client_credentials_refuses_in_1_5_5_words_and_order() {
 }
 
 /// `jwt-bearer`: BOOT-036's credential clause is the redacted 1.6.0 sentence (accepted difference
-/// F-BOOT-036: the argument is never echoed), and a keyless declaration is refused.
 #[test]
 fn jwt_bearer_refuses_in_the_accepted_words() {
     let l = lines(open(JWT_BEARER, Some("unused"), "{}"));
@@ -164,7 +160,6 @@ fn an_unknown_style_or_malformed_settings_is_refused() {
 }
 
 /// THE TOKEN CACHE OUTLIVES A HANDLE: a re-open of the same (style, credential, settings) shares
-/// the cell a previous generation minted into; any change makes a new one.
 #[test]
 fn a_reopen_shares_the_token_cell_and_a_change_does_not() {
     let cache = Cache::default();
@@ -208,7 +203,7 @@ fn an_unknown_settings_key_is_refused_by_name() {
         &Cache::default(),
     );
     assert_eq!(r.err().unwrap()[0].line(), want);
-    // Every documented key stays accepted.
+
     assert!(open(
         JWT_BEARER,
         Some("unused"),
@@ -217,12 +212,6 @@ fn an_unknown_settings_key_is_refused_by_name() {
     .is_err_and(|r| r[0].line().starts_with("credential:")));
 }
 
-/// THE JWT MINT DIALS THE HOST-JUDGED ENDPOINT (Q128 auth-oauth reader B, LOW): the host reads the
-/// service account's `token_uri`, judges it as a destination, strips any `user:pass@` and hands
-/// the plugin that copy as the `token_uri` setting its need is pinned to. The mint POSTs THERE; the
-/// service account's own spelling stays only the assertion's `aud` (1.5.5's claim). With no setting
-/// (a host that hands none) the credential's endpoint is dialled, as before. RED: the mint dialled
-/// the credential's raw endpoint, userinfo and all, whatever the setting said.
 #[test]
 fn a_jwt_binding_dials_the_judged_token_uri_setting() {
     #[derive(Default)]
@@ -260,8 +249,6 @@ fn a_jwt_binding_dials_the_judged_token_uri_setting() {
 }
 
 /// NO SETTINGS VALUE IS ECHOED (S1): a wrong-typed or malformed setting is refused naming the key
-/// and what it must be, never with the decoder's text, which quotes the value (an operator may
-/// paste a secret into the wrong key). RED: `invalid type: string "<the value>"` reached the line.
 #[test]
 fn a_bad_setting_is_refused_without_its_value() {
     const PASTED: &str = "s3cr3t-pasted-here";
@@ -295,11 +282,6 @@ fn a_bad_setting_is_refused_without_its_value() {
     );
 }
 
-/// THE KIND RULE (O1; lead ruling 2026-10-30, as sigv4 and header): core forwards its shared
-/// provider/style keys (`token_url`, `token_uri`, `scope`, `subject`) to every style's open. A
-/// style that does not read one binds all the same, logging ONE WARN per such key at the open
-/// (`settings.<key>: not used by the <style> style; ignored`, `module = "oauth"`); a key in neither
-/// set stays refused by name. RED: the minted styles and the token exchange refused them.
 #[test]
 fn a_forwarded_key_a_style_does_not_read_is_ignored_with_one_warn() {
     use busbar_test_kit::warn_capture::WarnCapture;
@@ -353,7 +335,7 @@ fn a_forwarded_key_a_style_does_not_read_is_ignored_with_one_warn() {
             );
         }
     }
-    // A key in neither set is still refused by name.
+
     let l = lines(open(
         OAUTH_CLIENT_CREDENTIALS,
         Some("id:secret"),
@@ -362,9 +344,6 @@ fn a_forwarded_key_a_style_does_not_read_is_ignored_with_one_warn() {
     assert_eq!(l, ["settings: unknown key `resource`"]);
 }
 
-/// O7, `scope` IS OPTIONAL FOR CLIENT CREDENTIALS (RFC 6749 §4.4.2): a binding with no `scope`
-/// opens, and its token request carries no `scope` (the endpoint's default applies); a `scope`
-/// that is present but blank is still refused, naming it. RED: an absent scope was refused.
 #[test]
 fn a_client_credentials_binding_without_a_scope_requests_none() {
     #[derive(Default)]
@@ -411,9 +390,6 @@ fn a_client_credentials_binding_without_a_scope_requests_none() {
     assert!(l[0].contains("scope"), "the blank key is named: {l:?}");
 }
 
-/// O9, `max_response_bytes` IS BOUNDED: a cap outside [1024, 1048576] (0 among them, which would
-/// refuse every reply) is refused, naming the key; the bounds themselves are accepted. RED: any
-/// value was accepted.
 #[test]
 fn max_response_bytes_outside_1024_to_1048576_is_refused_by_name() {
     for bad in [0_u64, 1023, 1_048_577, u64::MAX] {
@@ -443,8 +419,6 @@ fn max_response_bytes_outside_1024_to_1048576_is_refused_by_name() {
     }
 }
 
-/// T2: THE SETTING REACHES THE CELL: each style's `max_response_bytes` is the cap its cell (or,
-/// for a token exchange, each scope's cell) is made with; unset, the 256 KiB default.
 #[test]
 fn max_response_bytes_reaches_the_cell() {
     #[derive(Default)]

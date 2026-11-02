@@ -2,22 +2,16 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! The crate root's own constants: what the `fields` door writes, and the diagnostic table's
-//! shape (its id strings are read by the plugin crate's conformance test, where reading an
-//! `AbiStr`'s bytes is allowed).
 
 use super::*;
 use crate::instance::diag;
 
-/// THE AUTHORIZATION FIELD IS SENSITIVE (KIND-auth lead ruling, 1.6.0): every credential field an
-/// outbound style presents carries `FIELD_SENSITIVE`, so an h2/h3 encoder sends it never-indexed
-/// and no header table keeps the bearer. RED: the flags were 0 (1.5.5's indexable bytes).
 #[test]
 fn the_authorization_field_is_written_sensitive() {
     assert_eq!(FIELD_FLAGS, busbar_contract::abi::auth::FIELD_SENSITIVE);
 }
 
 /// The diagnostic indices are the Statement's table positions, in `DIAG_IDS` order (the plugin
-/// crate's conformance test pins which code each position holds).
 #[test]
 fn the_diag_indices_are_the_table_positions() {
     assert_eq!(DIAG_IDS.len(), 3);
@@ -27,7 +21,6 @@ fn the_diag_indices_are_the_table_positions() {
 }
 
 /// Settings that are not a JSON object are FAILED (the contract's settings refusal), never
-/// REFUSED, at validate, open and refresh alike.
 #[test]
 fn bad_settings_answer_failed_at_validate_open_and_refresh() {
     use busbar_contract::abi::mechanism::call::Outcome;
@@ -43,22 +36,13 @@ fn bad_settings_answer_failed_at_validate_open_and_refresh() {
     assert_eq!(r.outcome(), Outcome::Failed);
 }
 
-/// RED (busbar arch-audit u29 F1): a provider's `auth:` is an opaque word some loaded plugin
-/// declares, and what a style needs is a bit its plugin states beside it, never its name. The
-/// jwt-bearer grant takes its token endpoint from its credential (the service account's
-/// `token_uri`: `STYLE_ENDPOINT_FROM_CREDENTIAL`); the client-credentials grant sends its credential
-/// to the entry's `token_url` (`STYLE_ENDPOINT_TOKEN_URL`); the host judges each endpoint by the
-/// bit. Both rank after 1.5.5's two header styles, in 1.5.5's order (jwt-bearer 3,
-/// oauth-client-credentials 4), so 1.5.5's refusal of an unknown word stays the prefix of the
-/// host's. The token exchange (`token_url` and a `resource` no provider entry states) is a plane
-/// need's style: unranked, judged by its need. Every declaration is one the host loads.
 #[test]
 fn the_oauth_styles_state_their_token_endpoint_and_rank_after_the_header_styles() {
     use busbar_contract::abi::auth::{
         check_style_decl, style_rank, STYLE_ENDPOINT_FROM_CREDENTIAL, STYLE_ENDPOINT_TOKEN_URL,
     };
     const ENDPOINT: u32 = STYLE_ENDPOINT_TOKEN_URL | STYLE_ENDPOINT_FROM_CREDENTIAL;
-    // `STYLES` order: jwt-bearer, oauth-client-credentials, oauth-token-exchange.
+
     let stated: Vec<(u32, u32)> = STYLES
         .iter()
         .map(|d| (d.flags & ENDPOINT, style_rank(d.flags)))
@@ -77,10 +61,6 @@ fn the_oauth_styles_state_their_token_endpoint_and_rank_after_the_header_styles(
 }
 
 /// THE INSTANCE'S OWN SETTINGS (S2): the host opens the instance over a binding's settings, so
-/// every key a style reads is accepted there, and any other key is refused BY NAME, FAILED, in the
-/// contract's instance-relative line form, at validate, open and refresh alike (`validate` refuses
-/// exactly what `open` refuses). RED: any JSON object was accepted, and the refusal line named the
-/// plugin instead of `settings`.
 #[test]
 fn an_unknown_instance_setting_is_refused_by_name_at_validate_open_and_refresh() {
     use busbar_contract::abi::mechanism::call::Outcome;
@@ -148,7 +128,6 @@ fn invalid_present_settings_are_refused_at_every_lifecycle_entry() {
 }
 
 /// A REFUSED BINDING IS LOGGED ONCE AT INFO (S5), `module = "oauth"`, with its reason and never the
-/// credential. RED: the refusal was answered and logged nowhere.
 #[test]
 fn a_refused_binding_is_logged_once_at_info() {
     use busbar_test_kit::warn_capture::WarnCapture;

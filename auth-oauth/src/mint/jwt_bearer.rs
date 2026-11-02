@@ -2,21 +2,6 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! `jwt-bearer` egress auth — OAuth 2.0 JWT-bearer grant (RFC 7523), one of busbar's OAuth auth
-//! mechanisms.
-//!
-//! GENERIC, not Google-specific: the flow is the standard `urn:ietf:params:oauth:grant-type:jwt-bearer`
-//! grant — sign a JWT with a private key, POST the assertion to a token endpoint, receive a short-lived
-//! bearer. The Google service-account JSON is merely a recognized *container* for the signing material
-//! (`client_email` → JWT `iss`, `private_key` → the RS256 key, `token_uri` → JWT `aud`); the scope
-//! defaults to `cloud-platform`. Vertex AI is the first provider to select `auth: jwt-bearer`.
-//!
-//! This module owns only the JWT signing and the token request it is exchanged in; the exchange
-//! runs over the plugin's own need and the token cache, the per-request read and the refresh ahead
-//! of expiry on `tick` live in [`super`], shared with `oauth-client-credentials`.
-//!
-//! The SA JSON's `token_uri` https / cloud-metadata vetting is not done here: the kernel judges an
-//! auth plugin's need target at seal and at `--validate` (the allow-list and metadata posture are
-//! the kernel's).
 
 use super::TokenRequest;
 use base64::Engine as _;
@@ -25,7 +10,6 @@ use busbar_contract::abi::sdk::cred::{Cred, FormBody, FormValue};
 use zeroize::Zeroizing;
 
 /// How long a signed assertion is valid (`exp - iat`): one hour, RFC 7523's common lifetime and
-/// 1.5.5's.
 const ASSERTION_LIFETIME_SECS: u64 = 3600;
 
 /// Default OAuth scope when the provider does not override it — the Vertex/GCP common case.
@@ -34,33 +18,19 @@ const DEFAULT_SCOPE: &str = "https://www.googleapis.com/auth/cloud-platform";
 /// The signing + exchange material for one binding. Immutable after construction.
 pub(crate) struct Signer {
     /// The service account's PKCS #8 RSA key (DER): the chip's, which signs the assertion as the
-    /// token request's form is written (`FormValue::JwsRs256`).
     key: Cred,
     /// JWT `iss` — the service account's `client_email`.
     issuer: String,
     /// JWT `aud` — the SA JSON `token_uri`, as the credential spells it.
     token_uri: String,
     /// The POST target: the host's judged copy of the endpoint (the `token_uri` setting, its
-    /// userinfo stripped, the one the token need is pinned to), else the SA JSON's own.
     endpoint: String,
     scope: String,
     /// JWT `sub` (RFC 7523 §3), emitted ONLY when the operator explicitly configures it
-    /// (`ProviderCfg::subject`). Left `None` — the default, and the only case that matters for a plain
-    /// (non-delegated) Google service account — the assertion carries no `sub` at all: for a Google service account, the mere PRESENCE of `sub` (not its value)
-    /// switches the grant into domain-wide-delegation/impersonation semantics, so it must never be
-    /// defaulted (e.g. to `iss`) or every plain SA (the shipped Vertex AI setup) starts failing
-    /// `unauthorized_client`/`invalid_grant`. Mirrors `google-auth-python`'s own opt-in `subject=`.
     subject: Option<String>,
 }
 
 /// Build a `jwt-bearer` signer: PARSES the key material (failing loud on a malformed
-/// service-account JSON / PKCS#8 key, the common misconfig). It never touches the network: the first
-/// mint runs on the instance's driver ticket. `credential` is the SA JSON's bytes, never a path: a key file is read by
-/// the host's secret file source (`api_key: {file: <path>}`) and its JSON delivered here.
-/// `scope_override` replaces the default
-/// `cloud-platform` scope when set. `subject` is the operator-configured RFC 7523 `sub` — `None`
-/// (the default) omits the claim entirely; `Some` emits it verbatim, for Google
-/// domain-wide-delegation impersonation or a third-party IdP that requires `sub`.
 pub(crate) fn build(
     credential: &str,
     scope_override: Option<&str>,
@@ -78,18 +48,9 @@ pub(crate) fn build(
 }
 
 /// Parse + fully validate a `jwt-bearer` credential: read the SA JSON (inline; the host resolves a key file) and parse
-/// the PKCS#8 RSA key. Run by [`build`], which the config `--validate` dry-run
-/// reaches through `open_outbound` (it never dials), so both apply IDENTICAL checks with identical
-/// error messages — they can never diverge.
-///
-/// The JSON decoder never decodes the private key: a PEM in JSON always carries `\n` escapes, and a
-/// decoder unescapes a string into a scratch buffer of its own that it frees unwiped. The decode
-/// skips the key's value (skipping copies nothing) and [`private_key`] unescapes it straight into a
-/// buffer sized once and wiped on drop (auth material is zeroised).
 fn parse_service_account(credential: &str) -> Result<(ServiceAccount, Cred), String> {
     let sa_json = read_credential(credential)?;
-    // The decoder's own text is withheld (`json_error`): a data error quotes the offending value,
-    // and the value here may be the private key.
+
     let sa: ServiceAccount =
         serde_json::from_str(&sa_json).map_err(json_error("service-account JSON is invalid"))?;
     let key = private_key(&sa_json)?;
@@ -100,11 +61,6 @@ fn parse_service_account(credential: &str) -> Result<(ServiceAccount, Cred), Str
 }
 
 /// THE SERVICE ACCOUNT'S `private_key`, unescaped out of `json` (a document the decoder has
-/// already judged well-formed, with a string `private_key` member) into ONE buffer sized to the
-/// escaped length (unescaping only shortens) and wiped on drop.
-///
-/// # Errors
-/// The document's `private_key` is not a string (the decode has already refused a missing one).
 pub(crate) fn private_key(json: &str) -> Result<Zeroizing<String>, String> {
     const NOT_TEXT: &str = "service-account JSON is invalid: a field is missing or has the wrong \
                             type (the decoder's text is withheld)";
@@ -113,12 +69,9 @@ pub(crate) fn private_key(json: &str) -> Result<Zeroizing<String>, String> {
 
 impl Signer {
     /// The assertion's signing input for `now` (epoch seconds): `header.claims`, the url-safe
-    /// unpadded base64 of the fixed RS256 header and the claim set (RFC 7523). Public material: the
-    /// chip appends the signature as the form is written.
     pub(crate) fn signing_input(&self, now: u64) -> Result<String, String> {
         use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
-        // 1h assertion; the returned token's own TTL governs refresh. Checked: `now` is the
-        // host's clock, never trusted not to sit at the end of the range.
+
         let exp = now
             .checked_add(ASSERTION_LIFETIME_SECS)
             .ok_or("the assertion's expiry overflows the clock; no assertion is signed")?;
@@ -138,8 +91,6 @@ impl Signer {
     }
 
     /// This signer POSTing to `endpoint`, the host's judged copy of the token endpoint (the
-    /// `token_uri` setting its need is pinned to); the assertion's `aud` stays the service
-    /// account's own `token_uri`.
     #[must_use]
     pub(crate) fn dialling(mut self, endpoint: String) -> Self {
         self.endpoint = endpoint;
@@ -147,9 +98,6 @@ impl Signer {
     }
 
     /// The token request for `now`: the assertion, form-encoded byte for byte as reqwest's `.form()`
-    /// (`serde_urlencoded`) wrote it, the chip signing it RS256 under the service account's key as
-    /// the form is written ([`FormValue::JwsRs256`]), POSTed to the judged endpoint (RFC 7523;
-    /// [`Signer::dialling`]).
     pub(crate) fn request(&self, now: u64) -> Result<TokenRequest, String> {
         let form = FormBody::new()
             .public("grant_type", "urn:ietf:params:oauth:grant-type:jwt-bearer")
@@ -169,20 +117,6 @@ impl Signer {
 }
 
 /// Serialize the JWT-bearer assertion claim set. Built with a JSON serializer, NOT string
-/// interpolation: a `"`/`\`/control char in `issuer` (the SA `client_email`) or `scope` would
-/// otherwise produce malformed JSON or splice into the claim set. `scope` is the value threaded from
-/// the provider's `scope:` config (or the cloud-platform default), so this is also where a configured
-/// scope lands in the assertion. Extracted as a pure fn so the escaping and scope-placement are unit-
-/// testable without a network round-trip.
-///
-/// `subject` is RFC 7523 §3's `sub` claim, threaded from the operator's optional `ProviderCfg::subject`.
-/// It is emitted ONLY when `Some` — `None` (the default) produces a claim set with NO `sub` key at all,
-/// byte-identical to this function's behavior before `subject` existed. This is deliberately opt-in: for
-/// a Google service account, the mere PRESENCE of `sub` (regardless of value) switches the OAuth grant
-/// into domain-wide-delegation/impersonation semantics, so unconditionally setting it (e.g. to `issuer`)
-/// would break every plain, non-delegated service account — including the shipped Vertex AI config —
-/// with `unauthorized_client`/`invalid_grant`. `google-auth-python` and friends have the same opt-in
-/// `subject=` behavior; this mirrors it.
 fn jwt_claims_json(
     issuer: &str,
     scope: &str,
@@ -205,19 +139,6 @@ fn jwt_claims_json(
 }
 
 /// SA-JSON credential material: the service-account JSON itself, never a path.
-///
-/// The plugin opens no file: a key-file credential is resolved by the host at config time (the
-/// secret kind's file source, `api_key: {file: <path>}`), so a credential that is not inline JSON is
-/// refused here unread, naming that form. The
-/// refusal deliberately does NOT render `credential`: the only thing that tells JSON from anything
-/// else is a leading `{`, so an operator who pasted the key body, or a secret ref that resolved to
-/// key material, lands here holding the SIGNING KEY. This error reaches the `--validate` report and
-/// the boot/apply panic in a plane's runtime build, so interpolating the argument would publish an
-/// RSA private key to a terminal, a CI log and a crash report in one step. Callers already name the
-/// lane and the secret's configured source.
-///
-/// The JSON (it holds the private key) is held in a buffer wiped on drop, so no copy of it is left
-/// behind (auth material is zeroised).
 fn read_credential(credential: &str) -> Result<Zeroizing<String>, String> {
     if credential.trim_start().starts_with('{') {
         return Ok(Zeroizing::new(credential.to_string()));
@@ -231,26 +152,6 @@ fn read_credential(credential: &str) -> Result<Zeroizing<String>, String> {
 }
 
 /// Strip the PEM armor from a PKCS#8 private key and base64-decode the body to DER.
-///
-/// The decode failure is reported by CLASS, never by `base64::DecodeError`'s own `Display`. That
-/// `Display` names a byte OF THE KEY BODY: `InvalidByte` prints the decimal byte value and its
-/// offset (`Invalid symbol 126, offset 4.`), and `InvalidLastSymbol` is worse still — it prints the
-/// symbol as hex AND as the character itself AND its decoded bits (`Invalid last symbol 0x7a ('z')
-/// at offset 1, decoded as 0b00110011.`), and for that variant the symbol is a VALID base64
-/// character, i.e. six bits of the operator's RSA private key, not a foreign character that got
-/// mixed in. This error is not swallowed: [`build`] is reached by the config `--validate` entry
-/// point and `config_validate` copies its string verbatim into the `errors` array that the admin
-/// `config/validate` endpoint returns — a READ-SCOPE caller. Read scope may ask whether the
-/// configuration is valid; it may not be told what the key contains. That is a privilege boundary,
-/// not log hygiene, so the byte and the offset are withheld here.
-///
-/// The diagnosis is not deleted with them. Which field failed (`private_key`), that it failed to
-/// base64-decode, and WHICH KIND of malformation it was all survive — enough for an operator to
-/// tell a truncated key from a re-wrapped one from a missing one, which is every repair they would
-/// make. Only the key's own bytes go.
-///
-/// The armor-stripped body and the DER are key material: each is sized once (no growth leaves a
-/// copy) and wiped on drop.
 fn pem_to_pkcs8_der(pem: &str) -> Result<Zeroizing<Vec<u8>>, String> {
     let mut body = Zeroizing::new(String::with_capacity(pem.len()));
     for c in pem
@@ -269,11 +170,6 @@ fn pem_to_pkcs8_der(pem: &str) -> Result<Zeroizing<Vec<u8>>, String> {
         .decode_vec(body.as_bytes(), &mut der)
         .map(|()| der)
         .map_err(|e| {
-            // The CLASS of malformation, spelled here rather than taken from `e`'s Display — see
-            // this fn's docs. Matched exhaustively and with no `_` arm on purpose: `DecodeError` is
-            // not `#[non_exhaustive]`, so a new variant in a base64 upgrade must fail the build and
-            // be classified by hand, rather than fall through a catch-all that might reinstate the
-            // leak by printing it.
             let why = match e {
                 base64::DecodeError::InvalidByte(..) => {
                     "it contains a character outside the base64 alphabet (a stray line-ending, \

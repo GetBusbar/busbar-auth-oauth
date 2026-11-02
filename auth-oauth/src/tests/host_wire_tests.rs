@@ -1,10 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
-//! T1: THE PRODUCTION [`HostWire`], over the contract's fake host (its services written as safe
-//! Rust): the clock's nanoseconds read as whole seconds, the request head's words and field
-//! block, each host refusal's connection error, each reply piece as the exchange reads it, and a
-//! whole jwt-bearer mint over it whose assertion's `iat` is the host's wall clock in SECONDS.
+//! Exercises production `HostWire` over the contract test host.
 
 use std::collections::VecDeque;
 use std::sync::Mutex;
@@ -126,7 +123,6 @@ const fn span(offset: u64, len: u64) -> FrameSpan {
 }
 
 /// THE CLOCK: the host's nanoseconds are whole seconds on the wall clock (never nanoseconds read
-/// as seconds), and the monotonic reading passes through.
 #[test]
 fn the_host_clock_reads_whole_wall_seconds() {
     let host = FakeHost::new().serve(fake::host::CLOCK_NOW, Clock);
@@ -141,7 +137,7 @@ fn the_host_clock_reads_whole_wall_seconds() {
             mono_ns: 42,
         })
     );
-    // A host with no clock answers none.
+
     let bare = FakeHost::new();
     let tables = bare.lent();
     let h = Host::of(tables);
@@ -149,7 +145,6 @@ fn the_host_clock_reads_whole_wall_seconds() {
 }
 
 /// THE HEAD: `POST`, the target's path and query (never its fragment), then each field as
-/// `name: value\r\n`; each span names its bytes.
 #[test]
 fn the_request_head_is_post_the_path_and_query_and_the_field_block() {
     let req = TokenRequest {
@@ -179,8 +174,6 @@ fn the_request_head_is_post_the_path_and_query_and_the_field_block() {
 }
 
 /// EACH HOST REFUSAL'S CONNECTION ERROR: the named failures map one to one; a failure or refusal
-/// text is the table's own for the error it names, and an unknown text is a fault (failed) or a
-/// refusal (refused).
 #[test]
 fn each_host_failure_maps_to_its_connection_error() {
     assert_eq!(error_of(&ConnFailure::Unarmed), ConnError::Unarmed);
@@ -215,10 +208,6 @@ fn each_host_failure_maps_to_its_connection_error() {
 }
 
 /// A WHOLE MINT OVER THE PRODUCTION WIRE: the request goes out on the need its style names
-/// (establish, head, body, end), each reply piece is read as the exchange reads it (the head's
-/// code and its `retry-after`, the body's bytes, the end), the connection is closed, and the
-/// assertion's `iat` is the host's wall clock in SECONDS. RED-proof: a wire that read the
-/// nanoseconds as seconds signs `iat` 1_800_000_000_999_999_999.
 #[test]
 fn a_jwt_bearer_mint_runs_over_the_host_wire_at_the_hosts_wall_seconds() {
     use base64::Engine as _;
@@ -254,7 +243,6 @@ fn a_jwt_bearer_mint_runs_over_the_host_wire_at_the_hosts_wall_seconds() {
     let tables = host.lent();
     let h = Host::of(tables);
 
-    // The read mapping, piece by piece, through the wire itself.
     let issued = AtomicU32::new(0);
     let driver = Ticket {
         slot: 1,
@@ -281,7 +269,6 @@ fn a_jwt_bearer_mint_runs_over_the_host_wire_at_the_hosts_wall_seconds() {
         "nothing more is ready"
     );
 
-    // The whole mint, the same replies again.
     {
         let mut s = SCRIPT.lock().unwrap();
         s.replies.push_back((
