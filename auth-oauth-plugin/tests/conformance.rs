@@ -1567,9 +1567,22 @@ fn actual_oauth_images_and_loaded_facts_are_distinct_and_equal() {
     let d = Dispatcher::new(DispatchConfig::default());
     let folds = Arc::new(Folds::default());
     for p in [self::linked(&folds, &d), self::dropped(&folds, &d)] {
+        let before = p.inner.crossings.load(std::sync::atomic::Ordering::SeqCst)
+            - p.inner.resumes.load(std::sync::atomic::Ordering::SeqCst);
         assert_eq!(p.kind(), KindCode::from_raw(linked.kind).unwrap());
         assert_eq!(p.kind(), KindCode::Auth);
         assert_eq!(p.name(), linked.name);
-        assert_eq!(p.max_inflight(), linked.max_inflight);
+        assert_eq!(
+            p.max_inflight(),
+            linked.max_inflight.clamp(1, 64),
+            "the actual loaded cap obeys this test bind's max_inflight_cap"
+        );
+        assert_eq!(
+            p.inner.crossings.load(std::sync::atomic::Ordering::SeqCst)
+                - p.inner.resumes.load(std::sync::atomic::Ordering::SeqCst)
+                - before,
+            0,
+            "actual facts are metadata without an operation crossing"
+        );
     }
 }
