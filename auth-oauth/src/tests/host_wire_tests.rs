@@ -1,23 +1,20 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
-//! Exercises production `HostWire` over the contract test host.
+//! Exercises production `HostWire` over the loader's real host tables.
 
 use std::collections::VecDeque;
 use std::sync::Mutex;
 
 use busbar_contract::abi::host::conn::connector::{
-    EstablishIn, ReplyIn, ReplyPiece, RequestIn, StreamIn, REPLY_BODY, REPLY_END, REPLY_HEAD,
-    REQUEST_HEAD,
+    ReplyPiece, REPLY_BODY, REPLY_END, REPLY_HEAD, REQUEST_HEAD,
 };
-use busbar_contract::abi::host::service::{ClockNowIn, ClockReading};
 use busbar_contract::abi::mechanism::call::Outcome;
 use busbar_contract::abi::mechanism::ticket::Ticket;
 use busbar_contract::abi::sdk::auth_outbound::Diags;
 use busbar_contract::abi::sdk::conn::{ConnFailure, Host};
 use busbar_contract::abi::transport::FrameSpan;
 use busbar_contract::conn::ConnError;
-use busbar_test_kit::test_support::fake::{self, FakeHost, FakeService, ServiceCall};
 
 use super::*;
 use crate::mint::{RetryAfter, TokenRequest};
@@ -25,12 +22,12 @@ use crate::mint::{RetryAfter, TokenRequest};
 /// The host's wall clock, in nanoseconds: 2027-01-15T08:00:00.999999999Z.
 const WALL_NS: u64 = 1_800_000_000_999_999_999;
 
-/// What the fake host's doubles were handed and will answer (one test drives them).
+/// What this host I/O script receives and answers (one test drives it).
 struct Script {
     /// `(target, need)` of each ESTABLISH.
     established: Vec<(String, u32)>,
     /// `(piece kind, bytes)` of each WRITE_REQUEST.
-    written: Vec<(u32, Vec<u8>)>,
+    opened: Vec<(Vec<u8>, Vec<u8>, Vec<(String, Vec<u8>)>, Vec<u8>)>,
     /// The reply pieces READ_REPLY answers, in order.
     replies: VecDeque<(ReplyPiece, Vec<u8>)>,
     /// How many CLOSEs.
@@ -39,83 +36,377 @@ struct Script {
 
 static SCRIPT: Mutex<Script> = Mutex::new(Script {
     established: Vec::new(),
-    written: Vec::new(),
+    opened: Vec::new(),
     replies: VecDeque::new(),
     closed: 0,
 });
 
-struct Clock;
-impl FakeService for Clock {
-    type In = ClockNowIn;
-    fn serve(call: &mut ServiceCall<ClockNowIn>) -> Outcome {
-        call.put(
-            |i| &i.reading,
-            ClockReading {
-                size: u32::try_from(std::mem::size_of::<ClockReading>()).unwrap(),
-                _reserved: 0,
-                wall_ns: WALL_NS,
-                mono_ns: 42,
+use busbar_contract::abi::auth::{OutboundReadyIn, OutboundReadyOut};
+use busbar_contract::abi::mechanism::rendering::ReadNeed;
+use busbar_contract::abi::sdk::auth_outbound::{Outbound, OutboundReadySlot};
+use busbar_contract::abi::sdk::life::Held;
+use busbar_contract::abi::sdk::{Instance, Lent, Out, SafeSlot};
+use busbar_contract::conn::{ConnSlab, Conns, DeclaredConns, InstanceId, NeedId, OpenDesc, Piece};
+use busbar_contract::ids::StreamId;
+use busbar_contract::services::{
+    Caller, DiskDest, HookAsk, HostServices, Later, NestAsk, Ran, Reading, RecordsList, Snapshot,
+    Stored, TrustKeyRef, UNSERVED,
+};
+use busbar_contract::transport::ConnFacts;
+use busbar_plugin_loader::dispatch::kinds::auth::Auth;
+use busbar_plugin_loader::dispatch::{
+    in_head, load_linked, out_head, Bind, ConnTable, DispatchConfig, Dispatcher, Frame, LinkedRow,
+    NoSink, Plugin,
+};
+use std::sync::Arc;
+
+#[derive(Default)]
+struct WireEndpoint {
+    slab: ConnSlab<()>,
+}
+impl HostServices for WireEndpoint {
+    fn now(&self) -> Reading {
+        Reading {
+            wall_ns: WALL_NS,
+            mono_ns: 42,
+        }
+    }
+
+    fn records_get(&self, _caller: &Caller, _kind: &str, _key: &[u8], _later: Later) -> Ran {
+        Ran::Now(Stored::refused(UNSERVED))
+    }
+    fn records_list(&self, _caller: &Caller, _list: RecordsList, _later: Later) -> Ran {
+        Ran::Now(Stored::refused(UNSERVED))
+    }
+    fn records_claim(
+        &self,
+        _caller: &Caller,
+        _kind: &str,
+        _key: &[u8],
+        _ttl_ms: u64,
+        _later: Later,
+    ) -> Ran {
+        Ran::Now(Stored::refused(UNSERVED))
+    }
+    fn sign(&self, _caller: &Caller, _data: &[u8]) -> Stored {
+        Stored::refused(UNSERVED)
+    }
+    fn trust_sight(
+        &self,
+        _caller: &Caller,
+        _counterparty: &str,
+        _hash: &str,
+        _later: Later,
+    ) -> Ran {
+        Ran::Now(Stored::refused(UNSERVED))
+    }
+    fn trust_unreached(&self, _caller: &Caller, _counterparty: &str) -> Stored {
+        Stored::refused(UNSERVED)
+    }
+    fn trust_sight_item(
+        &self,
+        _caller: &Caller,
+        _counterparty: &str,
+        _item: &str,
+        _digest: &str,
+    ) -> Stored {
+        Stored::refused(UNSERVED)
+    }
+    fn trust_decide(
+        &self,
+        _caller: &Caller,
+        _key: TrustKeyRef<'_>,
+        _expected: Option<&str>,
+        _approve: bool,
+    ) -> Stored {
+        Stored::refused(UNSERVED)
+    }
+    fn trust_state(&self, _caller: &Caller, _counterparty: &str) -> Stored {
+        Stored::refused(UNSERVED)
+    }
+    fn trust_serves(
+        &self,
+        _caller: &Caller,
+        _counterparty: &str,
+        _item: Option<&str>,
+        _digest: Option<&str>,
+    ) -> Stored {
+        Stored::refused(UNSERVED)
+    }
+    fn trust_due(&self, _caller: &Caller) -> Stored {
+        Stored::refused(UNSERVED)
+    }
+    fn trust_verify(
+        &self,
+        _caller: &Caller,
+        _counterparty: &str,
+        _payload: &[u8],
+        _signatures: &[u8],
+    ) -> Stored {
+        Stored::refused(UNSERVED)
+    }
+    fn entitlement_check(&self, _caller: &Caller, _unit: Option<u64>, _target: &str) -> Stored {
+        Stored::refused(UNSERVED)
+    }
+    fn session_emit(&self, _caller: &Caller, _session: u64, _bytes: &[u8]) -> Stored {
+        Stored::refused(UNSERVED)
+    }
+    fn ticket_mint(
+        &self,
+        _caller: &Caller,
+        _unit: Option<u64>,
+        _ttl_secs: u64,
+        _record: &[u8],
+    ) -> Stored {
+        Stored::refused(UNSERVED)
+    }
+    fn ticket_take(&self, _caller: &Caller, _unit: Option<u64>) -> Stored {
+        Stored::refused(UNSERVED)
+    }
+    fn random_fill(&self, _len: u64) -> Stored {
+        Stored::refused(UNSERVED)
+    }
+    fn records_secret(&self, _kind: &str, _id: &str, _later: Later) -> Ran {
+        Ran::Now(Stored::refused(UNSERVED))
+    }
+    fn unit_nest(&self, _caller: &Caller, _unit: Option<u64>, _ask: NestAsk, _later: Later) -> Ran {
+        Ran::Now(Stored::refused(UNSERVED))
+    }
+    fn work_open(
+        &self,
+        _caller: &Caller,
+        _unit: Option<u64>,
+        _kind: &str,
+        _record: &[u8],
+        _later: Later,
+    ) -> Ran {
+        Ran::Now(Stored::refused(UNSERVED))
+    }
+    fn work_find(
+        &self,
+        _caller: &Caller,
+        _unit: Option<u64>,
+        _reference: &[u8],
+        _later: Later,
+    ) -> Ran {
+        Ran::Now(Stored::refused(UNSERVED))
+    }
+    fn work_settle(
+        &self,
+        _caller: &Caller,
+        _unit: Option<u64>,
+        _handle: u64,
+        _record: &[u8],
+        _later: Later,
+    ) -> Ran {
+        Ran::Now(Stored::refused(UNSERVED))
+    }
+    fn work_resume(
+        &self,
+        _caller: &Caller,
+        _unit: Option<u64>,
+        _handle: u64,
+        _later: Later,
+    ) -> Ran {
+        Ran::Now(Stored::refused(UNSERVED))
+    }
+    fn disk_append(&self, _dest: &DiskDest, _bytes: Vec<u8>, _later: Later) -> Ran {
+        Ran::Now(Stored::refused(UNSERVED))
+    }
+    fn verify_lookup(&self, _caller: &Caller, _key: &[u8], _later: Later) -> Ran {
+        Ran::Now(Stored::refused(UNSERVED))
+    }
+    fn verify_store(&self, _caller: &Caller, _key: &[u8], _entry: &[u8], _ttl_ms: u64) -> Stored {
+        Stored::refused(UNSERVED)
+    }
+    fn content_scan(
+        &self,
+        _caller: &Caller,
+        _unit: Option<u64>,
+        _content: &[u8],
+        _later: Later,
+    ) -> Ran {
+        Ran::Now(Stored::refused(UNSERVED))
+    }
+    fn hook_call(&self, _caller: &Caller, _unit: Option<u64>, _ask: HookAsk, _later: Later) -> Ran {
+        Ran::Now(Stored::refused(UNSERVED))
+    }
+    fn snapshot_read(&self, _caller: &Caller, _scope: u32) -> Snapshot {
+        Snapshot::Refused(UNSERVED)
+    }
+}
+impl DeclaredConns for WireEndpoint {
+    fn declare(
+        &self,
+        owner: InstanceId,
+        need: NeedId,
+        _: &ReadNeed,
+        _: Option<&str>,
+        _: Option<&str>,
+    ) -> Result<(), ConnError> {
+        self.slab.declare(owner, need);
+        Ok(())
+    }
+    fn declared(&self, owner: InstanceId, need: NeedId) -> Option<Result<(), ConnError>> {
+        self.slab.check_need(owner, need).ok().map(Ok)
+    }
+    fn framed(&self, _: InstanceId, _: NeedId) -> bool {
+        true
+    }
+    fn serves_scheme(&self, scheme: &str) -> bool {
+        scheme == "http"
+    }
+}
+impl Conns for WireEndpoint {
+    fn open(
+        &self,
+        owner: InstanceId,
+        need: NeedId,
+        desc: &OpenDesc<'_>,
+    ) -> Result<ConnId, ConnError> {
+        self.slab.check_need(owner, need)?;
+        let mut script = SCRIPT.lock().unwrap();
+        script.established.push((desc.target.to_owned(), need.0));
+        script.opened.push((
+            desc.method.to_vec(),
+            desc.head_target.to_vec(),
+            desc.fields
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_vec()))
+                .collect(),
+            desc.body.to_vec(),
+        ));
+        self.slab.insert(owner, need, ())
+    }
+    fn write(
+        &self,
+        _: InstanceId,
+        _: ConnId,
+        bytes: &[u8],
+        _: bool,
+        _: bool,
+    ) -> Result<usize, ConnError> {
+        Ok(bytes.len())
+    }
+    fn read(
+        &self,
+        owner: InstanceId,
+        id: ConnId,
+        _: u64,
+        buf: &mut [u8],
+    ) -> Result<Piece, ConnError> {
+        self.slab.get(owner, id)?;
+        let (p, bytes) = SCRIPT
+            .lock()
+            .unwrap()
+            .replies
+            .pop_front()
+            .ok_or(ConnError::Pending)?;
+        assert!(bytes.len() <= buf.len());
+        buf[..bytes.len()].copy_from_slice(&bytes);
+        Ok(Piece {
+            kind: match p.kind {
+                REPLY_HEAD => PieceKind::Fields,
+                REPLY_BODY => PieceKind::Body,
+                REPLY_END => PieceKind::Completion,
+                _ => panic!("unexpected reply"),
             },
-        );
-        Outcome::Ready
+            stream: StreamId(0),
+            len: bytes.len(),
+            end: p.kind == REPLY_END,
+            status: None,
+            status_code: if p.kind == REPLY_HEAD {
+                Some(p.code)
+            } else {
+                None
+            },
+            status_namespace: None,
+            retry_after_secs: None,
+            fault: None,
+            reason: None,
+            declared_len: None,
+        })
     }
-}
-
-struct Establish;
-impl FakeService for Establish {
-    type In = EstablishIn;
-    fn serve(call: &mut ServiceCall<EstablishIn>) -> Outcome {
-        let target = call.text(|i| &i.target).to_string();
-        let need = call.input().need;
-        SCRIPT.lock().unwrap().established.push((target, need));
-        call.set_value(5);
-        Outcome::Ready
+    fn wait(&self, _: InstanceId, _: &[ConnId], _: u64) -> Result<usize, ConnError> {
+        Err(ConnError::Pending)
     }
-}
-
-struct WriteRequest;
-impl FakeService for WriteRequest {
-    type In = RequestIn;
-    fn serve(call: &mut ServiceCall<RequestIn>) -> Outcome {
-        let kind = call.lent(|i| &i.piece)[0].kind;
-        let bytes = call.lent(|i| &i.buf).to_vec();
-        let n = bytes.len() as u64;
-        SCRIPT.lock().unwrap().written.push((kind, bytes));
-        call.set_len(n);
-        Outcome::Ready
+    fn facts(&self, _: InstanceId, _: ConnId) -> Result<ConnFacts, ConnError> {
+        Err(ConnError::Closed)
     }
-}
-
-struct ReadReply;
-impl FakeService for ReadReply {
-    type In = ReplyIn;
-    fn serve(call: &mut ServiceCall<ReplyIn>) -> Outcome {
-        let Some((piece, bytes)) = SCRIPT.lock().unwrap().replies.pop_front() else {
-            return Outcome::Pending;
-        };
-        assert!(call.fill_lent(|i| &i.buf, &bytes), "the buffer holds it");
-        call.put(|i| &i.piece, piece);
-        Outcome::Ready
-    }
-}
-
-struct Close;
-impl FakeService for Close {
-    type In = StreamIn;
-    fn serve(_: &mut ServiceCall<StreamIn>) -> Outcome {
+    fn close(&self, owner: InstanceId, id: ConnId) -> Result<(), ConnError> {
+        self.slab.remove(owner, id)?;
         SCRIPT.lock().unwrap().closed += 1;
-        Outcome::Ready
+        Ok(())
     }
 }
-
-/// A fake host serving the clock and the framed connector.
-fn fake_host() -> FakeHost {
-    FakeHost::new()
-        .serve(fake::host::CLOCK_NOW, Clock)
-        .serve(fake::conn::ESTABLISH, Establish)
-        .serve(fake::conn::WRITE_REQUEST, WriteRequest)
-        .serve(fake::conn::READ_REPLY, ReadReply)
-        .serve(fake::conn::CLOSE, Close)
+thread_local! { static CAPTURED: std::cell::RefCell<Option<Host>> = const { std::cell::RefCell::new(None) }; }
+struct CaptureHost;
+impl SafeSlot for CaptureHost {
+    type In = OutboundReadyIn;
+    type Out = OutboundReadyOut;
+    type State = Held<Outbound<crate::instance::Oauth>>;
+    fn call(
+        instance: Instance<'_, Self::State>,
+        input: Lent<'_, OutboundReadyIn>,
+        out: Out<'_, OutboundReadyOut>,
+    ) -> Outcome {
+        CAPTURED.with(|slot| *slot.borrow_mut() = instance.get().unwrap().host().cloned());
+        OutboundReadySlot::<crate::instance::Oauth>::call(instance, input, out)
+    }
+}
+mod host_bridge {
+    busbar_contract::plugin_door! { ops:busbar_contract::abi::auth::Ops, statement:crate::STATEMENT,
+    lifecycle:life(busbar_contract::abi::sdk::auth_outbound::Outbound<crate::instance::Oauth>),
+    kind_ops:{outbound_ready:busbar_contract::abi::sdk::Safe<super::CaptureHost>}, }
+}
+struct HostedWire {
+    host: Host,
+    _plugin: Plugin<Auth>,
+    _dispatcher: Dispatcher,
+}
+fn host_wire() -> HostedWire {
+    use busbar_contract::abi::sdk::test_support::zeroed;
+    let provider = Arc::new(WireEndpoint::default());
+    let d = Dispatcher::with_services(DispatchConfig::default(), provider.clone());
+    let p = load_linked::<Auth>(
+        &LinkedRow::of_macro(host_bridge::MACRO_DOOR).unwrap(),
+        Bind {
+            instance: Arc::from("wire-test"),
+            max_inflight_cap: 64,
+            sink: Arc::new(NoSink),
+            dispatcher: d.adopter(),
+            conns: ConnTable::Host(provider),
+        },
+    )
+    .unwrap();
+    let mut open: Frame<
+        busbar_contract::abi::mechanism::lifecycle::OpenIn,
+        busbar_contract::abi::mechanism::lifecycle::OpenOut,
+    > = Frame::new(zeroed(), zeroed());
+    open.input.head = in_head();
+    open.out.head = out_head();
+    open.input.generation = 1;
+    assert_eq!(
+        p.call(
+            busbar_contract::abi::mechanism::lifecycle::slot::OPEN,
+            &mut open
+        )
+        .outcome,
+        Outcome::Ready
+    );
+    let mut capture: Frame<OutboundReadyIn, OutboundReadyOut> = Frame::new(zeroed(), zeroed());
+    capture.input.head = in_head();
+    capture.out.head = out_head();
+    p.call(
+        busbar_contract::abi::auth::slot::OUTBOUND_READY,
+        &mut capture,
+    );
+    let host = CAPTURED.with(|slot| slot.borrow_mut().take()).unwrap();
+    HostedWire {
+        host,
+        _plugin: p,
+        _dispatcher: d,
+    }
 }
 
 const fn span(offset: u64, len: u64) -> FrameSpan {
@@ -125,9 +416,8 @@ const fn span(offset: u64, len: u64) -> FrameSpan {
 /// THE CLOCK: the host's nanoseconds are whole seconds on the wall clock (never nanoseconds read
 #[test]
 fn the_host_clock_reads_whole_wall_seconds() {
-    let host = FakeHost::new().serve(fake::host::CLOCK_NOW, Clock);
-    let tables = host.lent();
-    let h = Host::of(tables);
+    let hosted = host_wire();
+    let h = hosted.host.clone();
     let issued = AtomicU32::new(0);
     let wire = HostWire::new(&h, Ticket::NONE, &issued);
     assert_eq!(
@@ -138,9 +428,8 @@ fn the_host_clock_reads_whole_wall_seconds() {
         })
     );
 
-    let bare = FakeHost::new();
-    let tables = bare.lent();
-    let h = Host::of(tables);
+    extern "C" fn wake(_: busbar_contract::abi::mechanism::ticket::HostCtx, _: Ticket) {}
+    let h = Host::wake_only(busbar_contract::abi::mechanism::ticket::HostCtx::NONE, wake);
     assert_eq!(HostWire::new(&h, Ticket::NONE, &issued).clock(), None);
 }
 
@@ -239,36 +528,79 @@ fn a_jwt_bearer_mint_runs_over_the_host_wire_at_the_hosts_wall_seconds() {
             Vec::new(),
         ));
     }
-    let host = fake_host();
-    let tables = host.lent();
-    let h = Host::of(tables);
+    let hosted = host_wire();
+    let h = hosted.host.clone();
 
     let issued = AtomicU32::new(0);
-    let driver = Ticket {
-        slot: 1,
-        generation: 1,
-    };
+    let driver = Ticket::NONE;
     let wire = HostWire::new(&h, driver, &issued);
+    let mut connector = h.connector_from(driver, 0);
+    let stream = match connector.establish(1, Some("https://oauth2.googleapis.com/token"), "") {
+        std::task::Poll::Ready(Ok(id)) => id,
+        _ => panic!("declared stream"),
+    };
+    let req = TokenRequest {
+        need: 1,
+        target: "https://oauth2.googleapis.com/token".to_owned(),
+        fields: vec![],
+        body: busbar_contract::abi::sdk::cred::FormBody::new(),
+    };
+    let (bytes, piece) = head(&req, 0).unwrap();
+    assert!(matches!(
+        connector.write_request(stream, &piece, &bytes),
+        std::task::Poll::Ready(Ok(_))
+    ));
+    for kind in [
+        busbar_contract::abi::host::conn::connector::REQUEST_BODY,
+        busbar_contract::abi::host::conn::connector::REQUEST_END,
+    ] {
+        assert!(matches!(
+            connector.write_request(
+                stream,
+                &busbar_contract::abi::host::conn::connector::RequestPiece {
+                    kind,
+                    ..Default::default()
+                },
+                &[]
+            ),
+            std::task::Poll::Ready(Ok(_))
+        ));
+    }
+    issued.store(connector.issued(), std::sync::atomic::Ordering::Release);
     let mut buf = [0_u8; 1024];
-    let got = wire.read(ConnId(5), &mut buf).expect("the head");
+    let got = wire.read(ConnId(stream), &mut buf).expect("the head");
     assert_eq!(
         (got.kind, got.status, got.retry_after),
         (PieceKind::Fields, Some(200), Some(RetryAfter::Secs(7)))
     );
-    let got = wire.read(ConnId(5), &mut buf).expect("the body");
+    let got = wire.read(ConnId(stream), &mut buf).expect("the body");
     assert_eq!(
         (got.kind, got.len, got.end),
         (PieceKind::Body, body.len(), false)
     );
     assert_eq!(&buf[..got.len], &body[..]);
-    let got = wire.read(ConnId(5), &mut buf).expect("the end");
-    assert_eq!((got.kind, got.end), (PieceKind::Completion, true));
+    let terminal = SCRIPT
+        .lock()
+        .unwrap()
+        .replies
+        .pop_front()
+        .expect("queued completion");
     assert_eq!(
-        wire.read(ConnId(5), &mut buf).err(),
+        wire.read(ConnId(stream), &mut buf).err(),
         Some(ConnError::Pending),
         "nothing more is ready"
     );
+    SCRIPT.lock().unwrap().replies.push_front(terminal);
+    let got = wire.read(ConnId(stream), &mut buf).expect("the end");
+    assert_eq!((got.kind, got.end), (PieceKind::Completion, true));
 
+    wire.close(ConnId(stream));
+    {
+        let mut s = SCRIPT.lock().unwrap();
+        s.established.clear();
+        s.opened.clear();
+        s.closed = 0;
+    }
     {
         let mut s = SCRIPT.lock().unwrap();
         s.replies.push_back((
@@ -310,17 +642,19 @@ fn a_jwt_bearer_mint_runs_over_the_host_wire_at_the_hosts_wall_seconds() {
         s.established,
         [("https://oauth2.googleapis.com/token".to_string(), 1)]
     );
-    let kinds: Vec<u32> = s.written.iter().map(|(k, _)| *k).collect();
+    assert_eq!(s.opened.len(), 1);
+    let (method, path, fields, body) = &s.opened[0];
+    assert_eq!(method, b"POST");
+    assert_eq!(path, b"/token");
     assert_eq!(
-        kinds,
-        [
-            REQUEST_HEAD,
-            busbar_contract::abi::host::conn::connector::REQUEST_BODY,
-            busbar_contract::abi::host::conn::connector::REQUEST_END,
-        ]
+        fields,
+        &[(
+            "content-type".to_owned(),
+            b"application/x-www-form-urlencoded".to_vec()
+        )]
     );
     assert_eq!(s.closed, 1, "the connection is closed");
-    let form = String::from_utf8(s.written[1].1.clone()).expect("a form");
+    let form = String::from_utf8(body.clone()).expect("a form");
     let assertion = form.split("assertion=").nth(1).expect("an assertion");
     let claims = assertion.split('.').nth(1).expect("a claims part");
     let claims: serde_json::Value = serde_json::from_slice(

@@ -3,12 +3,6 @@
 
 //! Exercises OAuth auth operations through the linked and dropped-in doors.
 
-busbar_test_kit::conformance_suite! {
-    door: busbar_auth_oauth::door,
-    cdylib: "busbar_auth_oauth_plugin",
-    inputs: include_str!("conformance.json"),
-}
-
 use std::ffi::c_void;
 use std::mem::zeroed;
 use std::sync::{Arc, Mutex};
@@ -102,10 +96,10 @@ fn linked(folds: &Arc<Folds>, d: &Dispatcher) -> Plugin<Auth> {
         .expect("the linked door loads")
 }
 
-fn dropped(folds: &Arc<Folds>, d: &Dispatcher) -> Option<Plugin<Auth>> {
-    let path = busbar_test_kit::conformance::cdylib_of("busbar_auth_oauth_plugin");
+fn dropped(folds: &Arc<Folds>, d: &Dispatcher) -> Plugin<Auth> {
+    let path = built_plugin_image();
     let stated = rendering_of(busbar_auth_oauth::door).expect("the door renders its Statement");
-    Some(load_dropped::<Auth>(&path, &stated, bind(folds, d)).expect("the dropped door loads"))
+    load_dropped::<Auth>(&path, &stated, bind(folds, d)).expect("the dropped door loads")
 }
 
 fn err(e: &Option<Vec<u8>>) -> String {
@@ -427,7 +421,8 @@ fn compiled_in_and_dropped_in_answer_every_op_identically() {
     assert_eq!(linked_t, EXPECTED, "the linked door");
     assert_eq!(linked_f, EXPECTED_FOLDS, "the linked door's folds");
     let folds = Arc::new(Folds::default());
-    if let Some(p) = dropped(&folds, &d) {
+    {
+        let p = dropped(&folds, &d);
         let (dropped_t, dropped_f) = run(&p, &folds);
         assert_eq!(dropped_t, linked_t, "the dropped door");
         assert_eq!(dropped_f, linked_f, "the dropped door's folds");
@@ -609,13 +604,198 @@ mod mint_door {
 
     struct Clock(Instant);
 
-    impl busbar_test_kit::services_double::ServicesDouble for Clock {
+    use busbar_contract::services::{
+        Caller, DiskDest, HookAsk, HostServices, Later, NestAsk, Ran, RecordsList, Snapshot,
+        Stored, TrustKeyRef, UNSERVED,
+    };
+
+    impl HostServices for Clock {
         fn now(&self) -> busbar_contract::services::Reading {
             let elapsed = u64::try_from(self.0.elapsed().as_nanos()).expect("test clock fits");
             busbar_contract::services::Reading {
                 wall_ns: 1_798_761_600_000_000_000 + elapsed,
                 mono_ns: elapsed,
             }
+        }
+        fn records_get(&self, _caller: &Caller, _kind: &str, _key: &[u8], _later: Later) -> Ran {
+            Ran::Now(Stored::refused(UNSERVED))
+        }
+        fn records_list(&self, _caller: &Caller, _list: RecordsList, _later: Later) -> Ran {
+            Ran::Now(Stored::refused(UNSERVED))
+        }
+        fn records_claim(
+            &self,
+            _caller: &Caller,
+            _kind: &str,
+            _key: &[u8],
+            _ttl_ms: u64,
+            _later: Later,
+        ) -> Ran {
+            Ran::Now(Stored::refused(UNSERVED))
+        }
+        fn sign(&self, _caller: &Caller, _data: &[u8]) -> Stored {
+            Stored::refused(UNSERVED)
+        }
+        fn trust_sight(
+            &self,
+            _caller: &Caller,
+            _counterparty: &str,
+            _hash: &str,
+            _later: Later,
+        ) -> Ran {
+            Ran::Now(Stored::refused(UNSERVED))
+        }
+        fn trust_unreached(&self, _caller: &Caller, _counterparty: &str) -> Stored {
+            Stored::refused(UNSERVED)
+        }
+        fn trust_sight_item(
+            &self,
+            _caller: &Caller,
+            _counterparty: &str,
+            _item: &str,
+            _digest: &str,
+        ) -> Stored {
+            Stored::refused(UNSERVED)
+        }
+        fn trust_decide(
+            &self,
+            _caller: &Caller,
+            _key: TrustKeyRef<'_>,
+            _expected: Option<&str>,
+            _approve: bool,
+        ) -> Stored {
+            Stored::refused(UNSERVED)
+        }
+        fn trust_state(&self, _caller: &Caller, _counterparty: &str) -> Stored {
+            Stored::refused(UNSERVED)
+        }
+        fn trust_serves(
+            &self,
+            _caller: &Caller,
+            _counterparty: &str,
+            _item: Option<&str>,
+            _digest: Option<&str>,
+        ) -> Stored {
+            Stored::refused(UNSERVED)
+        }
+        fn trust_due(&self, _caller: &Caller) -> Stored {
+            Stored::refused(UNSERVED)
+        }
+        fn trust_verify(
+            &self,
+            _caller: &Caller,
+            _counterparty: &str,
+            _payload: &[u8],
+            _signatures: &[u8],
+        ) -> Stored {
+            Stored::refused(UNSERVED)
+        }
+        fn entitlement_check(&self, _caller: &Caller, _unit: Option<u64>, _target: &str) -> Stored {
+            Stored::refused(UNSERVED)
+        }
+        fn session_emit(&self, _caller: &Caller, _session: u64, _bytes: &[u8]) -> Stored {
+            Stored::refused(UNSERVED)
+        }
+        fn ticket_mint(
+            &self,
+            _caller: &Caller,
+            _unit: Option<u64>,
+            _ttl_secs: u64,
+            _record: &[u8],
+        ) -> Stored {
+            Stored::refused(UNSERVED)
+        }
+        fn ticket_take(&self, _caller: &Caller, _unit: Option<u64>) -> Stored {
+            Stored::refused(UNSERVED)
+        }
+        fn random_fill(&self, _len: u64) -> Stored {
+            Stored::refused(UNSERVED)
+        }
+        fn records_secret(&self, _kind: &str, _id: &str, _later: Later) -> Ran {
+            Ran::Now(Stored::refused(UNSERVED))
+        }
+        fn unit_nest(
+            &self,
+            _caller: &Caller,
+            _unit: Option<u64>,
+            _ask: NestAsk,
+            _later: Later,
+        ) -> Ran {
+            Ran::Now(Stored::refused(UNSERVED))
+        }
+        fn work_open(
+            &self,
+            _caller: &Caller,
+            _unit: Option<u64>,
+            _kind: &str,
+            _record: &[u8],
+            _later: Later,
+        ) -> Ran {
+            Ran::Now(Stored::refused(UNSERVED))
+        }
+        fn work_find(
+            &self,
+            _caller: &Caller,
+            _unit: Option<u64>,
+            _reference: &[u8],
+            _later: Later,
+        ) -> Ran {
+            Ran::Now(Stored::refused(UNSERVED))
+        }
+        fn work_settle(
+            &self,
+            _caller: &Caller,
+            _unit: Option<u64>,
+            _handle: u64,
+            _record: &[u8],
+            _later: Later,
+        ) -> Ran {
+            Ran::Now(Stored::refused(UNSERVED))
+        }
+        fn work_resume(
+            &self,
+            _caller: &Caller,
+            _unit: Option<u64>,
+            _handle: u64,
+            _later: Later,
+        ) -> Ran {
+            Ran::Now(Stored::refused(UNSERVED))
+        }
+        fn disk_append(&self, _dest: &DiskDest, _bytes: Vec<u8>, _later: Later) -> Ran {
+            Ran::Now(Stored::refused(UNSERVED))
+        }
+        fn verify_lookup(&self, _caller: &Caller, _key: &[u8], _later: Later) -> Ran {
+            Ran::Now(Stored::refused(UNSERVED))
+        }
+        fn verify_store(
+            &self,
+            _caller: &Caller,
+            _key: &[u8],
+            _entry: &[u8],
+            _ttl_ms: u64,
+        ) -> Stored {
+            Stored::refused(UNSERVED)
+        }
+        fn content_scan(
+            &self,
+            _caller: &Caller,
+            _unit: Option<u64>,
+            _content: &[u8],
+            _later: Later,
+        ) -> Ran {
+            Ran::Now(Stored::refused(UNSERVED))
+        }
+        fn hook_call(
+            &self,
+            _caller: &Caller,
+            _unit: Option<u64>,
+            _ask: HookAsk,
+            _later: Later,
+        ) -> Ran {
+            Ran::Now(Stored::refused(UNSERVED))
+        }
+        fn snapshot_read(&self, _caller: &Caller, _scope: u32) -> Snapshot {
+            Snapshot::Refused(UNSERVED)
         }
     }
 
@@ -793,9 +973,7 @@ mod mint_door {
         let table = Arc::new(TokenEndpoint::default());
         let dispatcher = Arc::new(Dispatcher::with_services(
             DispatchConfig::default(),
-            Arc::new(busbar_test_kit::services_double::Double(Clock(
-                Instant::now(),
-            ))),
+            Arc::new(Clock(Instant::now())),
         ));
         let row = LinkedRow::of(door).expect("the door states its Statement");
         let plugin = load_linked::<Auth>(
@@ -951,4 +1129,370 @@ mod mint_door {
             );
         }
     }
+}
+
+fn built_plugin_image() -> std::path::PathBuf {
+    let image = std::env::var_os("BUSBAR_PLUGIN_CDYLIB")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            let test_binary = std::env::current_exe().expect("test binary path");
+            test_binary
+                .parent()
+                .and_then(std::path::Path::parent)
+                .expect("target profile directory")
+                .join(format!(
+                    "{}busbar_auth_oauth_plugin{}",
+                    std::env::consts::DLL_PREFIX,
+                    std::env::consts::DLL_SUFFIX
+                ))
+        });
+    assert!(
+        image.is_absolute(),
+        "BUSBAR_PLUGIN_CDYLIB must name an absolute actual product image"
+    );
+    assert!(
+        image.is_file(),
+        "build the actual dropped-in plugin before running this test: {}",
+        image.display()
+    );
+    image
+}
+
+#[path = "support/oauth_grants.rs"]
+mod oauth_grants;
+
+static RESTATED: std::sync::atomic::AtomicPtr<Door> =
+    std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
+extern "C" fn restated_door() -> &'static Door {
+    // SAFETY: admission_negative_cases installs a leaked immutable Door before entering it.
+    unsafe { &*RESTATED.load(std::sync::atomic::Ordering::SeqCst) }
+}
+extern "C" fn restated_raw() -> *const Door {
+    std::ptr::from_ref(restated_door())
+}
+fn restate(parts: DoorParts) {
+    // SAFETY: callers retain the real product's static operations and Statement, except the
+    // deliberately malformed admission field. Replacement Statements are leaked for the test.
+    let door = Box::leak(Box::new(unsafe { Door::__from_parts(parts) }));
+    RESTATED.store(door, std::sync::atomic::Ordering::SeqCst);
+}
+#[test]
+fn actual_product_admission_negative_cases() {
+    use busbar_contract::abi::mechanism::{rendering::RENDERING_MAGIC, KindCode};
+    use busbar_plugin_loader::dispatch::{
+        kinds::{
+            export::Export, hook::Hook, plane::Plane, secret::Secret, store::Store,
+            transport::Transport,
+        },
+        LoadError,
+    };
+    let d = Dispatcher::new(DispatchConfig::default());
+    let f = Arc::new(Folds::default());
+    let actual = busbar_auth_oauth::door().parts();
+    let stated = rendering_of(busbar_auth_oauth::door).unwrap();
+    let path = built_plugin_image();
+    linked(&f, &d);
+    dropped(&f, &d);
+    let mut lie = stated.clone();
+    let last = lie.len() - 1;
+    lie[last] ^= 1;
+    assert_eq!(
+        load_linked::<Auth>(
+            &LinkedRow {
+                statement: lie.clone(),
+                ..row(busbar_auth_oauth::door)
+            },
+            bind(&f, &d)
+        )
+        .err(),
+        Some(LoadError::StatementMismatch)
+    );
+    assert_eq!(
+        load_dropped::<Auth>(&path, &lie, bind(&f, &d)).err(),
+        Some(LoadError::StatementMismatch)
+    );
+    // SAFETY: the product's Statement is static and copied before changing only version.
+    let statement = unsafe { actual.statement.read_unaligned() };
+    let other = Box::leak(Box::new(busbar_contract::abi::mechanism::door::Statement {
+        version: s("conformance-other-version"),
+        ..statement
+    }));
+    restate(DoorParts {
+        statement: other,
+        ..actual
+    });
+    assert_eq!(
+        load_linked::<Auth>(
+            &LinkedRow {
+                statement: stated.clone(),
+                door: restated_raw
+            },
+            bind(&f, &d)
+        )
+        .err(),
+        Some(LoadError::StatementMismatch)
+    );
+    let host = KindCode::Auth.abi_version();
+    for abi in [host + 1, host.wrapping_sub(1)] {
+        restate(DoorParts {
+            kind_abi: abi,
+            ..actual
+        });
+        let want = LoadError::KindAbi {
+            kind: KindCode::Auth,
+            door: abi,
+            host,
+        };
+        assert_eq!(rendering_of(restated_door).err(), Some(want.clone()));
+        assert_eq!(
+            LinkedRow::of(restated_door)
+                .and_then(|r| load_linked::<Auth>(&r, bind(&f, &d)))
+                .err(),
+            Some(want)
+        );
+        let mut manifest = stated.clone();
+        let at = RENDERING_MAGIC.len() + 8;
+        manifest[at..at + 4].copy_from_slice(&abi.to_le_bytes());
+        assert_eq!(
+            load_dropped::<Auth>(&path, &manifest, bind(&f, &d)).err(),
+            Some(LoadError::ManifestKindAbi { stated: abi, host })
+        );
+    }
+    let host = KindCode::Auth.layout_fingerprint();
+    assert_eq!(actual.layout, host);
+    for layout in [host ^ 1, 0] {
+        restate(DoorParts { layout, ..actual });
+        let refused = rendering_of(restated_door).expect_err("different layout cannot be packed");
+        assert!(
+            matches!(&refused,LoadError::KindLayout{kind:KindCode::Auth,stated,host:read,..} if *stated==layout&&*read==host)
+        );
+        assert!(refused
+            .to_string()
+            .contains("rebuild against this busbar-contract"));
+        assert_eq!(
+            load_linked::<Auth>(
+                &LinkedRow {
+                    statement: stated.clone(),
+                    door: restated_raw
+                },
+                bind(&f, &d)
+            )
+            .err(),
+            Some(refused.clone())
+        );
+        assert_eq!(
+            LinkedRow::of(restated_door)
+                .and_then(|r| load_linked::<Auth>(&r, bind(&f, &d)))
+                .err(),
+            Some(refused)
+        );
+    }
+    macro_rules! wrong_kind {
+        ($kind:ty,$code:expr) => {{
+            let want = $code;
+            let manifest_error = LoadError::ManifestKind {
+                stated: KindCode::Auth,
+                want,
+            };
+            assert_eq!(
+                load_linked::<$kind>(&row(busbar_auth_oauth::door), bind(&f, &d)).err(),
+                Some(manifest_error.clone())
+            );
+            assert_eq!(
+                load_dropped::<$kind>(&path, &stated, bind(&f, &d)).err(),
+                Some(manifest_error)
+            );
+            // A row claiming the requested kind reaches validation of the actual auth door.
+            // Preserve the distinct door-kind refusal after the manifest precheck.
+            let mut claiming = stated.clone();
+            let kind_at = RENDERING_MAGIC.len() + 4;
+            claiming[kind_at..kind_at + 4].copy_from_slice(&(want as u32).to_le_bytes());
+            claiming[kind_at + 4..kind_at + 8].copy_from_slice(&want.abi_version().to_le_bytes());
+            let door_error = LoadError::WrongKind {
+                door: KindCode::Auth,
+                want,
+            };
+            assert_eq!(
+                load_linked::<$kind>(
+                    &LinkedRow {
+                        statement: claiming.clone(),
+                        ..row(busbar_auth_oauth::door)
+                    },
+                    bind(&f, &d)
+                )
+                .err(),
+                Some(door_error.clone())
+            );
+            assert_eq!(
+                load_dropped::<$kind>(&path, &claiming, bind(&f, &d)).err(),
+                Some(door_error)
+            );
+        }};
+    }
+    wrong_kind!(Store, KindCode::Store);
+    wrong_kind!(Secret, KindCode::Secret);
+    wrong_kind!(Hook, KindCode::Hook);
+    wrong_kind!(Export, KindCode::Export);
+    wrong_kind!(Plane, KindCode::Plane);
+    wrong_kind!(Transport, KindCode::Transport);
+}
+
+// SAFETY CONTRACT: this callback only receives the dispatcher's live lifecycle buffers.
+unsafe extern "C" fn failing_ready(
+    _: *mut c_void,
+    _: *const c_void,
+    out: *mut c_void,
+) -> RawOutcome {
+    let failure = RawOutcome::of(Outcome::Failed);
+    // SAFETY: ready's output begins with the host's writable OutHead.
+    unsafe {
+        let head = &mut *out.cast::<busbar_contract::abi::mechanism::call::OutHead>();
+        head.outcome = failure;
+        head.error = s("OAuth conformance ready failure");
+    }
+    failure
+}
+extern "C" fn ready_failure_door() -> &'static Door {
+    // SAFETY: the real product operations and Statement remain static; only ready is perturbed.
+    Box::leak(Box::new(unsafe {
+        Door::__from_parts(DoorParts {
+            ready: Some(failing_ready),
+            ..busbar_auth_oauth::door().parts()
+        })
+    }))
+}
+#[test]
+fn actual_oauth_ready_failure_refuses_boot_once() {
+    let d = Dispatcher::new(DispatchConfig::default());
+    let f = Arc::new(Folds::default());
+    let p = load_linked::<Auth>(&row(ready_failure_door), bind(&f, &d)).unwrap();
+    assert!(p.has_ready());
+    let mut open: Frame<OpenIn, OpenOut> = Frame::new(z(), z());
+    open.input.head = in_head();
+    open.out.head = out_head();
+    assert_eq!(p.call(life::OPEN, &mut open).outcome, Outcome::Ready);
+    let before = p.inner.crossings.load(std::sync::atomic::Ordering::SeqCst)
+        - p.inner.resumes.load(std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(
+        p.ready(&d, std::time::Duration::from_secs(10)),
+        Err(format!(
+            "plugin '{}' ready failed: OAuth conformance ready failure",
+            p.name()
+        ))
+    );
+    assert_eq!(
+        p.inner.crossings.load(std::sync::atomic::Ordering::SeqCst)
+            - p.inner.resumes.load(std::sync::atomic::Ordering::SeqCst)
+            - before,
+        1
+    );
+}
+#[test]
+fn actual_oauth_serving_requires_connection_table_both_doors() {
+    use busbar_plugin_loader::dispatch::{ConnTable, LoadError};
+    let d = Dispatcher::new(DispatchConfig::default());
+    let f = Arc::new(Folds::default());
+    let b = || Bind {
+        conns: ConnTable::NoNeeds,
+        ..bind(&f, &d)
+    };
+    let want = LoadError::NoConnectionTable {
+        plugin: "busbar-auth-oauth".into(),
+        needs: busbar_auth_oauth::NEEDS.len(),
+    };
+    assert_eq!(
+        load_linked::<Auth>(&row(busbar_auth_oauth::door), b()).err(),
+        Some(want.clone())
+    );
+    assert_eq!(
+        load_dropped::<Auth>(
+            &built_plugin_image(),
+            &rendering_of(busbar_auth_oauth::door).unwrap(),
+            b()
+        )
+        .err(),
+        Some(want)
+    );
+    linked(&f, &d); // An explicit probe continues to bind without a serving table.
+}
+
+#[test]
+fn oauth_statement_needs_match_manifest() {
+    let manifest: serde_json::Value =
+        serde_json::from_str(include_str!("../../auth-oauth/declares.json")).unwrap();
+    let mut declared: Vec<_> = manifest["needs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s.as_str().unwrap().to_owned())
+        .collect();
+    declared.sort();
+    declared.dedup();
+    let mut actual: Vec<_> = busbar_auth_oauth::NEEDS
+        .iter()
+        .map(|n| {
+            // SAFETY: the product's static need contains a static ABI string.
+            unsafe { n.transport.as_str().unwrap().to_owned() }
+        })
+        .collect();
+    actual.sort();
+    actual.dedup();
+    assert_eq!(actual, declared);
+}
+#[test]
+fn requested_release_profile_is_used() {
+    assert!(
+        !(cfg!(debug_assertions) && std::env::var_os("BUSBAR_EXPECT_RELEASE").is_some()),
+        "BUSBAR_EXPECT_RELEASE is set: run with --release"
+    );
+}
+#[test]
+fn actual_oauth_refuses_undeclared_inbound_and_login_operations() {
+    use busbar_contract::abi::auth::{BeginLoginIn, BeginLoginOut, CompleteLoginIn};
+    let d = Dispatcher::new(DispatchConfig::default());
+    let folds = Arc::new(Folds::default());
+    for p in [linked(&folds, &d), dropped(&folds, &d)] {
+        let mut verify: Frame<VerifyIn, IdentifyOut> = Frame::new(z(), z());
+        verify.input.head = in_head();
+        verify.out.head = out_head();
+        assert_eq!(p.call(slot::VERIFY, &mut verify).outcome, Outcome::Refused);
+        let mut begin: Frame<BeginLoginIn, BeginLoginOut> = Frame::new(z(), z());
+        begin.input.head = in_head();
+        begin.out.head = out_head();
+        assert_eq!(
+            p.call(slot::BEGIN_LOGIN, &mut begin).outcome,
+            Outcome::Refused
+        );
+        let mut complete: Frame<CompleteLoginIn, IdentifyOut> = Frame::new(z(), z());
+        complete.input.head = in_head();
+        complete.out.head = out_head();
+        assert_eq!(
+            p.call(slot::COMPLETE_LOGIN, &mut complete).outcome,
+            Outcome::Refused
+        );
+    }
+}
+
+#[test]
+fn every_actual_outbound_style_has_a_grant_case() {
+    let cases: serde_json::Value = serde_json::from_str(include_str!("conformance.json")).unwrap();
+    let mut cases: Vec<_> = cases["auth"]["outbound"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["style"].as_str().unwrap().to_owned())
+        .collect();
+    // SAFETY: the real product's static Statement owns its static auth tail and style names.
+    let mut declared: Vec<_> = unsafe {
+        let tail = &*busbar_auth_oauth::STATEMENT
+            .kind_tail
+            .cast::<auth::AuthTail>();
+        std::slice::from_raw_parts(tail.styles, tail.styles_len)
+            .iter()
+            .map(|style| style.name.as_str().unwrap().to_owned())
+            .collect()
+    };
+    declared.sort();
+    cases.sort();
+    assert_eq!(declared, cases);
 }

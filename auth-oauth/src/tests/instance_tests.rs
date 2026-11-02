@@ -899,9 +899,9 @@ fn a_token_that_cannot_be_presented_fails_the_call() {
 /// THE MINT LOGS ITS OUTCOME (S4, S5): a token endpoint that answers 5xx or 429, or cannot be
 #[test]
 fn a_failed_mint_is_logged_an_outage_at_warn_or_a_refusal_at_info() {
-    use busbar_test_kit::warn_capture::WarnCapture;
-    let mint_with = |cap: &WarnCapture, steps: Vec<Step>| {
-        tracing::subscriber::with_default(cap.clone(), || {
+    use crate::test_support::OAuthEvents;
+    let mint_with = |cap: &OAuthEvents, steps: Vec<Step>| {
+        tracing::subscriber::with_default(cap.subscriber(), || {
             let host = TestHost::new();
             let w = Arc::new(Scripted::default());
             let o = instance(&w);
@@ -917,21 +917,21 @@ fn a_failed_mint_is_logged_an_outage_at_warn_or_a_refusal_at_info() {
         cap.messages()
     };
     for status in [429, 500, 502, 503, 504, 599] {
-        let warn = WarnCapture::default();
+        let warn = OAuthEvents::default();
         let m = mint_with(
             &warn,
             vec![Step::Head(status), Step::Body(b"busy".to_vec(), true)],
         );
         assert_eq!(
             m.iter()
-                .filter(|l| l.contains("outage") && l.contains("module=oauth"))
+                .filter(|l| l.contains("outage") && l.contains("module=\"oauth\""))
                 .count(),
             1,
             "{status} at WARN exactly once: {m:?}"
         );
     }
     for status in [400, 499, 600] {
-        let warn = WarnCapture::default();
+        let warn = OAuthEvents::default();
         assert!(mint_with(
             &warn,
             vec![Step::Head(status), Step::Body(b"refused".to_vec(), true)]
@@ -939,12 +939,12 @@ fn a_failed_mint_is_logged_an_outage_at_warn_or_a_refusal_at_info() {
         .is_empty());
     }
     for failure in [ConnError::Timeout, ConnError::Closed, ConnError::Fault] {
-        let warn = WarnCapture::default();
+        let warn = OAuthEvents::default();
         let messages = mint_with(&warn, vec![Step::Fail(failure)]);
         assert_eq!(
             messages
                 .iter()
-                .filter(|line| line.contains("outage") && line.contains("module=oauth"))
+                .filter(|line| line.contains("outage") && line.contains("module=\"oauth\""))
                 .count(),
             1
         );
@@ -955,18 +955,18 @@ fn a_failed_mint_is_logged_an_outage_at_warn_or_a_refusal_at_info() {
             Step::Body(br#"{"error":"invalid_client"}"#.to_vec(), true),
         ]
     };
-    let warn = WarnCapture::default();
+    let warn = OAuthEvents::default();
     assert_eq!(
         mint_with(&warn, refused()),
         Vec::<String>::new(),
         "a refusal is no WARN"
     );
     drop(warn);
-    let info = WarnCapture::capturing_debug();
+    let info = OAuthEvents::capturing_debug();
     let m = mint_with(&info, refused());
     assert!(
         m.iter()
-            .any(|l| l.contains("invalid_client") && l.contains("module=oauth")),
+            .any(|l| l.contains("invalid_client") && l.contains("module=\"oauth\"")),
         "{m:?}"
     );
     assert!(
@@ -1088,11 +1088,11 @@ fn a_scope_cell_with_waiters_is_never_evicted() {
 
 #[test]
 fn a_token_type_other_than_bearer_fails_the_mint_and_an_absent_one_warns_once() {
-    use busbar_test_kit::warn_capture::WarnCapture;
+    use crate::test_support::OAuthEvents;
     const SETTINGS: &str = r#"{"token_url":"https://idp.example/token","scope":"s"}"#;
     let host = TestHost::new();
-    let cap = WarnCapture::default();
-    tracing::subscriber::with_default(cap.clone(), || {
+    let cap = OAuthEvents::default();
+    tracing::subscriber::with_default(cap.subscriber(), || {
         let w = Arc::new(Scripted::default());
         let o = instance(&w);
         let h = open(&o, style::OAUTH_CLIENT_CREDENTIALS, "id:secret", SETTINGS);
@@ -1107,7 +1107,7 @@ fn a_token_type_other_than_bearer_fails_the_mint_and_an_absent_one_warns_once() 
     let m = cap.messages();
     assert!(
         m.iter()
-            .any(|l| l.contains("token_type") && l.contains("module=oauth")),
+            .any(|l| l.contains("token_type") && l.contains("module=\"oauth\"")),
         "the refusal is a WARN: {m:?}"
     );
     for spelling in ["Bearer", "bearer", "BEARER"] {
@@ -1124,8 +1124,8 @@ fn a_token_type_other_than_bearer_fails_the_mint_and_an_absent_one_warns_once() 
             "{spelling}"
         );
     }
-    let cap = WarnCapture::default();
-    tracing::subscriber::with_default(cap.clone(), || {
+    let cap = OAuthEvents::default();
+    tracing::subscriber::with_default(cap.subscriber(), || {
         let w = Arc::new(Scripted::default());
         let o = instance(&w);
         let h = open(&o, style::OAUTH_CLIENT_CREDENTIALS, "id:secret", SETTINGS);
@@ -1157,10 +1157,10 @@ fn a_token_type_other_than_bearer_fails_the_mint_and_an_absent_one_warns_once() 
 
 #[test]
 fn a_mint_with_no_plausible_wall_clock_fails_at_warn() {
-    use busbar_test_kit::warn_capture::WarnCapture;
+    use crate::test_support::OAuthEvents;
     let host = TestHost::new();
-    let cap = WarnCapture::default();
-    tracing::subscriber::with_default(cap.clone(), || {
+    let cap = OAuthEvents::default();
+    tracing::subscriber::with_default(cap.subscriber(), || {
         let w = Arc::new(Scripted::default());
         let o = Oauth::with_wire(1, Some(Box::new(Pinned(w.clone(), 0))));
         let h = open(
@@ -1180,7 +1180,7 @@ fn a_mint_with_no_plausible_wall_clock_fails_at_warn() {
     let m = cap.messages();
     assert!(
         m.iter()
-            .any(|l| l.contains("wall clock") && l.contains("module=oauth")),
+            .any(|l| l.contains("wall clock") && l.contains("module=\"oauth\"")),
         "{m:?}"
     );
 }
@@ -1197,7 +1197,7 @@ fn an_older_wall_clock_reading_never_moves_the_clock_back() {
 
 #[test]
 fn an_empty_or_unpresentable_scheduled_token_is_logged_at_warn() {
-    use busbar_test_kit::warn_capture::WarnCapture;
+    use crate::test_support::OAuthEvents;
     for (body, named) in [
         (r#"{"access_token":"","token_type":"Bearer"}"#, "empty"),
         (
@@ -1205,8 +1205,8 @@ fn an_empty_or_unpresentable_scheduled_token_is_logged_at_warn() {
             "header value",
         ),
     ] {
-        let cap = WarnCapture::default();
-        tracing::subscriber::with_default(cap.clone(), || {
+        let cap = OAuthEvents::default();
+        tracing::subscriber::with_default(cap.subscriber(), || {
             let host = TestHost::new();
             let w = Arc::new(Scripted::default());
             let o = instance(&w);
@@ -1220,7 +1220,7 @@ fn an_empty_or_unpresentable_scheduled_token_is_logged_at_warn() {
             o.tick(1_000, Ticket::NONE, Some(&host.host), &mut Diags::default());
         });
         let m = cap.messages();
-        assert_eq!(cap.count("module=oauth"), 1, "{body}: {m:?}");
+        assert_eq!(cap.count("module=\"oauth\""), 1, "{body}: {m:?}");
         assert!(m[0].contains(named), "{body}: {m:?}");
     }
 }

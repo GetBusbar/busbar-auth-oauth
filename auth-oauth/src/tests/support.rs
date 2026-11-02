@@ -119,3 +119,57 @@ pub(crate) fn sealed_text(w: &mut busbar_contract::abi::sdk::cred::SealedWrite) 
 pub(crate) fn form_text(body: &busbar_contract::abi::sdk::cred::FormBody) -> String {
     sealed_text(&mut body.encoded().expect("the form encodes"))
 }
+
+/// Records this plugin's refusal/outage events through the standard tracing formatter.
+#[derive(Clone)]
+pub(crate) struct OAuthEvents {
+    bytes: std::sync::Arc<Mutex<Vec<u8>>>,
+    level: tracing::Level,
+}
+impl Default for OAuthEvents {
+    fn default() -> Self {
+        Self {
+            bytes: Default::default(),
+            level: tracing::Level::WARN,
+        }
+    }
+}
+impl std::io::Write for OAuthEvents {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.bytes.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+impl OAuthEvents {
+    pub(crate) fn capturing_debug() -> Self {
+        Self {
+            level: tracing::Level::DEBUG,
+            ..Self::default()
+        }
+    }
+    pub(crate) fn subscriber(&self) -> impl tracing::Subscriber + Send + Sync {
+        let writer = self.clone();
+        tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_max_level(self.level)
+            .with_writer(move || writer.clone())
+            .finish()
+    }
+    pub(crate) fn messages(&self) -> Vec<String> {
+        String::from_utf8(self.bytes.lock().unwrap().clone())
+            .unwrap()
+            .lines()
+            .map(str::to_owned)
+            .collect()
+    }
+    pub(crate) fn count(&self, text: &str) -> usize {
+        self.messages()
+            .iter()
+            .filter(|line| line.contains(text))
+            .count()
+    }
+}

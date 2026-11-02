@@ -42,5 +42,6 @@ tracing = { workspace = true }
 # (`test-seal`, dev-only) and hold them to `serde_urlencoded`'s.
 busbar-contract = { workspace = true, features = ["test-seal"] }
 serde_urlencoded = { workspace = true }
-# The log double (`warn_capture::WarnCapture`): the refusal and outage events are read back.
-busbar-test-kit = { workspace = true }
+# Standard formatting records refusal/outage events; the loader supplies real host tables.
+tracing-subscriber = { workspace = true, features = ["fmt"] }
+busbar-plugin-loader = { workspace = true }

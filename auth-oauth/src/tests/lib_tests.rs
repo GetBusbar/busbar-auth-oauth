@@ -130,9 +130,9 @@ fn invalid_present_settings_are_refused_at_every_lifecycle_entry() {
 /// A REFUSED BINDING IS LOGGED ONCE AT INFO (S5), `module = "oauth"`, with its reason and never the
 #[test]
 fn a_refused_binding_is_logged_once_at_info() {
-    use busbar_test_kit::warn_capture::WarnCapture;
-    let cap = WarnCapture::capturing_debug();
-    tracing::subscriber::with_default(cap.clone(), || {
+    use crate::test_support::OAuthEvents;
+    let cap = OAuthEvents::capturing_debug();
+    tracing::subscriber::with_default(cap.subscriber(), || {
         let o = Oauth::new(1);
         assert!(o
             .bind(
@@ -144,7 +144,7 @@ fn a_refused_binding_is_logged_once_at_info() {
             .is_err());
     });
     let m = cap.messages();
-    assert_eq!(cap.count("module=oauth"), 1, "{m:?}");
+    assert_eq!(cap.count("module=\"oauth\""), 1, "{m:?}");
     assert!(m[0].contains("client_id:client_secret"), "{m:?}");
     assert!(!m[0].contains("s3cr3t"), "{m:?}");
 }

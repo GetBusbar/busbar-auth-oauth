@@ -284,7 +284,7 @@ fn a_bad_setting_is_refused_without_its_value() {
 
 #[test]
 fn a_forwarded_key_a_style_does_not_read_is_ignored_with_one_warn() {
-    use busbar_test_kit::warn_capture::WarnCapture;
+    use crate::test_support::OAuthEvents;
     let sa = serde_json::json!({
         "client_email": "svc@proj.example.test",
         "private_key": include_str!("fixtures/test_sa_key.pem"),
@@ -312,8 +312,8 @@ fn a_forwarded_key_a_style_does_not_read_is_ignored_with_one_warn() {
         ),
     ];
     for (style, cred, settings, ignored) in cases {
-        let cap = WarnCapture::default();
-        let bound = tracing::subscriber::with_default(cap.clone(), || {
+        let cap = OAuthEvents::default();
+        let bound = tracing::subscriber::with_default(cap.subscriber(), || {
             super::open(
                 style,
                 Some(cred.as_bytes()),
@@ -330,7 +330,7 @@ fn a_forwarded_key_a_style_does_not_read_is_ignored_with_one_warn() {
             assert!(
                 warned
                     .iter()
-                    .any(|l| l.contains(&want) && l.contains("module=oauth")),
+                    .any(|l| l.contains(&want) && l.contains("module=\"oauth\"")),
                 "{style}: {want} in {warned:?}"
             );
         }
