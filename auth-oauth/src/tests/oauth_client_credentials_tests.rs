@@ -34,7 +34,7 @@ fn validate_credential_rejects_malformed_and_accepts_well_formed() {
 fn build_accepts_a_secret_containing_a_colon() {
     let c = build("client-abc:secret:with:colons", "https://t", Some("s")).unwrap();
     assert_eq!(
-        crate::test_support::form_text(&c.request().unwrap().body),
+        crate::test_support::form_text(&c.request().body),
         "grant_type=client_credentials&client_id=client-abc&client_secret=secret%3Awith%3Acolons&scope=s"
     );
 }
@@ -48,7 +48,7 @@ fn the_token_request_is_the_form_1_5_5_posted() {
         Some("https://cognitiveservices.azure.com/.default"),
     )
     .unwrap();
-    let req = c.request().unwrap();
+    let req = c.request();
     assert_eq!(
         req.target,
         "https://login.example.com/tenant/oauth2/v2.0/token"

@@ -79,7 +79,7 @@ impl Scoped {
     }
 
     /// The token request (RFC 8693 section 2.1): the form byte for byte as `serde_urlencoded`
-    pub(crate) fn request(&self) -> Result<TokenRequest, String> {
+    pub(crate) fn request(&self) -> TokenRequest {
         let x = &self.exchange;
         let form = FormBody::new()
             .public("grant_type", GRANT_TYPE)
@@ -92,11 +92,7 @@ impl Scoped {
         } else {
             form.public("scope", &self.scope)
         };
-        Ok(TokenRequest::form(
-            super::need::TOKEN_URL,
-            x.token_url.clone(),
-            form,
-        ))
+        TokenRequest::form(super::need::TOKEN_URL, x.token_url.clone(), form)
     }
 }
 

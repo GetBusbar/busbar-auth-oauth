@@ -16,7 +16,7 @@ use busbar_contract::abi::sdk::cred::SealedWrite;
 use busbar_contract::abi::transport::{fields, FrameSpan};
 use busbar_contract::conn::{ConnError, ConnId, PieceKind};
 
-use super::{retry_after, Got, HostClock, TokenRequest, Wire};
+use super::{retry_after, Got, HostClock, TokenRequest, Wire, NS};
 
 /// The connector for one entry of the driver ticket's cycle.
 pub(crate) struct HostWire<'a> {
@@ -207,7 +207,7 @@ impl Wire for HostWire<'_> {
     fn clock(&self) -> Option<HostClock> {
         match self.with(|c| c.clock_now()) {
             Poll::Ready(Ok(r)) => Some(HostClock {
-                wall_secs: r.wall_ns / 1_000_000_000,
+                wall_secs: r.wall_ns / NS,
                 mono_ns: r.mono_ns,
             }),
             _ => None,

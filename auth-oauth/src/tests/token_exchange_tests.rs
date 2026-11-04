@@ -90,9 +90,7 @@ fn the_exchange_request_is_the_previous_releases_form_with_the_stated_scope() {
         ACCESS_TOKEN_TYPE,
         "https://tools.example/rpc",
     ));
-    let req = Scoped::new(Arc::clone(&x), "fs_read_file fs_write_file")
-        .request()
-        .expect("a request");
+    let req = Scoped::new(Arc::clone(&x), "fs_read_file fs_write_file").request();
     assert_eq!(req.need, crate::mint::need::TOKEN_URL);
     assert_eq!(req.target, "https://as.example/token");
     assert_eq!(
@@ -128,7 +126,7 @@ fn the_exchange_request_is_the_previous_releases_form_with_the_stated_scope() {
         form(&crate::test_support::form_text(&req.body)),
         expected("fs_read_file fs_write_file")
     );
-    let unscoped = Scoped::new(x, "").request().expect("a request");
+    let unscoped = Scoped::new(x, "").request();
     assert_eq!(
         form(&crate::test_support::form_text(&unscoped.body)),
         expected("")
@@ -217,7 +215,7 @@ fn a_call_refused_for_a_failed_exchange_carries_an_explanation() {
     match o.answer(&ask, Some(&host.host), &mut |_| {}) {
         std::task::Poll::Ready(busbar_contract::abi::sdk::auth_outbound::FieldsAnswer::Failed(
             text,
-        )) => assert!(!text.is_empty(), "the refusal is explained"),
+        )) => assert_eq!(text, crate::EXCHANGE_FAILED, "the refusal is explained"),
         _ => panic!("the call is refused as failed"),
     }
 }
@@ -597,6 +595,8 @@ fn a_failed_exchange_honours_retry_after_capped_at_300_seconds() {
         ("120", T0 + 100, T0 + 121),
         ("100000", T0 + 299, T0 + 301),
         (date, T0 + 150, T0 + 201),
+        ("Friday, 15-Jan-27 08:03:20 GMT", T0 + 150, T0 + 201),
+        ("Fri Jan 15 08:03:20 2027", T0 + 150, T0 + 201),
     ] {
         let b = ClockedBinding::new();
         assert_eq!(b.call(ticket(601), "s", T0), Outcome::Pending);
@@ -745,7 +745,7 @@ fn an_unscoped_exchange_sends_no_scope_parameter() {
         "https://tools.example/rpc",
     ));
     let form = form(&crate::test_support::form_text(
-        &Scoped::new(x, "").request().expect("a request").body,
+        &Scoped::new(x, "").request().body,
     ));
     assert_eq!(
         form.last().map(|(k, _)| k.as_str()),
@@ -775,7 +775,7 @@ fn invalid_scope_bytes_are_refused_before_any_exchange_or_token_presentation() {
         let mut presented = false;
         let answer = oauth.answer(&ask, Some(&host.host), &mut |_| presented = true);
         assert!(
-            matches!(answer, std::task::Poll::Ready(busbar_contract::abi::sdk::auth_outbound::FieldsAnswer::Failed(ref reason)) if !reason.is_empty())
+            matches!(answer, std::task::Poll::Ready(busbar_contract::abi::sdk::auth_outbound::FieldsAnswer::Failed(ref reason)) if reason == "the call's token-exchange scope is not UTF-8; the call is refused rather than exchanged with a changed scope")
         );
         assert!(!presented);
         oauth.tick(0, Ticket::NONE, Some(&host.host), &mut Diags::default());

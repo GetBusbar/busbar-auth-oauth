@@ -53,6 +53,10 @@ use crate::mint::Read;
 /// The longest per-call scope a token exchange takes (O4): each distinct scope is its own cell,
 const MAX_SCOPE_BYTES: usize = 1024;
 
+/// Why a call whose scope's token exchange failed while it waited is refused.
+const EXCHANGE_FAILED: &str = "the RFC 8693 token exchange for this call's scope failed; the call \
+     is refused rather than made unauthenticated (see diagnostics BUSBAR-4014/4015/4016)";
+
 /// The flags every field this plugin writes carries: [`FIELD_SENSITIVE`]. The field is the
 const FIELD_FLAGS: u32 = FIELD_SENSITIVE;
 
@@ -184,10 +188,7 @@ impl Oauth {
         };
         let ticket = ask.ticket;
         if !ticket.is_none() && self.exchange_failed(ticket) {
-            return Poll::Ready(FieldsAnswer::Failed(Cow::Borrowed(
-                "the RFC 8693 token exchange for this call's scope failed; the call is refused \
-                 rather than made unauthenticated (see diagnostics BUSBAR-4014/4015/4016)",
-            )));
+            return Poll::Ready(FieldsAnswer::Failed(Cow::Borrowed(EXCHANGE_FAILED)));
         }
         let scope = ask.scope.unwrap_or_default();
         if scope.len() > MAX_SCOPE_BYTES {
@@ -212,7 +213,7 @@ impl Oauth {
             |c| x.owns(c),
         ) {
             Ok(cell) => cell,
-            Err(why) => return Poll::Ready(FieldsAnswer::Failed(Cow::Borrowed(why))),
+            Err(why) => return Poll::Ready(FieldsAnswer::Failed(why)),
         };
         if let Some(why) = cell.backoff_reason(now) {
             self.unpark_exchange(key, ticket);
@@ -228,10 +229,17 @@ impl Oauth {
                 self.unpark_exchange(key, ticket);
                 Poll::Ready(FieldsAnswer::Failed(Cow::Borrowed(why)))
             }
-            Read::Wait => {
-                self.mint_soon(host);
-                Poll::Pending
-            }
+            Read::Wait => match cell.backoff_reason(now) {
+                Some(why) => {
+                    self.unpark_exchange(key, ticket);
+                    self.exchange_failed(ticket);
+                    Poll::Ready(FieldsAnswer::Failed(Cow::Owned(why)))
+                }
+                None => {
+                    self.mint_soon(host);
+                    Poll::Pending
+                }
+            },
         })
     }
 
@@ -251,12 +259,8 @@ impl Oauth {
         if ticket.is_none() {
             return Poll::Pending;
         }
-        #[cfg(test)]
-        {
-            let hook = self.before_mint_park.lock().unwrap().take();
-            if let Some(hook) = hook {
-                hook();
-            }
+        if let Some(pause) = self.before_mint_park.get() {
+            pause();
         }
         self.park(ticket);
         if let Some(a) = m.read(now, |r| ready_answer(r, &mut *present)) {

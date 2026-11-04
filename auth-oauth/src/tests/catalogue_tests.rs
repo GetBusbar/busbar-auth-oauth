@@ -24,7 +24,13 @@ fn no_declared_code_is_one_the_core_catalogue_holds() {
         path.display()
     );
     let declares: serde_json::Value = serde_json::from_str(DECLARES_JSON).unwrap();
-    for d in declares["diagnostics"].as_array().unwrap() {
+    let declared = declares["diagnostics"].as_array().unwrap();
+    assert!(
+        declared.is_empty(),
+        "the plugin declares no diagnostic of its own (it raises the core's BUSBAR-4014..4016): a \
+         declared one makes the check below live, so drop this guard with it"
+    );
+    for d in declared {
         let code = d["code"].as_u64().unwrap();
         assert!(
             !held.contains(&code),

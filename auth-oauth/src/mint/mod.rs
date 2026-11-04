@@ -9,7 +9,7 @@ pub(crate) mod oauth_client_credentials;
 pub(crate) mod token_exchange;
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
 use busbar_contract::abi::sdk::cred::{Cred, FormBody, SealedWrite};
 use busbar_contract::conn::{ConnError, ConnId, PieceKind};
@@ -41,6 +41,8 @@ pub(crate) const IN_FLIGHT_POLL_NS: u64 = 5_000_000;
 
 /// The fleet's sanity floor for the host's wall clock (2026-01-01T00:00:00Z, epoch seconds): no
 pub(crate) const WALL_FLOOR_SECS: u64 = 1_767_225_600;
+/// [`WALL_FLOOR_SECS`] as the refusal names it.
+const WALL_FLOOR_DATE: &str = "2026-01-01";
 
 /// Nanoseconds in a second, on the tick clock.
 pub(crate) const NS: u64 = 1_000_000_000;
@@ -104,8 +106,8 @@ impl Minter {
     pub(crate) fn request(&self, now: u64) -> Result<TokenRequest, String> {
         match self {
             Minter::JwtBearer(s) => s.request(now),
-            Minter::ClientCredentials(c) => c.request(),
-            Minter::TokenExchange(x) => x.request(),
+            Minter::ClientCredentials(c) => Ok(c.request()),
+            Minter::TokenExchange(x) => Ok(x.request()),
         }
     }
 }
@@ -211,13 +213,13 @@ fn shown(t: &str) -> String {
 ///   - `ttl == 0` (already expired / garbage `expires_in ≈ 0`): back off `MIN_SLEEP_SECS` so the mint
 ///     loop cannot spin hot — nothing useful to serve, fail safe.
 ///   - `ttl <= REFRESH_SKEW_SECS` (too short to refresh a full skew early): re-mint at ~half the
-///     remaining life, so the refresh always lands BEFORE expiry (never past `ttl`), and never below 1s.
+///     remaining life, so the refresh never lands past expiry, and never below 1s (1.5.5's rule).
 ///   - otherwise: the normal `ttl - REFRESH_SKEW_SECS`, with `MIN_SLEEP_SECS` as a hot-loop floor near
 ///     the skew boundary.
 ///
-/// Guarantees: for any `ttl > 0` the next mint is scheduled strictly before expiry (no expired token is
-/// served); for `ttl == 0` the loop is rate-limited to `MIN_SLEEP_SECS`; and no refresh is further
-/// off than [`MAX_REFRESH_SECS`].
+/// Guarantees: for any `ttl >= 2` the next mint is scheduled strictly before expiry, and for
+/// `ttl == 1` at it; for `ttl == 0` the loop is rate-limited to `MIN_SLEEP_SECS`; and no refresh is
+/// further off than [`MAX_REFRESH_SECS`].
 pub(crate) fn next_refresh_secs(expires_at: u64, now: u64) -> u64 {
     let ttl = expires_at.saturating_sub(now);
     let secs = if ttl == 0 {
@@ -281,7 +283,7 @@ fn lossy_wiped(b: &[u8]) -> Zeroizing<String> {
 /// The RFC 6749 section 5.2 `error` code of a JSON error body: a string member of at most 64 chars
 fn oauth_error_code(body: &str) -> Option<Zeroizing<String>> {
     serde_json::from_str::<serde::de::IgnoredAny>(body).ok()?;
-    let code = crate::token_response::wiped_member(body, b"error")?;
+    let code = wiped_member(body, b"error")?;
     let ok = code.len() <= 64
         && code
             .bytes()
@@ -295,6 +297,7 @@ pub(crate) fn parse_response(
     body: &[u8],
     now: u64,
 ) -> Result<(CachedToken, bool), String> {
+    let replaced = std::str::from_utf8(body).is_err();
     let body = lossy_wiped(body);
     if !(200..300).contains(&status) {
         let status = http::StatusCode::from_u16(status)
@@ -311,10 +314,11 @@ pub(crate) fn parse_response(
 
     let mut read = access_token(&body)?;
     let token = Zeroizing::new(std::mem::take(&mut *read));
+    let forged = replaced && token.contains('\u{FFFD}');
     let (mut cached, invalid) = CachedToken::new(token, now.saturating_add(tok.expires_in));
     cached.token_type = tok.token_type;
     cached.issued_token_type = tok.issued_token_type;
-    Ok((cached, invalid))
+    Ok((cached, invalid || forged))
 }
 
 /// One piece a need's connection delivered, as the exchange reads it.
@@ -341,31 +345,71 @@ pub(crate) enum RetryAfter {
     At(u64),
 }
 
-/// A `Retry-After` value (RFC 9110 §10.2.3): `delay-seconds`, or an `HTTP-date` in its preferred
+/// A `Retry-After` value (RFC 9110 §10.2.3): `delay-seconds`, or an `HTTP-date` in any of its three
+/// formats ([`http_date`]).
 pub(crate) fn retry_after(value: &[u8]) -> Option<RetryAfter> {
     let v = std::str::from_utf8(value).ok()?.trim();
     if !v.is_empty() && v.bytes().all(|b| b.is_ascii_digit()) {
         return Some(RetryAfter::Secs(v.parse().unwrap_or(u64::MAX)));
     }
-    imf_fixdate(v).map(RetryAfter::At)
+    http_date(v).map(RetryAfter::At)
 }
 
-/// An IMF-fixdate (`Sun, 06 Nov 1994 08:49:37 GMT`) as epoch seconds.
-fn imf_fixdate(v: &str) -> Option<u64> {
+/// The number (1 to 12) of a month's three-letter name.
+fn month(name: &str) -> Option<u64> {
     const MONTHS: [&str; 12] = [
         "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
     ];
-    let mut it = v.split(' ');
-    it.next()?.strip_suffix(',')?;
-    let day: u64 = it.next()?.parse().ok()?;
-    let mon = it.next()?;
-    let month = MONTHS.iter().position(|m| *m == mon)? as u64 + 1;
-    let year: u64 = it.next()?.parse().ok()?;
-    let mut hms = it.next()?.split(':');
+    MONTHS.iter().position(|m| *m == name).map(|i| i as u64 + 1)
+}
+
+/// An `HTTP-date` as epoch seconds, in each of the three formats a recipient MUST accept (RFC 9110
+/// §5.6.7): IMF-fixdate (`Sun, 06 Nov 1994 08:49:37 GMT`), the obsolete RFC 850 form
+/// (`Sunday, 06-Nov-94 08:49:37 GMT`) and asctime (`Sun Nov  6 08:49:37 1994`). An RFC 850
+/// two-digit year more than 50 years past the fleet's wall-clock floor is read in the century
+/// before.
+fn http_date(v: &str) -> Option<u64> {
+    let mut it = v.split_ascii_whitespace();
+    let weekday = it.next()?;
+    let (day, mon, year, time) = if weekday.ends_with(',') {
+        let date = it.next()?;
+        let parts = match date.split_once('-') {
+            Some((day, rest)) => {
+                let (mon, yy) = rest.split_once('-')?;
+                if yy.len() != 2 {
+                    return None;
+                }
+                let year = 2000 + yy.parse::<u64>().ok()?;
+                let floor_year = 1970 + WALL_FLOOR_SECS / 31_556_952;
+                let year = if year > floor_year + 50 {
+                    year - 100
+                } else {
+                    year
+                };
+                (day, mon, year, it.next()?)
+            }
+            None => (date, it.next()?, it.next()?.parse().ok()?, it.next()?),
+        };
+        if it.next()? != "GMT" {
+            return None;
+        }
+        parts
+    } else {
+        let mon = it.next()?;
+        let day = it.next()?;
+        let time = it.next()?;
+        (day, mon, it.next()?.parse().ok()?, time)
+    };
+    if it.next().is_some() {
+        return None;
+    }
+    let day: u64 = day.parse().ok()?;
+    let month = month(mon)?;
+    let mut hms = time.split(':');
     let h: u64 = hms.next()?.parse().ok()?;
     let m: u64 = hms.next()?.parse().ok()?;
     let sec: u64 = hms.next()?.parse().ok()?;
-    if it.next()? != "GMT" || it.next().is_some() || hms.next().is_some() {
+    if hms.next().is_some() {
         return None;
     }
     if !(1..=31).contains(&day) || !(1970..=9999).contains(&year) || h > 23 || m > 59 || sec > 60 {
@@ -422,7 +466,7 @@ pub(crate) struct HostClock {
 }
 
 /// Where one binding's exchange stands.
-enum Exchange {
+enum Attempt {
     /// No exchange; the next is due at `due_ns` on the tick clock.
     Idle { due_ns: u64 },
     /// An exchange is in flight on `conn`.
@@ -500,7 +544,7 @@ pub(crate) struct Minted {
     minter: Minter,
     max_response_bytes: usize,
     token: RwLock<Arc<CachedToken>>,
-    exchange: Mutex<Exchange>,
+    attempt: Mutex<Attempt>,
     refresh_failed: AtomicBool,
     /// Minted on demand ([`Minter::TokenExchange`]): no refresh ahead of a request, no retry on a
     on_demand: bool,
@@ -518,9 +562,15 @@ pub(crate) struct Minted {
     failure: Mutex<Option<String>>,
     /// When a request last used this on-demand cell, as the instance's use count stamps it.
     last_used: AtomicU64,
-    #[cfg(test)]
-    before_usable: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    /// A point [`Minted::usable`] passes before it judges the cell, where a race test holds the
+    /// thread (set only by the side-file tests; production sets none).
+    pub(crate) before_usable: OnceLock<Pause>,
 }
+
+/// What a race test runs at a seam a call passes ([`Minted::before_usable`],
+/// `Oauth::before_mint_park`): defined by the side-file tests; production holds none, so passing
+/// the seam is one unset-cell read.
+pub(crate) type Pause = Box<dyn Fn() + Send + Sync>;
 
 impl Minted {
     /// A cell that has minted nothing yet; its first exchange is due at once, on the next `tick` or
@@ -532,7 +582,7 @@ impl Minted {
             token: RwLock::new(Arc::new(
                 CachedToken::new(Zeroizing::new(String::new()), 0).0,
             )),
-            exchange: Mutex::new(Exchange::Idle { due_ns: 0 }),
+            attempt: Mutex::new(Attempt::Idle { due_ns: 0 }),
             refresh_failed: AtomicBool::new(false),
             usable_until: AtomicU64::new(0),
             outage: AtomicBool::new(false),
@@ -541,8 +591,7 @@ impl Minted {
             retry_at: AtomicU64::new(0),
             failure: Mutex::new(None),
             last_used: AtomicU64::new(0),
-            #[cfg(test)]
-            before_usable: Mutex::new(None),
+            before_usable: OnceLock::new(),
         }
     }
 
@@ -563,21 +612,17 @@ impl Minted {
     pub(crate) fn idle(&self) -> bool {
         matches!(
             *self
-                .exchange
+                .attempt
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner),
-            Exchange::Idle { .. }
+            Attempt::Idle { .. }
         )
     }
 
     /// An on-demand cell holds a token it presents at wall-clock `now`.
     pub(crate) fn usable(&self, now: u64) -> bool {
-        #[cfg(test)]
-        {
-            let hook = self.before_usable.lock().unwrap().take();
-            if let Some(hook) = hook {
-                hook();
-            }
+        if let Some(pause) = self.before_usable.get() {
+            pause();
         }
         self.is_ready() && now < self.usable_until.load(Ordering::Acquire)
     }
@@ -599,6 +644,30 @@ impl Minted {
 
     /// Why a request for this cell's scope fails at once at wall-clock `now`: the cached failure,
     pub(crate) fn backoff_reason(&self, now: u64) -> Option<String> {
+        let (why, secs) = self.backoff(now)?;
+        Some(format!(
+            "the RFC 8693 token exchange for this call's scope failed ({why}); it is not tried \
+             again for {secs} s, and the call is refused rather than made unauthenticated"
+        ))
+    }
+
+    /// Why a call for a scope with no cell yet fails at once at wall-clock `now`, when this cell
+    /// (another scope of the same binding) is backing off an OUTAGE of the token endpoint: a new
+    /// scope would hit the same endpoint, so it is not tried before the window ends.
+    pub(crate) fn outage_reason(&self, now: u64) -> Option<String> {
+        if !self.outage() {
+            return None;
+        }
+        let (why, secs) = self.backoff(now)?;
+        Some(format!(
+            "the RFC 8693 token endpoint is down (an exchange for another scope failed: {why}); \
+             no new scope is exchanged for {secs} s, and the call is refused rather than made \
+             unauthenticated"
+        ))
+    }
+
+    /// The cached failure and the seconds its window has left at wall-clock `now`.
+    fn backoff(&self, now: u64) -> Option<(String, u64)> {
         let until = self.retry_at.load(Ordering::Acquire);
         if now >= until {
             return None;
@@ -609,11 +678,7 @@ impl Minted {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
             .unwrap_or_default();
-        Some(format!(
-            "the RFC 8693 token exchange for this call's scope failed ({why}); it is not tried \
-             again for {} s, and the call is refused rather than made unauthenticated",
-            until - now
-        ))
+        Some((why, until - now))
     }
 
     /// An on-demand cell's exchange failed at wall-clock `wall` for `why`: its scope backs off for
@@ -654,13 +719,7 @@ impl Minted {
     /// Present the cached token for a request at wall-clock `now` (epoch seconds), through `f`
     pub(crate) fn read<T>(&self, now: u64, f: impl FnOnce(Read<'_>) -> T) -> T {
         if self.on_demand && !self.usable(now) {
-            if let Exchange::Idle { due_ns } = &mut *self
-                .exchange
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-            {
-                *due_ns = 0;
-            }
+            self.mint_now(now);
             return f(Read::Wait);
         }
 
@@ -678,6 +737,22 @@ impl Minted {
         }
     }
 
+    /// An on-demand request wants a token this cell does not hold at wall-clock `now`: an idle
+    /// cell's next exchange is due at once, unless it backs off a failure (judged under the
+    /// exchange's lock, which every failure is recorded under, so a failure that lands meanwhile
+    /// is seen).
+    fn mint_now(&self, now: u64) {
+        let mut attempt = self
+            .attempt
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Attempt::Idle { due_ns } = &mut *attempt {
+            if !self.backing_off(now) {
+                *due_ns = 0;
+            }
+        }
+    }
+
     /// Advance the exchange at tick-clock `now_ns` and the host's wall clock `wall` (epoch seconds):
     pub(crate) fn tick(
         &self,
@@ -686,17 +761,14 @@ impl Minted {
         wire: Option<&dyn Wire>,
     ) -> (u64, Option<Report>) {
         let mut ex = self
-            .exchange
+            .attempt
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Exchange::Idle { due_ns } = *ex {
+        if let Attempt::Idle { due_ns } = *ex {
             if now_ns < due_ns {
                 return (due_ns, None);
             }
             let Some(wire) = wire else {
-                *ex = Exchange::Idle {
-                    due_ns: now_ns.saturating_add(MIN_SLEEP_SECS * NS),
-                };
                 return self.failed(
                     &mut ex,
                     now_ns,
@@ -713,8 +785,8 @@ impl Minted {
                     now_ns,
                     wall,
                     format!(
-                        "no plausible wall clock: the host's reads {wall} s, before 2026-01-01 \
-                         (or none was read); no token is minted until it does"
+                        "no plausible wall clock: the host's reads {wall} s, before \
+                         {WALL_FLOOR_DATE} (or none was read); no token is minted until it does"
                     ),
                     Fail::Unusable,
                     None,
@@ -740,7 +812,7 @@ impl Minted {
             };
             match wire.open(&req, &mut body, MINT_DEADLINE_SECS * 1000) {
                 Ok(conn) => {
-                    *ex = Exchange::InFlight {
+                    *ex = Attempt::InFlight {
                         conn,
                         started_ns: now_ns,
                         status: None,
@@ -755,7 +827,7 @@ impl Minted {
                         now_ns,
                         wall,
                         format!("token endpoint request failed: {}", conn_cause(e)),
-                        Fail::of(unreachable(e)),
+                        Fail::of(endpoint_down(e)),
                         None,
                     )
                 }
@@ -764,7 +836,7 @@ impl Minted {
         let Some(wire) = wire else {
             return (now_ns.saturating_add(IN_FLIGHT_POLL_NS), None);
         };
-        let Exchange::InFlight {
+        let Attempt::InFlight {
             conn,
             started_ns,
             status,
@@ -780,22 +852,25 @@ impl Minted {
         let mono_at = wire.clock().map(|c| c.mono_ns);
         let mut reads = 0_u32;
         let finished = loop {
-            let elapsed = mono_at.map_or(0, |at| {
-                wire.clock().map_or(0, |c| c.mono_ns.saturating_sub(at))
-            });
-            if mono_at.is_none() {
-                if reads >= MAX_READS_PER_TICK {
-                    return (now_ns.saturating_add(IN_FLIGHT_POLL_NS), None);
+            let measured =
+                mono_at.and_then(|at| wire.clock().map(|c| c.mono_ns.saturating_sub(at)));
+            let elapsed = match measured {
+                Some(elapsed) => elapsed,
+                None => {
+                    if reads >= MAX_READS_PER_TICK {
+                        return (now_ns.saturating_add(IN_FLIGHT_POLL_NS), None);
+                    }
+                    reads += 1;
+                    0
                 }
-                reads += 1;
-            }
+            };
             if now_ns.saturating_add(elapsed).saturating_sub(*started_ns) >= MINT_DEADLINE_SECS * NS
             {
                 break Err((
                     "token endpoint response was not read before the mint deadline; refusing to \
                      parse a partial token response"
                         .to_string(),
-                    true,
+                    Fail::Outage,
                 ));
             }
             match wire.read(conn, &mut buf[..]) {
@@ -809,7 +884,7 @@ impl Minted {
                     if got.kind == PieceKind::Body {
                         if let Err(e) = append_wiped(body, &buf[..got.len], self.max_response_bytes)
                         {
-                            break Err((e, false));
+                            break Err((e, Fail::Refused));
                         }
                         if body.len() > self.max_response_bytes {
                             break Err((
@@ -818,7 +893,7 @@ impl Minted {
                                      to parse a truncated token response",
                                     self.max_response_bytes
                                 ),
-                                false,
+                                Fail::Refused,
                             ));
                         }
                     }
@@ -828,7 +903,7 @@ impl Minted {
                             Some(status) => Ok((status, std::mem::take(body))),
                             None => Err((
                                 "token endpoint response ended without a response head; refusing to parse a partial token response".to_string(),
-                                true,
+                                Fail::Outage,
                             )),
                         };
                     }
@@ -839,23 +914,20 @@ impl Minted {
                         "token endpoint connection failed mid-response; refusing to parse \
                                a partial token response"
                             .to_string(),
-                        true,
+                        Fail::Outage,
                     ))
                 }
                 Err(e) => {
                     break Err((
                         format!("token endpoint request failed: {}", conn_cause(e)),
-                        unreachable(e),
+                        Fail::of(endpoint_down(e)),
                     ))
                 }
             }
         };
         let retry = *retry_after;
         wire.close(conn);
-        match finished.and_then(|(status, body)| {
-            parse_response(u16::try_from(status).unwrap_or(0), &body, wall)
-                .map_err(|e| (e, outage_status(status)))
-        }) {
+        match finished.and_then(|(status, body)| answered(status, &body, wall)) {
             Ok((fresh, _)) if !fresh.token.is_empty() && fresh.expires_at <= wall => self.failed(
                 &mut ex,
                 now_ns,
@@ -879,37 +951,29 @@ impl Minted {
             }
 
             Ok((fresh, _)) if fresh.token.is_empty() => {
-                self.refresh_failed.store(true, Ordering::Release);
-                self.back_off(
+                let due = self.retry_later(
+                    &mut ex,
+                    now_ns,
                     wall,
-                    retry,
                     "the authorization server returned 200 with an empty access_token",
+                    Fail::Unusable,
+                    retry,
                 );
-                let due = if self.on_demand {
-                    u64::MAX
-                } else {
-                    now_ns.saturating_add(MIN_SLEEP_SECS * NS)
-                };
-                *ex = Exchange::Idle { due_ns: due };
                 (due, Some(Report::EmptyToken))
             }
 
             Ok((_, true)) => {
-                self.refresh_failed.store(true, Ordering::Release);
-                self.back_off(
+                let due = self.retry_later(
+                    &mut ex,
+                    now_ns,
                     wall,
-                    retry,
                     "the exchanged token holds bytes invalid in a header value",
+                    Fail::Unusable,
+                    retry,
                 );
-                let due = if self.on_demand {
-                    u64::MAX
-                } else {
-                    now_ns.saturating_add(MIN_SLEEP_SECS * NS)
-                };
-                *ex = Exchange::Idle { due_ns: due };
                 (due, Some(Report::TokenInvalidBytes))
             }
-            Ok((fresh, _)) => {
+            Ok((mut fresh, _)) => {
                 if fresh.token_type.is_none() && !self.untyped_warned.swap(true, Ordering::AcqRel) {
                     tracing::warn!(
                         module = "oauth",
@@ -917,6 +981,8 @@ impl Minted {
                          it); its token is presented as a bearer"
                     );
                 }
+                fresh.token_type = None;
+                fresh.issued_token_type = None;
                 let now = wall;
                 let ahead = next_refresh_secs(fresh.expires_at, now);
 
@@ -935,10 +1001,10 @@ impl Minted {
                     self.retry_at.store(0, Ordering::Release);
                 }
                 self.refresh_failed.store(false, Ordering::Release);
-                *ex = Exchange::Idle { due_ns: due };
+                *ex = Attempt::Idle { due_ns: due };
                 (due, Some(Report::Minted))
             }
-            Err((e, outage)) => self.failed(&mut ex, now_ns, wall, e, Fail::of(outage), retry),
+            Err((e, kind)) => self.failed(&mut ex, now_ns, wall, e, kind, retry),
         }
     }
 
@@ -955,15 +1021,32 @@ impl Minted {
     /// A failed mint at tick-clock `now_ns` and wall-clock `wall`: keep serving whatever token is
     fn failed(
         &self,
-        ex: &mut Exchange,
+        ex: &mut Attempt,
         now_ns: u64,
         wall: u64,
         e: String,
         kind: Fail,
         retry: Option<RetryAfter>,
     ) -> (u64, Option<Report>) {
+        let due = self.retry_later(ex, now_ns, wall, &e, kind, retry);
+        (due, Some(Report::MintFailed(e)))
+    }
+
+    /// THE ONE RETRY RULE of every failed mint, judged `kind`, at tick-clock `now_ns` and
+    /// wall-clock `wall`: the refresh is failed, an on-demand cell backs off ([`Minted::back_off`]),
+    /// and the next attempt is due a retry interval on (an on-demand cell's: on a request). The
+    /// tick-clock instant it is due at.
+    fn retry_later(
+        &self,
+        ex: &mut Attempt,
+        now_ns: u64,
+        wall: u64,
+        why: &str,
+        kind: Fail,
+        retry: Option<RetryAfter>,
+    ) -> u64 {
         self.refresh_failed.store(true, Ordering::Release);
-        self.back_off(wall, retry, &e);
+        self.back_off(wall, retry, why);
         self.outage.store(kind == Fail::Outage, Ordering::Release);
         self.unusable
             .store(kind == Fail::Unusable, Ordering::Release);
@@ -972,9 +1055,29 @@ impl Minted {
         } else {
             now_ns.saturating_add(MIN_SLEEP_SECS * NS)
         };
-        *ex = Exchange::Idle { due_ns: due };
-        (due, Some(Report::MintFailed(e)))
+        *ex = Attempt::Idle { due_ns: due };
+        due
     }
+}
+
+/// A finished reply at wall-clock `wall`, judged ([`parse_response`]): a status past 16 bits is no
+/// HTTP status at all; a failure of a reply that answered 2xx is UNUSABLE, else an outage or a
+/// refusal by its status.
+fn answered(status: u32, body: &[u8], wall: u64) -> Result<(CachedToken, bool), (String, Fail)> {
+    let Ok(code) = u16::try_from(status) else {
+        return Err((
+            format!("token endpoint returned status {status}, which is no HTTP status code"),
+            Fail::Unusable,
+        ));
+    };
+    parse_response(code, body, wall).map_err(|e| {
+        let kind = if (200..300).contains(&status) {
+            Fail::Unusable
+        } else {
+            Fail::of(outage_status(status))
+        };
+        (e, kind)
+    })
 }
 
 /// APPEND `bytes` to the token response `body`, growing it to what has arrived (never reserving
@@ -1006,7 +1109,7 @@ pub(crate) const fn outage_status(status: u32) -> bool {
 }
 
 /// Whether a connection error is the token endpoint being unreachable (an outage): a timeout, a
-const fn unreachable(e: ConnError) -> bool {
+const fn endpoint_down(e: ConnError) -> bool {
     matches!(
         e,
         ConnError::Timeout | ConnError::Closed | ConnError::Fault | ConnError::Pending

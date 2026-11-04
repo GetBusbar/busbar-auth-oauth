@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
-//! Reading an OAuth token endpoint's `expires_in`: the default a response that omits it gets, and
+//! Reading an OAuth token endpoint's JSON: the zeroizing top-level string member scanner
+//! ([`wiped_member`]) every secret member is read with (the access token, the error code, the
+//! service account's `private_key`), and `expires_in`'s default and tolerant decoding.
 
 use zeroize::Zeroizing;
 

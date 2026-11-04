@@ -28,7 +28,11 @@ Client credentials use RFC 6749 section 4.4. An omitted scope leaves the request
 
 `max_response_bytes` defaults to 256 KiB and accepts 1024 through 1048576 bytes. Blank or mistyped settings are refused by name. Unknown keys are refused; forwarded provider keys (`token_url`, `token_uri`, `scope`, `subject`) that a style does not read are ignored with a warning when that style opens.
 
-Scheduled styles refuse a request before the first token is available and refresh ahead of expiry, with a maximum refresh interval of 24 hours. Token exchange mints on demand and backs off after a failed exchange. Minted bearer fields retain their sensitive flag and secure-connection requirement through the host.
+Scheduled styles refuse a request before the first token is available and refresh ahead of expiry, with a maximum refresh interval of 24 hours. Token exchange mints on demand and backs off after a failed exchange (30 seconds, or the endpoint's `Retry-After` up to 300 seconds); while one scope backs off an outage of the token endpoint, a request for a scope not yet exchanged fails at once instead of reaching the endpoint. Minted bearer fields retain their sensitive flag and secure-connection requirement through the host.
+
+## Token endpoint egress
+
+Both token endpoint needs are in the `provider` egress class. A token endpoint on a private, loopback, link-local or other non-public address is refused by the host connector unless `advanced.allow_destinations` names it (an in-cluster identity provider, for example); once named, it mints, over `http` as well as `https`. A public endpoint needs no entry.
 
 ## Build
 

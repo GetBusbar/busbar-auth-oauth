@@ -191,6 +191,18 @@ fn field<T: for<'de> Deserialize<'de>>(
     }
 }
 
+/// A setting's read, its refusal (when it is one) kept in `refusals` so every refusal of a
+/// binding is named at once: `None` when it was refused.
+fn kept<T>(refusals: &mut Vec<Refusal>, read: Result<T, Refusal>) -> Option<T> {
+    match read {
+        Ok(value) => Some(value),
+        Err(refusal) => {
+            refusals.push(refusal);
+            None
+        }
+    }
+}
+
 /// A non-blank string setting.
 fn text(m: &Map<String, Value>, key: &str) -> Result<Option<String>, Refusal> {
     let value = field::<String>(m, key, "a string")?;
@@ -269,16 +281,23 @@ fn open_token_exchange(
                 .to_string(),
         ));
     }
-    let token_url = text(&m, "token_url").map_err(|r| vec![r])?;
-    if token_url.is_none() {
-        refusals.push(Refusal::Settings(
+    let token_url = kept(&mut refusals, text(&m, "token_url"));
+    match &token_url {
+        Some(None) => refusals.push(Refusal::Settings(
             "uses auth: oauth-token-exchange but has no `token_url` (the authorization server's \
              token endpoint busbar's subject token is exchanged at)"
                 .to_string(),
-        ));
+        )),
+        Some(Some(url)) if busbar_contract::net::parse_url(url).is_err() => {
+            refusals.push(Refusal::Settings(
+                "outbound auth setting `token_url` is invalid: it must be an absolute URL"
+                    .to_string(),
+            ));
+        }
+        _ => {}
     }
-    let resource = text(&m, "resource").map_err(|r| vec![r])?;
-    if resource.is_none() {
+    let resource = kept(&mut refusals, text(&m, "resource"));
+    if matches!(resource, Some(None)) {
         refusals.push(Refusal::Settings(
             "uses auth: oauth-token-exchange but has no `resource` — the RFC 8707 resource \
              indicator the exchanged token is audience-bound to. A token minted for one upstream \
@@ -286,15 +305,28 @@ fn open_token_exchange(
                 .to_string(),
         ));
     }
-    let subject_token_type = text(&m, "subject_token_type")
-        .map_err(|r| vec![r])?
-        .unwrap_or_else(|| mint::token_exchange::ACCESS_TOKEN_TYPE.to_string());
-    let max = max_response_bytes(&m).map_err(|r| vec![r])?;
-    let (Some(subject), Some(token_url), Some(resource), true) =
-        (subject, token_url, resource, refusals.is_empty())
+    let subject_token_type = kept(&mut refusals, text(&m, "subject_token_type"));
+    let max = kept(&mut refusals, max_response_bytes(&m));
+    let (
+        Some(subject),
+        Some(Some(token_url)),
+        Some(Some(resource)),
+        Some(subject_token_type),
+        Some(max),
+        true,
+    ) = (
+        subject,
+        token_url,
+        resource,
+        subject_token_type,
+        max,
+        refusals.is_empty(),
+    )
     else {
         return Err(refusals);
     };
+    let subject_token_type =
+        subject_token_type.unwrap_or_else(|| mint::token_exchange::ACCESS_TOKEN_TYPE.to_string());
     let key = cache.key(&[
         OAUTH_TOKEN_EXCHANGE.as_bytes(),
         credential.unwrap_or_default(),
@@ -363,8 +395,8 @@ fn open_client_credentials(
                 .to_string(),
         ));
     }
-    let token_url = text(m, "token_url").map_err(|r| vec![r])?;
-    if token_url.is_none() {
+    let token_url = kept(&mut refusals, text(m, "token_url"));
+    if matches!(token_url, Some(None)) {
         refusals.push(Refusal::Settings(
             "uses auth: oauth-client-credentials but has no `token_url` (the OAuth token endpoint \
              the client credentials are POSTed to)"
@@ -381,7 +413,7 @@ fn open_client_credentials(
             ));
             None
         }
-        _ => text(m, "scope").map_err(|r| vec![r])?,
+        _ => kept(&mut refusals, text(m, "scope")).flatten(),
     };
     let cred = credential.unwrap_or("");
     if credential.is_some() {
@@ -389,11 +421,8 @@ fn open_client_credentials(
             refusals.push(Refusal::Credential(e));
         }
     }
-    let max = max_response_bytes(m).map_err(|r| vec![r])?;
-    if !refusals.is_empty() {
-        return Err(refusals);
-    }
-    let Some(token_url) = token_url else {
+    let max = kept(&mut refusals, max_response_bytes(m));
+    let (Some(Some(token_url)), Some(max), true) = (token_url, max, refusals.is_empty()) else {
         return Err(refusals);
     };
     let built = mint::oauth_client_credentials::build(cred, &token_url, scope.as_deref())

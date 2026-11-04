@@ -53,7 +53,7 @@ pub(crate) fn validate_credential(credential: &str) -> Result<(), String> {
 
 impl ClientCreds {
     /// The token request (RFC 6749 §4.4): the form as `serde_urlencoded` writes it, the client
-    pub(crate) fn request(&self) -> Result<TokenRequest, String> {
+    pub(crate) fn request(&self) -> TokenRequest {
         let form = FormBody::new()
             .public("grant_type", "client_credentials")
             .public("client_id", &self.client_id)
@@ -62,11 +62,7 @@ impl ClientCreds {
             Some(scope) => form.public("scope", scope),
             None => form,
         };
-        Ok(TokenRequest::form(
-            super::need::TOKEN_URL,
-            self.token_url.clone(),
-            form,
-        ))
+        TokenRequest::form(super::need::TOKEN_URL, self.token_url.clone(), form)
     }
 }
 

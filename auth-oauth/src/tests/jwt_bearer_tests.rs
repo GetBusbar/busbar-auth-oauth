@@ -335,8 +335,6 @@ fn the_private_key_is_read_into_one_wiped_buffer_with_every_escape_resolved() {
         "A\u{1F600}/\u{8}\u{c}\r"
     );
     assert!(private_key(r#"{"private_key":1}"#).is_err());
-
-    let _ = test_signer("https://oauth2.googleapis.com/token", None);
 }
 
 #[test]

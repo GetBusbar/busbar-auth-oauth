@@ -508,7 +508,13 @@ fn a_reply_code_past_sixteen_bits_is_a_failure_not_a_token() {
     ]);
     let m = Minted::new(client_credentials(), DEFAULT_MAX_RESPONSE_BYTES);
     let (_, report) = m.tick(0, now_epoch(), Some(&w));
-    assert!(matches!(report, Some(Report::MintFailed(_))), "{report:?}");
+    assert_eq!(
+        report,
+        Some(Report::MintFailed(
+            "token endpoint returned status 65736, which is no HTTP status code".to_string()
+        )),
+        "the code is named as the host reported it"
+    );
 }
 
 /// THE LOSSY TEXT OF A TOKEN RESPONSE IS BUILT ONCE: a body with bytes that are not UTF-8 becomes
@@ -530,25 +536,15 @@ fn no_granted_need_mints_nothing() {
     assert_eq!(m.tick(1, now_epoch(), None), (due, None));
 }
 
+/// THE TOKEN ENDPOINT NEEDS ARE DECLARED IN THE `provider` EGRESS CLASS (commit 580ceb9): the
+/// class the connector refuses a private address in unless `advanced.allow_destinations` names it,
+/// each need pinned to its setting. The refusal itself is the host connector's.
 #[test]
-fn a_token_url_on_a_private_host_is_refused_unless_allowlisted() {
-    use busbar_contract::abi::host::conn::connector::{
-        EGRESS_DEFAULT, EGRESS_OPEN_WEB, EGRESS_PROVIDER,
-    };
-    const PRIVATE_REFUSED_IN: [u32; 3] = [EGRESS_DEFAULT, EGRESS_PROVIDER, EGRESS_OPEN_WEB];
+fn the_token_endpoint_needs_are_declared_in_the_provider_class() {
+    use busbar_contract::abi::host::conn::connector::EGRESS_PROVIDER;
     assert_eq!(crate::NEEDS.len(), 2, "token_url and token_uri");
     for (i, n) in crate::NEEDS.iter().enumerate() {
         assert_ne!(n.target_from.len, 0, "need {i} is pinned to its setting");
-        let lifted = n.egress_class == EGRESS_DEFAULT && n.target_from.len != 0;
-        assert!(
-            PRIVATE_REFUSED_IN.contains(&n.egress_class) && !lifted,
-            "need {i}: class {} admits a private token endpoint with no allow entry",
-            n.egress_class
-        );
-        assert_ne!(
-            n.egress_class, EGRESS_OPEN_WEB,
-            "need {i}: an allowlisted private token endpoint over http (1.5.5) still mints"
-        );
         assert_eq!(n.egress_class, EGRESS_PROVIDER, "need {i}");
     }
 }
@@ -615,9 +611,9 @@ fn an_exchange_in_flight_reserves_no_buffer_the_size_of_the_cap() {
     ]);
     let m = Minted::new(client_credentials(), DEFAULT_MAX_RESPONSE_BYTES);
     assert_eq!(m.tick(0, now_epoch(), Some(&w)), (IN_FLIGHT_POLL_NS, None));
-    let held = match &*m.exchange.lock().unwrap() {
-        Exchange::InFlight { body, .. } => body.capacity(),
-        Exchange::Idle { .. } => panic!("the exchange is in flight"),
+    let held = match &*m.attempt.lock().unwrap() {
+        Attempt::InFlight { body, .. } => body.capacity(),
+        Attempt::Idle { .. } => panic!("the exchange is in flight"),
     };
     assert!(
         held <= READ_BUF_BYTES,
@@ -647,12 +643,8 @@ fn an_on_demand_read_racing_the_exchange_never_presents_nothing() {
         Minter::TokenExchange(token_exchange::Scoped::new(exchange, "s")),
         DEFAULT_MAX_RESPONSE_BYTES,
     );
-    let (entered, arrived) = std::sync::mpsc::sync_channel(0);
-    let (release, resume) = std::sync::mpsc::sync_channel(0);
-    *cell.before_usable.lock().unwrap() = Some(Box::new(move || {
-        entered.send(()).unwrap();
-        resume.recv().unwrap();
-    }));
+    let (pause, arrived, release) = crate::test_support::pause_once();
+    assert!(cell.before_usable.set(pause).is_ok(), "the seam is unset");
     let answer = std::thread::scope(|threads| {
         let reader = threads.spawn(|| cell.read(now_epoch(), seen));
 
@@ -987,4 +979,199 @@ fn a_closed_token_response_needs_its_protocol_end_and_a_head() {
         Some(Report::Minted)
     );
     assert_eq!(cell.read(now_epoch(), seen), "Header(\"Bearer ended\")");
+}
+
+/// A BYTE THAT IS NOT UTF-8 NEVER BECOMES PART OF A MINTED TOKEN: the body is read lossily as
+/// 1.5.5 read it, but an access token holding a replaced byte is one the endpoint never issued, so
+/// it is not presented (as 1.5.5's header check refused it); a bad byte elsewhere in the body
+/// leaves the token as issued, and an error body is still read for its status line.
+#[test]
+fn a_byte_that_is_not_utf8_never_becomes_part_of_a_minted_token() {
+    let (_, invalid) =
+        parse_response(200, b"{\"access_token\":\"a\xffb\",\"expires_in\":3600}", 0).unwrap();
+    assert!(invalid, "a replaced byte in the token is not presented");
+    let w = Scripted::default();
+    w.push(vec![
+        Step::Head(200),
+        Step::Body(
+            b"{\"access_token\":\"a\xffb\",\"expires_in\":3600}".to_vec(),
+            true,
+        ),
+    ]);
+    let m = Minted::new(client_credentials(), DEFAULT_MAX_RESPONSE_BYTES);
+    assert_eq!(
+        m.tick(0, now_epoch(), Some(&w)).1,
+        Some(Report::TokenInvalidBytes)
+    );
+    assert!(!m.is_ready(), "nothing was stored");
+    let (t, invalid) = parse_response(
+        200,
+        b"{\"access_token\":\"t\",\"note\":\"caf\xe9\",\"expires_in\":3600}",
+        0,
+    )
+    .unwrap();
+    assert!(!invalid, "a bad byte outside the token leaves it as issued");
+    assert_eq!(
+        seen(Read::Header(t.header().unwrap())),
+        "Header(\"Bearer t\")"
+    );
+    let (t, invalid) = parse_response(
+        200,
+        "{\"access_token\":\"a\u{FFFD}b\",\"expires_in\":3600}".as_bytes(),
+        0,
+    )
+    .unwrap();
+    assert!(!invalid, "a U+FFFD the endpoint sent is its token");
+    assert!(t.header().is_some());
+    assert_eq!(
+        parse_response(503, b"\xff", 0).err().as_deref(),
+        Some("token endpoint returned 503 Service Unavailable")
+    );
+}
+
+/// EVERY HTTP-DATE FORMAT IS READ (RFC 9110 §5.6.7: a recipient MUST accept all three): a
+/// `Retry-After` in the obsolete RFC 850 or asctime form states the same instant as IMF-fixdate.
+#[test]
+fn retry_after_reads_every_http_date_format() {
+    let at = Some(RetryAfter::At(784_111_777));
+    for v in [
+        "Sun, 06 Nov 1994 08:49:37 GMT",
+        "Sunday, 06-Nov-94 08:49:37 GMT",
+        "Sun Nov  6 08:49:37 1994",
+    ] {
+        assert_eq!(retry_after(v.as_bytes()), at, "{v}");
+    }
+    assert_eq!(
+        retry_after(b"Friday, 15-Jan-27 08:03:20 GMT"),
+        retry_after(b"Fri, 15 Jan 2027 08:03:20 GMT"),
+        "a two-digit year near the clock floor is this century's"
+    );
+    assert_eq!(retry_after(b"120"), Some(RetryAfter::Secs(120)));
+    for bad in [
+        "Sun, 06 Nov 1994 08:49:37 UTC",
+        "Sun Nov 6 08:49:37",
+        "Sunday, 06-Nov-1994 08:49:37 GMT",
+        "soon",
+    ] {
+        assert_eq!(retry_after(bad.as_bytes()), None, "{bad}");
+    }
+}
+
+/// A need whose clock answers once and then fails, and whose reply never ends: empty body pieces.
+#[derive(Default)]
+struct ClockFailsMidRead {
+    clocks: std::sync::atomic::AtomicU32,
+}
+
+impl Wire for ClockFailsMidRead {
+    fn open(&self, _: &TokenRequest, _: &mut SealedWrite, _: u64) -> Result<ConnId, ConnError> {
+        Ok(ConnId(7))
+    }
+    fn read(&self, _: ConnId, _: &mut [u8]) -> Result<Got, ConnError> {
+        Ok(Got {
+            kind: PieceKind::Body,
+            len: 0,
+            end: false,
+            status: None,
+            retry_after: None,
+        })
+    }
+    fn close(&self, _: ConnId) {}
+    fn clock(&self) -> Option<HostClock> {
+        (self.clocks.fetch_add(1, Ordering::AcqRel) == 0).then_some(HostClock {
+            wall_secs: now_epoch(),
+            mono_ns: 0,
+        })
+    }
+}
+
+/// THE READ LOOP IS BOUNDED WHEN THE CLOCK FAILS MID-READ: with no reading to judge the deadline
+/// on, a tick yields after its bounded number of reads instead of reading on unbounded.
+#[test]
+fn a_clock_that_fails_mid_read_still_bounds_the_read_loop() {
+    let w = ClockFailsMidRead::default();
+    let m = Minted::new(client_credentials(), DEFAULT_MAX_RESPONSE_BYTES);
+    assert_eq!(
+        m.tick(0, now_epoch(), Some(&w)),
+        (IN_FLIGHT_POLL_NS, None),
+        "the tick yields, the exchange still in flight"
+    );
+    assert!(!m.idle());
+}
+
+/// A 2XX THAT IS NO TOKEN RESPONSE IS UNUSABLE (WARN), not a refusal (INFO): the endpoint answered
+/// success, but what it sent cannot be read; a 4xx with the same body stays a refusal.
+#[test]
+fn a_success_reply_that_is_no_token_response_is_unusable() {
+    for (status, unusable) in [(200, true), (400, false)] {
+        let w = Scripted::default();
+        w.push(vec![
+            Step::Head(status),
+            Step::Body(b"<html>a proxy page</html>".to_vec(), true),
+        ]);
+        let m = Minted::new(client_credentials(), DEFAULT_MAX_RESPONSE_BYTES);
+        let (_, report) = m.tick(0, now_epoch(), Some(&w));
+        assert!(matches!(report, Some(Report::MintFailed(_))), "{report:?}");
+        assert_eq!((m.unusable(), m.outage()), (unusable, false), "{status}");
+    }
+}
+
+/// A LANDED TOKEN KEEPS NONE OF THE REPLY'S TYPE WORDS: `token_type` and `issued_token_type` are
+/// judged as the token lands and are not held for its life (an untrusted reply sizes them).
+#[test]
+fn a_landed_token_keeps_none_of_the_replys_type_words() {
+    let w = Scripted::default();
+    w.ok(r#"{"access_token":"t","token_type":"Bearer","issued_token_type":"urn:ietf:params:oauth:token-type:access_token","expires_in":3600}"#);
+    let m = Minted::new(client_credentials(), DEFAULT_MAX_RESPONSE_BYTES);
+    assert_eq!(m.tick(0, now_epoch(), Some(&w)).1, Some(Report::Minted));
+    let held = m.current();
+    assert_eq!(
+        (
+            held.token_type.as_deref(),
+            held.issued_token_type.as_deref()
+        ),
+        (None, None)
+    );
+}
+
+/// A READ RACING A FAILED EXCHANGE DOES NOT RE-ARM IT: a read that finds an on-demand cell
+/// unusable while it backs off a failure leaves its next exchange unarmed (the check is made
+/// under the exchange's lock, which the failure is recorded under); past the window it re-arms.
+#[test]
+fn an_on_demand_read_inside_the_back_off_does_not_rearm_the_exchange() {
+    let exchange = Arc::new(token_exchange::build(
+        "subject",
+        "https://as.example/token",
+        token_exchange::ACCESS_TOKEN_TYPE,
+        "https://tools.example/rpc",
+    ));
+    let w = Scripted::default();
+    w.push(vec![Step::Head(503), Step::Body(b"busy".to_vec(), true)]);
+    let cell = Minted::new(
+        Minter::TokenExchange(token_exchange::Scoped::new(exchange, "s")),
+        DEFAULT_MAX_RESPONSE_BYTES,
+    );
+    let now = now_epoch();
+    assert!(matches!(
+        cell.tick(0, now, Some(&w)).1,
+        Some(Report::MintFailed(_))
+    ));
+    assert!(
+        cell.backing_off(now),
+        "positive control: the scope backs off"
+    );
+    assert_eq!(cell.read(now, seen), "Wait");
+    assert_eq!(
+        cell.tick(1, now, Some(&w)),
+        (u64::MAX, None),
+        "no exchange is re-armed inside the window"
+    );
+    assert_eq!(w.sent.lock().unwrap().len(), 1);
+    assert_eq!(cell.read(now + MAX_BACKOFF_SECS, seen), "Wait");
+    w.ok(r#"{"access_token":"t","expires_in":3600}"#);
+    assert_eq!(
+        cell.tick(2, now, Some(&w)).1,
+        Some(Report::Minted),
+        "past the window a read re-arms the exchange"
+    );
 }

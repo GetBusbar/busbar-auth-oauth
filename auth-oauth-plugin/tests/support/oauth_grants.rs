@@ -1217,6 +1217,19 @@ fn token_exchange_actual_doors() {
     grant_case(token_exchange_case());
 }
 
+/// What a call on a scheduled binding whose first mint failed is told.
+const NO_TOKEN: &str = "no OAuth token could be minted for this binding (see diagnostics \
+     BUSBAR-4014/4015/4016); the call is refused rather than sent unauthenticated, and the mint \
+     retries on its schedule";
+
+/// What a call that waited on a token exchange that failed is told.
+const EXCHANGE_FAILED: &str = "the RFC 8693 token exchange for this call's scope failed; the call \
+     is refused rather than made unauthenticated (see diagnostics BUSBAR-4014/4015/4016)";
+
+/// How a call inside a failed exchange's back-off window is told, up to its window's length.
+const BACKING_OFF: &str = "the RFC 8693 token exchange for this call's scope failed (token \
+     endpoint returned 500 Internal Server Error); it is not tried again for ";
+
 fn grant_case(x: OAuthGrant) {
     let mut refusals = Vec::new();
     let mut before_mint = Vec::new();
@@ -1333,10 +1346,25 @@ fn grant_case(x: OAuthGrant) {
         };
         assert!(failure.starts_with(&format!("{} ", m.refusal)), "{failure}");
         if m.on_demand.is_some() {
-            std::thread::sleep(Duration::from_millis(200));
+            assert_eq!(
+                failure,
+                format!("{} {EXCHANGE_FAILED}", m.refusal),
+                "the waiting call is told its exchange failed"
+            );
+            let again = count(&p, 1, || {
+                submit_fields(&p, &d, h, &x.head, flags, point).answered()
+            });
+            assert!(
+                again.starts_with(&format!("{} {BACKING_OFF}", m.refusal)),
+                "a call inside the back-off window fails fast with the cached reason: {again}"
+            );
             assert_eq!(failing.count(), 1, "failed exchange does not retry");
         } else {
-            assert!(!failure.split_once(' ').unwrap().1.is_empty());
+            assert_eq!(
+                failure,
+                format!("{} {NO_TOKEN}", m.refusal),
+                "the call is told no token could be minted"
+            );
             assert_eq!(
                 count(&p, 1, || ready_fact(&p, h)),
                 "Ready lease=false  ready=0"

@@ -3,9 +3,10 @@
 
 //! ONE INSTANCE: the handles (generation data), the token cache (outlives handles) and the
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock, RwLockWriteGuard};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, RwLock, RwLockWriteGuard};
 
 use busbar_contract::abi::mechanism::ticket::Ticket;
 use busbar_contract::abi::sdk::auth_outbound::Diags;
@@ -15,7 +16,7 @@ use busbar_contract::abi::sdk::life::Refusal;
 use zeroize::Zeroizing;
 
 use crate::mint::host_wire::HostWire;
-use crate::mint::{Minted, Minter, Report, Wire, MIN_SLEEP_SECS};
+use crate::mint::{Minted, Minter, Pause, Report, Wire, MIN_SLEEP_SECS};
 use crate::style::Binding;
 
 /// The index of each diagnostic id in the Statement (`crate::DIAG_IDS`).
@@ -35,8 +36,10 @@ pub(crate) const MAX_SCOPE_CELLS: usize = 256;
 
 /// Why a new scope is refused when every one of its binding's [`MAX_SCOPE_CELLS`] cells is busy.
 pub(crate) const SCOPES_BUSY: &str = "the token exchange binding already holds its 256 scope \
-     cells, each with an exchange in flight or a call waiting on it; the call is refused rather \
-     than made unauthenticated";
+     cells, each with an exchange in flight, a call waiting on it or a failure backing off; the \
+     call is refused rather than made unauthenticated";
+
+const _: () = assert!(MAX_SCOPE_CELLS == 256, "SCOPES_BUSY states the cell limit");
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
@@ -68,8 +71,9 @@ pub struct Oauth {
     exchange_failed: Mutex<Vec<Ticket>>,
     /// The instance's own random key the token cache keys are derived under (HMAC-SHA-256), so no
     cache_secret: Zeroizing<[u8; 32]>,
-    #[cfg(test)]
-    pub(crate) before_mint_park: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    /// A point a ticketed minted-style call passes between its first read and its park, where a
+    /// race test holds the thread ([`Pause`]; set only by the side-file tests).
+    pub(crate) before_mint_park: OnceLock<Pause>,
 }
 
 impl crate::style::TokenCache for Oauth {
@@ -137,22 +141,8 @@ impl Oauth {
         Ok(Self::keyed(generation, None, cache_secret()?))
     }
 
-    /// A test's instance at `generation`.
-    #[cfg(test)]
-    pub(crate) fn new(generation: u64) -> Self {
-        Self::with_wire(generation, None)
-    }
-
-    /// An instance over any [`Wire`] (the unit tests' double).
-    #[cfg(test)]
-    pub(crate) fn with_wire(generation: u64, wire: Option<Box<dyn Wire>>) -> Self {
-        Self::keyed(
-            generation,
-            wire,
-            cache_secret().expect("the system random source"),
-        )
-    }
-
+    /// An instance at `generation` over `wire` (`None`: the host's need, as production opens it;
+    /// the unit tests hand their double), its cache keyed by `cache_secret`.
     fn keyed(
         generation: u64,
         wire: Option<Box<dyn Wire>>,
@@ -160,8 +150,7 @@ impl Oauth {
     ) -> Self {
         Self {
             cache_secret,
-            #[cfg(test)]
-            before_mint_park: Mutex::new(None),
+            before_mint_park: OnceLock::new(),
             wire,
             driver: Mutex::new(Ticket::NONE),
             issued: AtomicU32::new(0),
@@ -216,7 +205,7 @@ impl Oauth {
         ticket: Ticket,
         usable: impl Fn(&Minted) -> bool,
         mine: impl Fn(&Minted) -> bool,
-    ) -> Result<Arc<Minted>, &'static str> {
+    ) -> Result<Arc<Minted>, Cow<'static, str>> {
         if let Some(cell) = self
             .cache
             .read()
@@ -229,6 +218,14 @@ impl Oauth {
         }
         let mut cache = self.cache_mut();
         if !cache.contains_key(&key) {
+            let now = self.wall_secs();
+            if let Some(why) = cache
+                .values()
+                .filter(|c| mine(c))
+                .find_map(|c| c.outage_reason(now))
+            {
+                return Err(Cow::Owned(why));
+            }
             self.make_room(&mut cache, &mine)?;
         }
         let cell = Arc::clone(cache.entry(key).or_insert_with(|| {
@@ -248,14 +245,17 @@ impl Oauth {
     }
 
     /// Room in `cache` for one more of a binding's scope cells (`mine`): at [`MAX_SCOPE_CELLS`],
+    /// the least recently used cell that is idle, unwaited and not backing off a failure (its
+    /// back-off would go with it) leaves; with none, the new scope is refused ([`SCOPES_BUSY`]).
     fn make_room(
         &self,
         cache: &mut HashMap<[u8; 32], Arc<Minted>>,
         mine: &impl Fn(&Minted) -> bool,
-    ) -> Result<(), &'static str> {
+    ) -> Result<(), Cow<'static, str>> {
         if cache.values().filter(|c| mine(c)).count() < MAX_SCOPE_CELLS {
             return Ok(());
         }
+        let now = self.wall_secs();
         let waiting = lock(&self.exchange_waiters);
         let lru = cache
             .iter()
@@ -263,11 +263,12 @@ impl Oauth {
                 mine(c)
                     && Arc::strong_count(c) == 1
                     && c.idle()
+                    && !c.backing_off(now)
                     && waiting.get(*k).is_none_or(Vec::is_empty)
             })
             .min_by_key(|(_, c)| c.last_used())
             .map(|(k, _)| *k)
-            .ok_or(SCOPES_BUSY)?;
+            .ok_or(Cow::Borrowed(SCOPES_BUSY))?;
         drop(waiting);
         cache.remove(&lru);
         Ok(())
@@ -504,6 +505,9 @@ impl Oauth {
 
     /// A scheduled cell no handle holds leaves the cache once it is idle (what `retire`'s doc
     fn reap(&self, key: [u8; 32], cell: &Arc<Minted>) -> bool {
+        if Arc::strong_count(cell) != 2 || !cell.idle() {
+            return false;
+        }
         let mut cache = self.cache_mut();
         let orphan = Arc::strong_count(cell) == 2
             && cell.idle()
@@ -527,6 +531,11 @@ impl Oauth {
             None => None,
             Some(Report::Minted) => Some(false),
             Some(Report::TokenInvalidBytes) => {
+                tracing::warn!(
+                    module = "oauth",
+                    "the RFC 8693 exchange got a token with bytes invalid in a header value; it is \
+                     not stored, and the scope backs off"
+                );
                 diags.push(
                     diag::OAUTH_TOKEN_INVALID_BYTES,
                     WARN,
@@ -536,6 +545,11 @@ impl Oauth {
                 Some(true)
             }
             Some(Report::EmptyToken) => {
+                tracing::warn!(
+                    module = "oauth",
+                    "the RFC 8693 exchange returned 200 with an empty access_token; the scope \
+                     backs off"
+                );
                 diags.push(
                     diag::OAUTH_EMPTY_TOKEN,
                     WARN,
@@ -569,12 +583,18 @@ impl Oauth {
                 }
             }
         }
-        let mut cache = self.cache_mut();
-        let waited = lock(&self.exchange_waiters)
-            .get(&key)
-            .is_some_and(|w| !w.is_empty());
         let now = self.wall_secs();
-        if !waited && cell.idle() && !cell.usable(now) && !cell.backing_off(now) {
+        let spent = || {
+            let waited = lock(&self.exchange_waiters)
+                .get(&key)
+                .is_some_and(|w| !w.is_empty());
+            !waited && cell.idle() && !cell.usable(now) && !cell.backing_off(now)
+        };
+        if !spent() {
+            return;
+        }
+        let mut cache = self.cache_mut();
+        if spent() {
             cache.remove(&key);
         }
     }

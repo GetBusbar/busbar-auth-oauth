@@ -8,7 +8,7 @@ use crate::mint;
 use crate::mint::tests::{now_epoch, Scripted, Step};
 use crate::mint::TokenRequest;
 use crate::style;
-use crate::test_support::{self, TestHost};
+use crate::test_support::{self, fields_at, TestHost};
 use crate::Ask;
 use busbar_contract::abi::mechanism::call::Outcome;
 use busbar_contract::abi::sdk::auth_outbound::FieldsAnswer;
@@ -47,6 +47,23 @@ fn open(o: &Oauth, style: &str, cred: &str, settings: &str) -> u64 {
     let cell = style::open_binding(style, Some(cred.as_bytes()), Some(settings.as_bytes()), o)
         .expect("the binding opens");
     o.keep(cell)
+}
+
+/// The unit tests' instances: production opens one through [`Oauth::opened`] only.
+impl Oauth {
+    /// A test's instance at `generation`.
+    pub(crate) fn new(generation: u64) -> Self {
+        Self::with_wire(generation, None)
+    }
+
+    /// An instance over any [`Wire`] (the unit tests' double).
+    pub(crate) fn with_wire(generation: u64, wire: Option<Box<dyn Wire>>) -> Self {
+        Self::keyed(
+            generation,
+            wire,
+            cache_secret().expect("the system random source"),
+        )
+    }
 }
 
 /// One `fields` call, as the kit's door answers it.
@@ -100,7 +117,7 @@ fn a_scheduled_binding_refuses_before_its_first_mint_without_presenting_or_parki
         let Poll::Ready(FieldsAnswer::Failed(reason)) = answer else {
             panic!("an unminted binding must fail closed: {answer:?}");
         };
-        assert!(!reason.trim().is_empty());
+        assert_eq!(reason, crate::mint::NO_TOKEN, "the caller is told why");
         reasons.push(reason.into_owned());
         assert_eq!(
             presented, 0,
@@ -443,12 +460,8 @@ fn a_mint_landing_between_the_read_and_the_park_is_not_a_lost_wake() {
         slot: 7,
         generation: 1,
     };
-    let (entered, arrived) = std::sync::mpsc::sync_channel(0);
-    let (release, resume) = std::sync::mpsc::sync_channel(0);
-    *o.before_mint_park.lock().unwrap() = Some(Box::new(move || {
-        entered.send(()).unwrap();
-        resume.recv().unwrap();
-    }));
+    let (pause, arrived, release) = test_support::pause_once();
+    assert!(o.before_mint_park.set(pause).is_ok(), "the seam is unset");
     let answered = std::thread::scope(|threads| {
         let caller = threads.spawn(|| fields(&o, &host, h, call));
         arrived.recv().unwrap();
@@ -515,9 +528,13 @@ fn a_cell_settled_between_the_lookup_and_the_park_is_not_a_lost_wake() {
         });
         arrived.recv().unwrap();
 
-        let removed = o.cache.try_write().ok().map(|mut cache| cache.remove(&key));
+        let locked = o.cache.try_write().is_err();
         release.send(()).unwrap();
-        assert!(!matches!(removed, Some(None)), "the exact cell was reached");
+        assert!(
+            locked,
+            "the call holds the cache from its lookup to its park, so no settle can remove the \
+             cell in between"
+        );
         drop(caller.join().unwrap());
     });
     w.ok(r#"{"access_token":"tok-s","expires_in":3600}"#);
@@ -597,35 +614,6 @@ impl Wire for HostClocked {
             wall_secs: self.1.load(Ordering::Acquire),
             mono_ns: 0,
         })
-    }
-}
-
-/// Calls `fields` with the host's wall timestamp, ticket and scope.
-fn fields_at(
-    o: &Oauth,
-    host: &TestHost,
-    handle: u64,
-    ticket: Ticket,
-    scope: Option<&str>,
-    timestamp: u64,
-) -> (Outcome, String) {
-    let mut written = Vec::new();
-    let ask = crate::Ask {
-        handle,
-        own: true,
-        scope: scope.map(str::as_bytes),
-        ticket,
-        timestamp,
-    };
-    let answer = o.answer(&ask, Some(&host.host), &mut |h| {
-        written.push(format!("authorization: {}", test_support::bearer_text(h)));
-    });
-    match answer {
-        std::task::Poll::Ready(busbar_contract::abi::sdk::auth_outbound::FieldsAnswer::Ready) => {
-            (Outcome::Ready, written.join(" ; "))
-        }
-        std::task::Poll::Pending => (Outcome::Pending, String::new()),
-        std::task::Poll::Ready(_) => (Outcome::Refused, String::new()),
     }
 }
 
@@ -718,12 +706,19 @@ fn token_expiry_and_caching_are_judged_on_the_hosts_clock() {
     assert_eq!(
         fields_at(&o, &host, x, later, Some("s"), FAR_FUTURE).0,
         Outcome::Pending,
-        "a host clock far in the future sees the cached exchange token as expired: a new exchange"
+        "a host clock far in the future sees the cached exchange token as expired: the call waits"
     );
     assert_eq!(
         w.sent.lock().unwrap().len(),
         sent,
         "the cached token was served without a new exchange until the host's clock passed it"
+    );
+    w.ok(r#"{"access_token":"tok-y","expires_in":3600}"#);
+    o.tick(3_000, Ticket::NONE, Some(&host.host), &mut diags);
+    assert_eq!(
+        w.sent.lock().unwrap().len(),
+        sent + 1,
+        "the expired token armed a fresh exchange, which the next tick sends"
     );
 }
 
@@ -1084,6 +1079,152 @@ fn a_scope_cell_with_waiters_is_never_evicted() {
         256,
         "no waited cell was evicted"
     );
+}
+
+/// A SCOPE BACKING OFF A FAILURE KEEPS ITS WINDOW: at the cap its cell is never the one evicted
+/// (a fresh cell would forget the back-off and re-hit the token endpoint at once).
+#[test]
+fn a_scope_cell_backing_off_a_failure_is_never_evicted() {
+    let host = TestHost::new();
+    let w = Arc::new(Scripted::default());
+    let o = instance(&w);
+    let h = exchange_binding(&o);
+    let Some(Binding::Exchange(x)) = o.bound(h) else {
+        panic!("an exchange binding")
+    };
+    let call = |i: u32| Ticket {
+        slot: 3_000 + i,
+        generation: 1,
+    };
+    assert_eq!(
+        test_support::fields(&o, &host, h, call(0), Some("f0")).0,
+        Outcome::Pending
+    );
+    w.push(vec![
+        Step::Head(401),
+        Step::Body(br#"{"error":"invalid_scope"}"#.to_vec(), true),
+    ]);
+    o.tick(1_000, Ticket::NONE, Some(&host.host), &mut Diags::default());
+    assert_eq!(
+        test_support::fields(&o, &host, h, call(0), Some("f0")).0,
+        Outcome::Failed,
+        "positive control: the first scope's exchange failed and backs off"
+    );
+    for i in 1..256_u32 {
+        assert_eq!(
+            test_support::fields(&o, &host, h, call(i), Some(&format!("s{i}"))).0,
+            Outcome::Pending,
+            "a refusal (4xx) of one scope does not hold the others back"
+        );
+        w.ok(r#"{"access_token":"tok","expires_in":3600}"#);
+    }
+    o.tick(2_000, Ticket::NONE, Some(&host.host), &mut Diags::default());
+    assert_eq!(o.cache.read().unwrap().len(), 256);
+    assert_eq!(
+        test_support::fields(&o, &host, h, call(256), Some("s256")).0,
+        Outcome::Pending
+    );
+    let cache = o.cache.read().unwrap();
+    assert!(
+        cache.contains_key(&x.scope_key(b"f0")),
+        "the least recently used cell is backing off: it stays, its window with it"
+    );
+    assert!(
+        !cache.contains_key(&x.scope_key(b"s1")),
+        "the least recently used cell not backing off left"
+    );
+}
+
+/// AN OUTAGE BACKS OFF THE BINDING, NOT ONLY ITS SCOPE: while one scope's exchange backs off a
+/// 5xx, a call stating a scope the binding holds no cell for fails at once rather than exchange
+/// (caller-stated scopes cannot hammer a token endpoint that is down).
+#[test]
+fn a_new_scope_is_not_exchanged_while_the_binding_backs_off_an_outage() {
+    let host = TestHost::new();
+    let w = Arc::new(Scripted::default());
+    let o = instance(&w);
+    let h = exchange_binding(&o);
+    let call = |i: u32| Ticket {
+        slot: 4_000 + i,
+        generation: 1,
+    };
+    assert_eq!(
+        test_support::fields(&o, &host, h, call(0), Some("a")).0,
+        Outcome::Pending
+    );
+    w.push(vec![Step::Head(503), Step::Body(b"busy".to_vec(), true)]);
+    o.tick(1_000, Ticket::NONE, Some(&host.host), &mut Diags::default());
+    assert_eq!(
+        test_support::fields(&o, &host, h, call(0), Some("a")).0,
+        Outcome::Failed,
+        "positive control: the exchange failed on an outage"
+    );
+    let ask = Ask {
+        handle: h,
+        own: true,
+        scope: Some(b"b".as_slice()),
+        ticket: call(1),
+        timestamp: 0,
+    };
+    match o.answer(&ask, Some(&host.host), &mut |_| {}) {
+        Poll::Ready(FieldsAnswer::Failed(why)) => assert!(
+            why.starts_with(
+                "the RFC 8693 token endpoint is down (an exchange for another scope failed: token \
+                 endpoint returned 503 Service Unavailable); no new scope is exchanged for "
+            ),
+            "{why}"
+        ),
+        other => panic!("a new scope fails fast during the outage: {other:?}"),
+    }
+    o.tick(2_000, Ticket::NONE, Some(&host.host), &mut Diags::default());
+    assert_eq!(
+        w.sent.lock().unwrap().len(),
+        1,
+        "nothing more reached the token endpoint"
+    );
+}
+
+/// AN ON-DEMAND MINT THAT LANDS NOTHING USABLE IS LOGGED (module `oauth`, WARN), as a scheduled
+/// one is: a 200 with an empty token, or one with bytes invalid in a header value.
+#[test]
+fn an_on_demand_exchange_landing_no_usable_token_is_logged_at_warn() {
+    use crate::test_support::OAuthEvents;
+    for (body, logged) in [
+        (
+            r#"{"access_token":"","expires_in":3600}"#,
+            "empty access_token",
+        ),
+        (
+            "{\"access_token\":\"tok\\u0001bad\",\"expires_in\":3600}",
+            "bytes invalid in a header value",
+        ),
+    ] {
+        let warn = OAuthEvents::default();
+        tracing::subscriber::with_default(warn.subscriber(), || {
+            let host = TestHost::new();
+            let w = Arc::new(Scripted::default());
+            let o = instance(&w);
+            let h = exchange_binding(&o);
+            let call = Ticket {
+                slot: 5_000,
+                generation: 1,
+            };
+            assert_eq!(
+                test_support::fields(&o, &host, h, call, Some("s")).0,
+                Outcome::Pending
+            );
+            w.ok(body);
+            o.tick(1_000, Ticket::NONE, Some(&host.host), &mut Diags::default());
+        });
+        let m = warn.messages();
+        assert_eq!(
+            m.iter()
+                .filter(|l| l.contains(logged) && l.contains("module=\"oauth\""))
+                .count(),
+            1,
+            "{body}: {m:?}"
+        );
+    }
 }
 
 #[test]

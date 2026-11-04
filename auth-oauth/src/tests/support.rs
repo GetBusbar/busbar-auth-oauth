@@ -4,7 +4,8 @@
 //! The unit tests' host: host tables whose wake records the ticket it was handed (each host its
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
 use std::sync::Mutex;
 use std::task::Poll;
 
@@ -14,6 +15,7 @@ use busbar_contract::abi::sdk::auth_outbound::FieldsAnswer;
 use busbar_contract::abi::sdk::conn::Host;
 
 use crate::instance::Oauth;
+use crate::mint::Pause;
 use crate::Ask;
 
 static WOKEN: Mutex<Option<HashMap<u64, Vec<Ticket>>>> = Mutex::new(None);
@@ -172,4 +174,21 @@ impl OAuthEvents {
             .filter(|line| line.contains(text))
             .count()
     }
+}
+
+/// A ONE-SHOT PAUSE for a production seam ([`Pause`]): the first thread to pass it announces
+/// itself on the returned receiver and is held there until the returned sender sends; every later
+/// pass runs straight through.
+pub(crate) fn pause_once() -> (Pause, Receiver<()>, SyncSender<()>) {
+    let (entered, arrived) = sync_channel(0);
+    let (release, resume) = sync_channel::<()>(0);
+    let armed = AtomicBool::new(true);
+    let resume = Mutex::new(resume);
+    let pause: Pause = Box::new(move || {
+        if armed.swap(false, Ordering::AcqRel) {
+            entered.send(()).unwrap();
+            resume.lock().unwrap().recv().unwrap();
+        }
+    });
+    (pause, arrived, release)
 }

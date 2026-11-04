@@ -564,3 +564,62 @@ fn jwt_and_exchange_cache_identity_includes_credential_and_settings() {
     );
     assert_ne!(a.scope_key(b"read"), a.scope_key(b"write"));
 }
+
+/// EVERY REFUSAL OF A TOKEN-EXCHANGE BINDING IS NAMED AT ONCE: a mistyped setting no longer hides
+/// the others (the missing credential here), and a `token_url` that is no URL is refused by name
+/// at open rather than failing every exchange as "refused".
+#[test]
+fn a_token_exchange_binding_names_every_refusal_and_refuses_a_token_url_that_is_no_url() {
+    let refused = |credential: Option<&[u8]>, settings: &str| -> Vec<String> {
+        match super::open(
+            OAUTH_TOKEN_EXCHANGE,
+            credential,
+            Some(settings.as_bytes()),
+            &Cache::default(),
+        ) {
+            Ok(_) => panic!("the binding is refused: {settings}"),
+            Err(r) => r.iter().map(Refusal::line).collect(),
+        }
+    };
+    assert_eq!(
+        refused(None, r#"{"token_url":123,"resource":"https://upstream"}"#),
+        [
+            "settings: uses auth: oauth-token-exchange but declares no credential; that grant \
+             exchanges busbar's own subject token (the credential) for the upstream's, so there \
+             is nothing to exchange",
+            "settings: outbound auth setting `token_url` is invalid: it must be a string",
+        ]
+    );
+    assert_eq!(
+        refused(
+            Some(b"subject"),
+            r#"{"token_url":"as.example/token","resource":"https://upstream"}"#
+        ),
+        ["settings: outbound auth setting `token_url` is invalid: it must be an absolute URL"]
+    );
+    assert!(super::open(
+        OAUTH_TOKEN_EXCHANGE,
+        Some(b"subject"),
+        Some(br#"{"token_url":"https://as.example/token","resource":"https://upstream"}"#),
+        &Cache::default(),
+    )
+    .is_ok());
+}
+
+/// EVERY REFUSAL OF A CLIENT-CREDENTIALS BINDING IS NAMED AT ONCE, in 1.5.5's order: a mistyped
+/// setting no longer hides the credential's refusal.
+#[test]
+fn a_client_credentials_binding_names_a_mistyped_setting_with_the_credential_refusal() {
+    assert_eq!(
+        lines(open(
+            OAUTH_CLIENT_CREDENTIALS,
+            Some("unused"),
+            r#"{"token_url":"https://i/t","max_response_bytes":"many"}"#
+        )),
+        [
+            "credential: oauth-client-credentials key must be `client_id:client_secret`",
+            "settings: outbound auth setting `max_response_bytes` is invalid: it must be a \
+             non-negative integer",
+        ]
+    );
+}
