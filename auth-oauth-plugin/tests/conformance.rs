@@ -369,6 +369,7 @@ const EXPECTED: &[&str] = &[
 ];
 
 /// The folds: the declared diagnostic, and each `tracing` event the SDK captured into the
+/// plugin's log (S5: every refusal logged once, `module = "oauth"`).
 const EXPECTED_FOLDS: &[&str] = &[
     "diag 4294967295 sev=0 busbar_auth_oauth: instance settings refused module=\"oauth\" \
      reason=\"settings: must be a JSON object\"",
@@ -488,6 +489,7 @@ extern "C" fn insensitive_door() -> &'static Door {
 }
 
 /// THE DIAGNOSTIC TABLE: each `diag` index names its 1.5.5 catalog code (the indices are
+/// `instance::diag`, pinned to 0, 1, 2 by the crate's own unit test).
 #[test]
 fn the_diag_indices_name_their_catalog_codes() {
     let ids: Vec<&str> = (0..busbar_auth_oauth::STATEMENT.diag_ids_len)
@@ -948,6 +950,10 @@ mod mint_door {
     }
 
     /// Whether one `fields` answer presents exactly `expected` as its authorization: its first
+    /// `authorization` field's value, compared with `expected`. The value is the contract's sealed
+    /// secret (busbar #1021, Part 2 #54), which a plugin's test holds no seal to read, so it is
+    /// compared through the type's own constant-time equality rather than read out. The comparison
+    /// never names the type, so it holds against the contract before and after the seal.
     fn presents(answer: &Fields, expected: &str) -> bool {
         fn same<T: PartialEq>(value: &T, expected: T) -> bool {
             *value == expected

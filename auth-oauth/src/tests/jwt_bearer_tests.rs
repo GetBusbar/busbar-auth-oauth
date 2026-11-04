@@ -2,6 +2,7 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! Tests for `mint/jwt_bearer.rs`, ported from the kernel's `egress_auth/tests/jwt_bearer_tests.rs`.
+//! The `token_uri` https/metadata vetting tests stay with the kernel (ARCHITECT ruling Q2 (a)).
 
 use super::*;
 
@@ -31,6 +32,18 @@ fn read_credential_passes_inline_json_through() {
 }
 
 /// THE SIGNING KEY MUST NOT REACH THE ERROR TEXT.
+///
+/// The ONLY thing that tells the two credential forms apart is a leading `{`, so an operator who
+/// pasted the service-account key body — or a secret ref (`env:`/`file:`) that resolved to key
+/// material rather than to a filename — reaches the non-JSON refusal with the whole signing key in
+/// hand. That error is not swallowed: it reaches `--validate`'s printed report (via
+/// `config_validate`'s `errors` list) and the boot/apply `panic!` in a plane's runtime build,
+/// so interpolating the argument published an RSA private key to a terminal, a CI log and a crash
+/// report.
+///
+/// The key here is a planted marker and its ABSENCE is what is asserted — the test never prints a
+/// real key to fail informatively. `not-a-real-key-b4d7e2` is unique in this file, so a regression
+/// that reinstates `'{credential}'` fails on the very first assertion.
 #[test]
 fn read_credential_never_echoes_the_key_material_it_could_not_read() {
     const PASTED_KEY: &str =
@@ -91,6 +104,8 @@ fn build_rejects_malformed_json() {
 }
 
 /// The `scope` threaded from provider config lands VERBATIM in the assertion claims (this is
+/// the value the binding's `scope` setting passes as `scope_override`), and
+/// iss/aud/iat/exp are placed correctly.
 #[test]
 fn jwt_claims_place_scope_and_fields() {
     let json = jwt_claims_json(
@@ -114,6 +129,10 @@ fn jwt_claims_place_scope_and_fields() {
 }
 
 /// RFC 7523 §3: with `subject` UNSET (the default — every existing Vertex AI config, which never
+/// sets it), the claim set must contain NO `sub` key at all. This is the regression guard:
+/// unconditionally setting `sub = iss` would break every plain (non-delegated) service account,
+/// because Google service-account OAuth treats the mere PRESENCE of `sub` as a
+/// domain-wide-delegation/impersonation switch, regardless of value.
 #[test]
 fn jwt_claims_omit_sub_when_subject_unset() {
     let json = jwt_claims_json(
@@ -138,6 +157,7 @@ fn jwt_claims_omit_sub_when_subject_unset() {
 }
 
 /// RFC 7523 §3: with `subject` explicitly configured, the claim set MUST contain `sub` set to that
+/// exact value — the opt-in RFC-7523-conformant / Google-delegation-correct path.
 #[test]
 fn jwt_claims_include_sub_with_exact_value_when_subject_set() {
     let json = jwt_claims_json(
@@ -154,6 +174,8 @@ fn jwt_claims_include_sub_with_exact_value_when_subject_set() {
 }
 
 /// A quote/backslash/control char in an operator-controlled claim value is ESCAPED, not
+/// spliced — the claims are always valid JSON and the value round-trips exactly. This is what the
+/// serde serializer buys over string interpolation (which would emit malformed JSON / inject).
 #[test]
 fn jwt_claims_escape_hostile_values() {
     let nasty = "a\"b\\c\nd\tsneaky\":\"injected";
@@ -171,6 +193,8 @@ fn jwt_claims_escape_hostile_values() {
 }
 
 /// A test-only 2048-bit PKCS#8 RSA private key (generated for this test suite only; not used
+/// anywhere else and grants no real access) so [`Signer::request`] can actually sign an assertion
+/// and exercise the exchange against a scripted token endpoint.
 const TEST_PRIVATE_KEY_PEM: &str = include_str!("fixtures/test_sa_key.pem");
 
 pub(crate) fn test_signer(token_uri: &str, subject: Option<&str>) -> Signer {
@@ -184,6 +208,7 @@ pub(crate) fn test_signer(token_uri: &str, subject: Option<&str>) -> Signer {
 }
 
 /// The assertion `signer` sends at `now`, read back off the token request's form as the chip
+/// writes it (its characters are all ones a form keeps as themselves).
 fn assertion(signer: &Signer, now: u64) -> String {
     let form = crate::test_support::form_text(&signer.request(now).expect("a request").body);
     form.strip_prefix("grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion=")
@@ -201,6 +226,7 @@ fn the_rfc_7523_assertion_is_byte_identical_to_1_5_5() {
 }
 
 /// The token request for that assertion: a form POST to the SA's `token_uri`, the grant type and
+/// the assertion encoded by `serde_urlencoded` as reqwest's `.form()` did.
 #[test]
 fn the_token_request_is_the_form_1_5_5_posted() {
     let signer = test_signer("https://oauth2.googleapis.com/token", None);

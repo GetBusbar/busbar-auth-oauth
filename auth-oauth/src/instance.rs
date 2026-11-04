@@ -2,6 +2,8 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! ONE INSTANCE: the handles (generation data), the token cache (outlives handles) and the
+//! waiting tickets. The door is the SDK's safe outbound-auth kit (`lib.rs`), which keeps each
+//! answer's envelope itself.
 
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -32,6 +34,7 @@ pub(crate) mod diag {
 const WARN: u8 = 1;
 
 /// The most scope cells one token-exchange binding keeps (O4): a request-stated scope past it
+/// evicts the least recently used idle cell that no request waits on and that backs off no failure.
 pub(crate) const MAX_SCOPE_CELLS: usize = 256;
 
 /// Why a new scope is refused when every one of its binding's [`MAX_SCOPE_CELLS`] cells is busy.
@@ -48,28 +51,39 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 /// One plugin instance: the SDK kit's [`OutboundPlugin`](busbar_contract::abi::sdk::auth_outbound::OutboundPlugin).
 pub struct Oauth {
     /// A test's need double; production reaches its need through the host tables each `tick` and
+    /// `drive` is handed.
     wire: Option<Box<dyn Wire>>,
     /// The instance's driver ticket, as its first `tick` names it: a binding opened, or a request
+    /// waiting on a token, wakes it so a `drive` starts the mint at once.
     driver: Mutex<Ticket>,
     /// The completion handle count of the driver ticket ([`HostWire`]), carried through every
+    /// `tick` and `drive` for that ticket's lifetime.
     issued: AtomicU32,
     /// The last `tick`'s clock (`TickIn::now_ns`) and the host's monotonic clock as it read then:
+    /// a `drive` reads the tick clock from them (one host clock; the plugin reads none of its
+    /// own).
     clock: Mutex<Option<(u64, Option<u64>)>>,
     /// The host's wall clock (epoch seconds) as it last read (`clock.now` at a `tick` or `drive`,
+    /// or a call's own timestamp); `0` before the first reading.
     wall: AtomicU64,
     generation: AtomicU64,
     next_handle: AtomicU64,
     handles: RwLock<HashMap<u64, (u64, Binding)>>,
     /// The token cells, by cache key: a call that finds its cell usable reads it under the read
+    /// lock; every change (and every park) takes the write lock.
     cache: RwLock<HashMap<[u8; 32], Arc<Minted>>>,
     /// The count each on-demand cell's use is stamped with ([`Minted::touch`]): the least recently
+    /// used idle cell is the one evicted past [`MAX_SCOPE_CELLS`].
     uses: AtomicU64,
     waiters: Mutex<Vec<Ticket>>,
     /// The tickets waiting on each on-demand cell's exchange (a token-exchange scope), by its cache
+    /// key: woken when it lands, or failed when it fails. Taken after `cache` wherever both are.
     exchange_waiters: Mutex<HashMap<[u8; 32], Vec<Ticket>>>,
     /// The tickets whose exchange failed: their resumed call answers FAILED (the attempt fails, as
+    /// the previous release failed the call whose exchange the authorization server refused).
     exchange_failed: Mutex<Vec<Ticket>>,
     /// The instance's own random key the token cache keys are derived under (HMAC-SHA-256), so no
+    /// cache key is a plain digest of a credential; wiped on drop.
     cache_secret: Zeroizing<[u8; 32]>,
     /// A point a ticketed minted-style call passes between its first read and its park, where a
     /// race test holds the thread ([`Pause`]; set only by the side-file tests).
@@ -98,6 +112,9 @@ impl crate::style::TokenCache for Oauth {
 }
 
 /// A failed mint, logged ONCE (S4, S5): an outage of the token endpoint at WARN, a reply or a host
+/// clock the mint cannot use at WARN (the operator's to see), any other failure (the endpoint
+/// refused the credential, the configuration cannot mint) at INFO. The reason names
+/// the status and at most the RFC 6749 error code, never a body or a secret.
 fn logged_failure(cell: &Minted, why: &str) {
     if cell.outage() {
         tracing::warn!(
@@ -137,6 +154,11 @@ impl Oauth {
     }
 
     /// An instance at `generation`; its need is the host's, reached through the tables each
+    /// `tick` and `drive` is handed (none: no need was granted, and a minted style reports that
+    /// no connection was).
+    ///
+    /// # Errors
+    /// The system random source could not key its token cache.
     pub(crate) fn opened(generation: u64) -> Result<Self, Refusal> {
         Ok(Self::keyed(generation, None, cache_secret()?))
     }
@@ -198,6 +220,21 @@ impl Oauth {
     }
 
     /// THE CELL OF AN ON-DEMAND SCOPE, looked up (or made) and, for a call on `ticket` that will
+    /// wait, that ticket parked on it, in ONE critical section with the cache: a tick that settles
+    /// the cell either ran before (and the call finds or makes the cell anew) or after (and finds
+    /// the ticket waiting, so it keeps the cell). `usable` says whether the call answers now (it
+    /// would present the cell's token, or the cell backs off and the call fails at once); a ticket
+    /// that would wait is parked BEFORE the token is read, so an exchange that lands meanwhile
+    /// still finds it.
+    ///
+    /// A binding (`mine` says which cells are its) keeps at most [`MAX_SCOPE_CELLS`]: a new scope
+    /// past it evicts the binding's least recently used cell that is idle, held by nothing else,
+    /// waited on by no request and backing off no failure; when none is, the new scope is refused
+    /// ([`SCOPES_BUSY`]). A new scope is not exchanged at all while another of the binding's cells
+    /// backs off an outage of the token endpoint ([`Minted::outage_reason`]).
+    ///
+    /// # Errors
+    /// [`SCOPES_BUSY`]: the binding's cells are all busy; or the outage refusal of a new scope.
     pub(crate) fn exchange_cell(
         &self,
         key: [u8; 32],
@@ -246,7 +283,8 @@ impl Oauth {
 
     /// Room in `cache` for one more of a binding's scope cells (`mine`): at [`MAX_SCOPE_CELLS`],
     /// the least recently used cell that is idle, unwaited and not backing off a failure (its
-    /// back-off would go with it) leaves; with none, the new scope is refused ([`SCOPES_BUSY`]).
+    /// back-off would go with it) leaves; short-lived tokens also retain their mint-rate floor.
+    /// With none, the new scope is refused ([`SCOPES_BUSY`]).
     fn make_room(
         &self,
         cache: &mut HashMap<[u8; 32], Arc<Minted>>,
@@ -264,6 +302,7 @@ impl Oauth {
                     && Arc::strong_count(c) == 1
                     && c.idle()
                     && !c.backing_off(now)
+                    && !c.cooling_down(now)
                     && waiting.get(*k).is_none_or(Vec::is_empty)
             })
             .min_by_key(|(_, c)| c.last_used())
@@ -275,6 +314,8 @@ impl Oauth {
     }
 
     /// THE `ready` FACT of a token-exchange binding: not every scope it recently tried (its cells
+    /// the cache still holds) is backing off after a failed exchange. One with no such cell is
+    /// ready.
     pub(crate) fn exchange_ready(&self, binding: &crate::style::ExchangeBinding) -> bool {
         let now = self.wall_secs();
         let cache = self.cache.read().unwrap_or_else(PoisonError::into_inner);
@@ -305,6 +346,12 @@ impl Oauth {
     }
 
     /// `retire`: drop the handles opened at `generation`, then every token cell no handle holds AND
+    /// nothing still needs. An on-demand exchange cell is held by no handle, so one with an exchange
+    /// in flight (its connection open) or a ticket waiting on it stays: the cache outlives a handle
+    /// (contract `abi/auth`), and a waiting ticket is woken when its exchange settles, never lost.
+    /// Its tick drops it from the cache once it is idle and unwaited. So does a scope cell of a
+    /// binding a live handle still holds (re-opened by the new generation with the same credential
+    /// and settings): its token survives the reload as a scheduled style's does.
     pub(crate) fn retire(&self, generation: u64) {
         let live: Vec<[u8; 32]> = {
             let mut handles = self.handles.write().unwrap_or_else(PoisonError::into_inner);
@@ -353,6 +400,8 @@ impl Oauth {
     }
 
     /// A mint is wanted now (a binding opened; a request waits on a token): wake the driver
+    /// ticket, so a `drive` starts it without waiting for the next `tick`. Before the first `tick`
+    /// nothing is woken: that tick, made at once, starts it.
     pub(crate) fn mint_soon(&self, host: Option<&Host>) {
         let driver = *lock(&self.driver);
         if let (Some(h), false) = (host, driver.is_none()) {
@@ -361,6 +410,9 @@ impl Oauth {
     }
 
     /// `tick` at tick-clock `now_ns` on the driver ticket `ticket`: a new cycle (its handle count
+    /// carries on: the host may still keep the last cycle's answers), the refresh ahead of expiry,
+    /// the wakes. Answers the next tick; an instance
+    /// with no binding yet still asks for one ([`MIN_SLEEP_SECS`] on), never ending its schedule.
     pub(crate) fn tick(
         &self,
         now_ns: u64,
@@ -376,6 +428,10 @@ impl Oauth {
     }
 
     /// `drive` on the driver ticket `ticket` (a wake: a read that pended, [`Oauth::mint_soon`], or
+    /// the timer the last `drive` set): the cycle goes on, at the tick clock as it now reads. Answers
+    /// when the earliest cell is next due, the instant the `drive` asks to be resumed at (a mint
+    /// landed between ticks schedules its own refresh: the tick schedule was set before it), or
+    /// `None` (no cell, or no `tick` yet).
     pub(crate) fn drive(
         &self,
         ticket: Ticket,
@@ -391,6 +447,8 @@ impl Oauth {
     }
 
     /// A reading of the host's wall clock (epoch seconds): a call's own timestamp, or a tick's or
+    /// drive's `clock.now`. The clock only moves forward: a reading older than the newest (a call
+    /// stamped before a tick that raced it) leaves the newest in place.
     pub(crate) fn saw_wall(&self, secs: u64) {
         if secs != 0 {
             self.wall.fetch_max(secs, Ordering::AcqRel);
@@ -398,6 +456,8 @@ impl Oauth {
     }
 
     /// Advance every token cell over the need on `ticket`, at the tick's `at` (a `tick`) or, on a
+    /// `drive`, at the last tick's clock moved on by the host's monotonic time since it: when the
+    /// next tick is wanted (`None`: no cell, or a `drive` before any `tick`).
     fn advance(
         &self,
         at: Option<u64>,
@@ -504,6 +564,8 @@ impl Oauth {
     }
 
     /// A scheduled cell no handle holds leaves the cache once it is idle (what `retire`'s doc
+    /// promises of a cell it kept for its mint): the cache's Arc and the tick's own are the only
+    /// two, judged under the cache's lock. Whether it was dropped.
     fn reap(&self, key: [u8; 32], cell: &Arc<Minted>) -> bool {
         if Arc::strong_count(cell) != 2 || !cell.idle() {
             return false;
@@ -519,6 +581,12 @@ impl Oauth {
     }
 
     /// AN ON-DEMAND CELL'S TICK, settled: a landed exchange wakes the tickets waiting on it; a
+    /// failed one fails them (each is woken, and its resumed call answers FAILED), naming why in
+    /// the instance's log; a cell no request waits on, with nothing in flight, no token it would
+    /// present, no short-token mint-rate floor and no negative-cache window running (a failed exchange's cell is kept for its
+    /// window, so its scope's requests fail fast rather than re-hit the authorization server), is
+    /// dropped from the cache (its scope's next request makes it again) — judged under the
+    /// cache's lock, so a call looking the cell up and parking on it is never split from it.
     fn settle_exchange(
         &self,
         key: [u8; 32],
@@ -588,7 +656,11 @@ impl Oauth {
             let waited = lock(&self.exchange_waiters)
                 .get(&key)
                 .is_some_and(|w| !w.is_empty());
-            !waited && cell.idle() && !cell.usable(now) && !cell.backing_off(now)
+            !waited
+                && cell.idle()
+                && !cell.usable(now)
+                && !cell.backing_off(now)
+                && !cell.cooling_down(now)
         };
         if !spent() {
             return;

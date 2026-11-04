@@ -450,6 +450,7 @@ const fn span(offset: u64, len: u64) -> FrameSpan {
 }
 
 /// THE CLOCK: the host's nanoseconds are whole seconds on the wall clock (never nanoseconds read
+/// as seconds), and the monotonic reading passes through.
 #[test]
 fn the_host_clock_reads_whole_wall_seconds() {
     let hosted = host_wire();
@@ -470,6 +471,7 @@ fn the_host_clock_reads_whole_wall_seconds() {
 }
 
 /// THE HEAD: `POST`, the target's path and query (never its fragment), then each field as
+/// `name: value\r\n`; each span names its bytes.
 #[test]
 fn the_request_head_is_post_the_path_and_query_and_the_field_block() {
     let req = TokenRequest {
@@ -499,6 +501,8 @@ fn the_request_head_is_post_the_path_and_query_and_the_field_block() {
 }
 
 /// EACH HOST REFUSAL'S CONNECTION ERROR: the named failures map one to one; a failure or refusal
+/// text is the table's own for the error it names, and an unknown text is a fault (failed) or a
+/// refusal (refused).
 #[test]
 fn each_host_failure_maps_to_its_connection_error() {
     assert_eq!(error_of(&ConnFailure::Unarmed), ConnError::Unarmed);
@@ -533,6 +537,10 @@ fn each_host_failure_maps_to_its_connection_error() {
 }
 
 /// A WHOLE MINT OVER THE PRODUCTION WIRE: the request goes out on the need its style names
+/// (establish, head, body, end), each reply piece is read as the exchange reads it (the head's
+/// code and its `retry-after`, the body's bytes, the end), the connection is closed, and the
+/// assertion's `iat` is the host's wall clock in SECONDS. RED-proof: a wire that read the
+/// nanoseconds as seconds signs `iat` 1_800_000_000_999_999_999.
 #[test]
 fn a_jwt_bearer_mint_runs_over_the_host_wire_at_the_hosts_wall_seconds() {
     use base64::Engine as _;

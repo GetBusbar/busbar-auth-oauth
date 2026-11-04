@@ -82,6 +82,9 @@ fn form(body: &str) -> Vec<(String, String)> {
 }
 
 /// THE REQUEST, FIELD FOR FIELD: the previous release's RFC 8693 form in RFC order — the grant,
+/// busbar's own subject token and its type, an access token requested back, the RFC 8707 resource,
+/// and the scope (absent when the call states none, L6) — POSTed as a form to `token_url` over
+/// the need that names it.
 #[test]
 fn the_exchange_request_is_the_previous_releases_form_with_the_stated_scope() {
     let x = Arc::new(build(
@@ -134,6 +137,9 @@ fn the_exchange_request_is_the_previous_releases_form_with_the_stated_scope() {
 }
 
 /// THE PER-CALL SCOPE, CACHED PER SCOPE: a call stating a scope waits (PENDING on its ticket, a
+/// ticket-less call REFUSED) while the exchange it arms asks for exactly that scope; the landed token
+/// wakes it and is presented; a second scope is its own exchange and its own token; the first
+/// scope's next call is answered from its cache with no exchange at all.
 #[test]
 fn each_scope_is_its_own_exchange_and_its_own_cached_token() {
     let host = TestHost::new();
@@ -192,6 +198,7 @@ fn each_scope_is_its_own_exchange_and_its_own_cached_token() {
 }
 
 /// EVERY REFUSAL IS EXPLAINED: the call a failed exchange refuses carries non-empty text (the SDK
+/// passes it as the attempt's failure text), not an empty string.
 #[test]
 fn a_call_refused_for_a_failed_exchange_carries_an_explanation() {
     let host = TestHost::new();
@@ -221,6 +228,9 @@ fn a_call_refused_for_a_failed_exchange_carries_an_explanation() {
 }
 
 /// TWO BINDINGS NEVER SHARE A SCOPE'S TOKEN: two bindings on ONE instance that differ only in the
+/// subject token (the credential) each ask the same scope, and each gets its own exchange, carrying
+/// its own subject token, and its own token. A shared cell would present one binding's token to
+/// the other.
 #[test]
 fn two_bindings_on_one_instance_never_share_a_scopes_token() {
     let host = TestHost::new();
@@ -280,6 +290,9 @@ fn two_bindings_on_one_instance_never_share_a_scopes_token() {
 }
 
 /// A FAILED EXCHANGE FAILS ITS CALLS: the authorization server's refusal wakes every call that
+/// waited on it, and each answers FAILED (the attempt fails; nothing unauthenticated is sent), the
+/// instance's log naming why; the scope's next call after the failure's back-off window (O3) arms
+/// a fresh exchange rather than inheriting the failure.
 #[test]
 fn a_refused_exchange_fails_the_calls_that_waited_and_the_next_call_asks_again() {
     let host = TestHost::new();
@@ -322,6 +335,7 @@ fn a_refused_exchange_fails_the_calls_that_waited_and_the_next_call_asks_again()
 }
 
 /// THE REFUSALS: busbar's own subject token is the credential (none, or a blank one, refuses),
+/// `token_url` and the RFC 8707 `resource` are required; every finding is one `settings:` line.
 #[test]
 fn the_binding_refuses_without_its_subject_token_token_url_or_resource() {
     let o = Oauth::with_wire(1, None);
@@ -362,6 +376,10 @@ fn the_binding_refuses_without_its_subject_token_token_url_or_resource() {
 }
 
 /// A RETIRE KEEPS AN EXCHANGE SOMEONE WAITS ON (contract `abi/auth`: the token cache outlives a
+/// handle; THE DESIGN A.4.7, zero lost wakes). The generation that opened the binding retires while
+/// a call is parked on its scope's exchange: the cell stays, the exchange lands on the next tick and
+/// wakes that call. RED before the fix: `retire` dropped every cell no handle held, an on-demand
+/// cell is held by none, so the waiter was never woken.
 #[test]
 fn a_retire_keeps_the_exchange_a_parked_call_waits_on() {
     let host = TestHost::new();
@@ -448,6 +466,8 @@ fn a_token_exchange_binding_is_not_ready_while_its_last_exchange_failed() {
 }
 
 /// A NEVER-USED EXCHANGE LANE IS TRIED ON ITS FIRST REQUEST: before any request the binding reads
+/// ready, so the prober and the router try it, and that first request starts its first exchange.
+/// A reading of "not ready until minted" would keep it untried forever (it mints only when asked).
 #[test]
 fn a_never_used_exchange_lane_is_tried_on_its_first_request() {
     let host = TestHost::new();
@@ -503,6 +523,7 @@ impl Wire for Clocked {
 const T0: u64 = 1_800_000_000;
 
 /// A token-exchange binding on an instance whose host clock the test moves: the instance, the
+/// handle, the scripted need and the clock.
 struct ClockedBinding {
     o: Oauth,
     h: u64,

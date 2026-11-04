@@ -2,6 +2,25 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! The self-minting styles' shared machinery: `jwt-bearer` (RFC 7523) and `oauth-client-credentials`
+//! (RFC 6749 §4.4) each obtain a short-lived bearer from a token endpoint on a schedule and present
+//! it as `authorization: Bearer <token>`; `oauth-token-exchange` (RFC 8693) obtains one per scope,
+//! on demand. They differ ONLY in the token request ([`jwt_bearer`], [`oauth_client_credentials`],
+//! [`token_exchange`]). This module owns everything else: the cached token, the per-request read,
+//! and the refresh ahead of expiry.
+//!
+//! The cached token, the empty-token-is-a-failure rule and the refresh schedule
+//! ([`next_refresh_secs`], floored by [`MIN_MINT_INTERVAL_SECS`] for the scheduled styles) live
+//! here. The driver is a state machine advanced on `tick` ([`Minted::tick`]) over the plugin's own
+//! need ([`Wire`], the host's connection table). Nothing here blocks: an exchange whose reply is
+//! not ready yet is read again by the next `drive` its wake brings, or the next `tick`.
+//!
+//! The expired-token rule (RFC 6750 §3.1, RFC 6749 §5.1): a token is never presented at or past
+//! its expiry. When a scheduled style's cached token has expired before its refresh landed (the
+//! host was suspended, say, so the tick clock did not move while the wall clock did), the call
+//! answers not-ready ([`Read::Wait`]) and the refresh is brought forward, no sooner than
+//! [`MIN_MINT_INTERVAL_SECS`] after the last mint; the call's ticket is woken when it settles.
+//! When the refresh has failed and the cell is backing off (its retry stays [`MIN_SLEEP_SECS`]
+//! on), the call fails closed ([`EXPIRED`]).
 
 pub(crate) mod host_wire;
 pub(crate) mod jwt_bearer;
@@ -19,27 +38,43 @@ use crate::token_response::{default_expires_in, deserialize_expires_in, wiped_me
 use busbar_contract::abi::sdk::auth_kit::json_error;
 
 /// Refresh this many seconds BEFORE the token's stated expiry, so a request never races an expired
+/// token across the refresh boundary.
 const REFRESH_SKEW_SECS: u64 = 300;
 /// Floor on the refresh sleep so a short-lived / already-near-expiry token can't spin the loop hot,
+/// and the retry delay after a mint failure.
 pub(crate) const MIN_SLEEP_SECS: u64 = 30;
 /// The longest a token is held before its refresh, whatever its `expires_in` (an endpoint's
+/// untrusted number): a day, so a revoked token is not presented for the process's life.
 pub(crate) const MAX_REFRESH_SECS: u64 = 24 * 60 * 60;
 /// The whole-mint deadline — send plus capped body read under ONE absolute instant, the
+/// client-level 30 s total of 1.5.5.
 pub(crate) const MINT_DEADLINE_SECS: u64 = 30;
 /// The cap on a token response body when the binding's settings state none (`max_response_bytes`):
+/// 256 KiB.
 pub(crate) const DEFAULT_MAX_RESPONSE_BYTES: usize = 256 * 1024;
 /// One read of a token response, in bytes.
 const READ_BUF_BYTES: usize = 16 * 1024;
 /// How long a token-exchange scope whose exchange failed is not retried (its negative-cache
+/// window) when the authorization server states no `Retry-After`: the other styles' retry interval.
 pub(crate) const EXCHANGE_BACKOFF_SECS: u64 = MIN_SLEEP_SECS;
 /// The longest window a `Retry-After` may set.
 pub(crate) const MAX_BACKOFF_SECS: u64 = 300;
 /// With no host clock to measure the read loop on, the most pieces one `tick` or `drive` reads
+/// before it yields (the next judges the mint deadline anew).
 const MAX_READS_PER_TICK: u32 = 1024;
 /// How long `tick` waits before reading an in-flight exchange again.
 pub(crate) const IN_FLIGHT_POLL_NS: u64 = 5_000_000;
+/// The least time between a landed token and the next mint of its cell: an endpoint issuing tokens
+/// that live a second or two is re-minted at most this often, not once a second as 1.5.5's
+/// half-life schedule alone would (nor once per request, for a token exchange). A token that
+/// expires sooner is not presented in between: the calls meanwhile wait for the next mint.
+pub(crate) const MIN_MINT_INTERVAL_SECS: u64 = 5;
+/// [`Minted`]'s landing instant before any token has landed.
+const NEVER_LANDED: u64 = u64::MAX;
 
 /// The fleet's sanity floor for the host's wall clock (2026-01-01T00:00:00Z, epoch seconds): no
+/// token is minted at a wall clock before it (unknown, or decades off), since an assertion's `iat`
+/// and a token's expiry are read against it.
 pub(crate) const WALL_FLOOR_SECS: u64 = 1_767_225_600;
 /// [`WALL_FLOOR_SECS`] as the refusal names it.
 const WALL_FLOOR_DATE: &str = "2026-01-01";
@@ -48,6 +83,8 @@ const WALL_FLOOR_DATE: &str = "2026-01-01";
 pub(crate) const NS: u64 = 1_000_000_000;
 
 /// The plugin's own needs, by their index in the Statement (`crate::NEEDS`): the token endpoint
+/// each style POSTs to, its target the binding's own setting (egress class `provider`: a private
+/// endpoint refused unless allowlisted).
 pub(crate) mod need {
     /// `oauth-client-credentials`: `settings.token_url`.
     pub const TOKEN_URL: u32 = 0;
@@ -69,6 +106,8 @@ pub(crate) struct TokenRequest {
 
 impl TokenRequest {
     /// A form POST of `body` to `target`, over the need `need`. Its fields are, in order,
+    /// the form's `content-type`, then the client-default `accept: */*`, which the request carries
+    /// itself (the http door writes no field the caller did not).
     pub(crate) fn form(need: u32, target: String, body: FormBody) -> Self {
         Self {
             need,
@@ -89,6 +128,7 @@ pub(crate) enum Minter {
     /// RFC 6749 §4.4.
     ClientCredentials(oauth_client_credentials::ClientCreds),
     /// RFC 8693, for one scope: minted ON DEMAND (a request that finds no usable token starts the
+    /// exchange), never refreshed ahead of a request.
     TokenExchange(token_exchange::Scoped),
 }
 
@@ -136,6 +176,9 @@ impl std::fmt::Debug for CachedToken {
 
 impl CachedToken {
     /// Construct a `CachedToken`, capturing its credential without a plaintext header copy. The second value is whether the
+    /// token holds bytes invalid in a header value, so it is never presented (the caller reports it). The token
+    /// arrives already wiped on drop (a response's token is read into a wiped buffer and moved
+    /// here, [`access_token`]).
     pub(crate) fn new(mut token: Zeroizing<String>, expires_at: u64) -> (Self, bool) {
         let token = Cred::captured(Zeroizing::new(std::mem::take(&mut *token).into_bytes()))
             .require_secure();
@@ -154,6 +197,7 @@ impl CachedToken {
     }
 
     /// Why this token is no bearer (its `token_type` is stated and is not `bearer`, in any case);
+    /// `None` for a bearer or a reply that stated no type.
     pub(crate) fn not_bearer(&self) -> Option<String> {
         let t = self.token_type.as_deref()?;
         if t.eq_ignore_ascii_case("bearer") {
@@ -174,6 +218,7 @@ impl CachedToken {
     }
 
     /// Why an RFC 8693 exchange's token is not one to present: its `issued_token_type` is stated
+    /// and is neither an access token nor a JWT (RFC 8693 §3); `None` otherwise.
     pub(crate) fn not_access_token(&self) -> Option<String> {
         let t = self.issued_token_type.as_deref()?;
         if t == token_exchange::ACCESS_TOKEN_TYPE || t == token_exchange::JWT_TOKEN_TYPE {
@@ -193,6 +238,7 @@ impl CachedToken {
 }
 
 /// A reply's type word as a refusal names it: quoted when it is a short token of plain characters,
+/// else described (an endpoint's text is never echoed beyond that).
 fn shown(t: &str) -> String {
     let plain = !t.is_empty()
         && t.len() <= 64
@@ -256,6 +302,11 @@ struct TokenResponse {
 }
 
 /// THE ACCESS TOKEN of a token response `json` the decoder has already judged well-formed (with an
+/// `access_token` member), its escapes resolved into ONE buffer sized to the escaped length and
+/// wiped on drop.
+///
+/// # Errors
+/// The response's `access_token` is not a string (the decode has already refused a missing one).
 pub(crate) fn access_token(json: &str) -> Result<Zeroizing<String>, String> {
     wiped_member(json, b"access_token").ok_or_else(|| {
         "token response JSON invalid: a field is missing or has the wrong type (the decoder's \
@@ -265,6 +316,7 @@ pub(crate) fn access_token(json: &str) -> Result<Zeroizing<String>, String> {
 }
 
 /// `body` as text, bytes that are not UTF-8 replaced as `String::from_utf8_lossy` does, built into
+/// ONE wiped string sized exactly first, so it never reallocates and frees an unwiped copy.
 fn lossy_wiped(b: &[u8]) -> Zeroizing<String> {
     let len: usize = b
         .utf8_chunks()
@@ -281,6 +333,7 @@ fn lossy_wiped(b: &[u8]) -> Zeroizing<String> {
 }
 
 /// The RFC 6749 section 5.2 `error` code of a JSON error body: a string member of at most 64 chars
+/// from `%x20-21 / %x23-5B / %x5D-7E`; `None` for anything else (never other body text).
 fn oauth_error_code(body: &str) -> Option<Zeroizing<String>> {
     serde_json::from_str::<serde::de::IgnoredAny>(body).ok()?;
     let code = wiped_member(body, b"error")?;
@@ -292,6 +345,8 @@ fn oauth_error_code(body: &str) -> Option<Zeroizing<String>> {
 }
 
 /// Parse a finished token response: a non-2xx status is the endpoint's refusal, named with its
+/// status and error code only; otherwise the JSON token, with whether that token cannot be
+/// presented (it holds bytes invalid in a header value, or a byte the lossy decode replaced).
 pub(crate) fn parse_response(
     status: u16,
     body: &[u8],
@@ -343,6 +398,13 @@ pub(crate) enum RetryAfter {
     Secs(u64),
     /// An `HTTP-date`, as epoch seconds.
     At(u64),
+}
+
+/// Seconds from a scheduled style's landed token to its next mint: 1.5.5's schedule
+/// ([`next_refresh_secs`]), never sooner than [`MIN_MINT_INTERVAL_SECS`]. A token that lives at
+/// least twice the floor keeps 1.5.5's schedule exactly.
+pub(crate) fn scheduled_refresh_secs(expires_at: u64, now: u64) -> u64 {
+    next_refresh_secs(expires_at, now).max(MIN_MINT_INTERVAL_SECS)
 }
 
 /// A `Retry-After` value (RFC 9110 §10.2.3): `delay-seconds`, or an `HTTP-date` in any of its three
@@ -427,6 +489,7 @@ fn http_date(v: &str) -> Option<u64> {
 }
 
 /// The negative-cache window of a failed exchange at wall-clock `wall`: the reply's `Retry-After`
+/// when it carried one, else [`EXCHANGE_BACKOFF_SECS`]; never past [`MAX_BACKOFF_SECS`].
 fn backoff_secs(retry: Option<RetryAfter>, wall: u64) -> u64 {
     match retry {
         None => EXCHANGE_BACKOFF_SECS,
@@ -437,8 +500,10 @@ fn backoff_secs(retry: Option<RetryAfter>, wall: u64) -> u64 {
 }
 
 /// The plugin's own need, as the exchange uses it: the host's connection table
+/// (`busbar_contract::abi::host::conn::HostConns`), or a test's double.
 pub(crate) trait Wire: Send + Sync {
     /// Open a connection for the need, sending the request's head and `body` (its form, encoded
+    /// by the chip).
     fn open(
         &self,
         req: &TokenRequest,
@@ -450,6 +515,7 @@ pub(crate) trait Wire: Send + Sync {
     /// Close the connection.
     fn close(&self, conn: ConnId);
     /// The host's clock (`clock.now`; one clock, which also drives every plugin's `tick`), one
+    /// reading; `None` when the host could not answer it.
     fn clock(&self) -> Option<HostClock> {
         None
     }
@@ -477,6 +543,7 @@ enum Attempt {
         /// The reply head's `Retry-After`, when it carried one.
         retry_after: Option<RetryAfter>,
         /// The response so far: it carries the access token, so it grows only through
+        /// [`append_wiped`] (no growth leaves an unwiped copy) and is wiped on drop.
         body: Zeroizing<Vec<u8>>,
     },
 }
@@ -522,6 +589,12 @@ pub(crate) const NO_TOKEN: &str = "no OAuth token could be minted for this bindi
      diagnostics BUSBAR-4014/4015/4016); the call is refused rather than sent unauthenticated, and \
      the mint retries on its schedule";
 
+/// Why a call is refused when its binding's token has expired and its refresh failed: the
+/// expired token is never presented (RFC 6750 §3.1), and the call is not held for the retry.
+pub(crate) const EXPIRED: &str = "the minted OAuth token has expired and its refresh failed (see \
+     diagnostics BUSBAR-4014/4015/4016); the call is refused rather than sent with an expired \
+     token, and the mint retries on its schedule";
+
 /// Why a call is refused when its token cannot be a header value.
 pub(crate) const UNPRESENTABLE: &str = "the minted OAuth token holds bytes invalid in a header \
      value (see diagnostic BUSBAR-4014); the call is refused rather than sent unauthenticated";
@@ -534,21 +607,32 @@ pub(crate) enum Read<'a> {
     /// Nothing can be presented after a mint: the call is FAILED, saying why (never sent
     /// unauthenticated).
     Refuse(&'static str),
-    /// Not ready: the token has expired and its refresh failed (Q-EXPIRED), or an on-demand
-    /// exchange is due.
+    /// Not ready: a scheduled style's token has expired and its refresh is in flight or brought
+    /// forward, or an on-demand exchange is due.
     Wait,
 }
 
 /// ONE BINDING'S TOKEN: keyed by (style, credential, settings) in the instance's cache, so it
+/// survives `refresh` and re-opening (abi/auth: the outbound token cache outlives a handle).
 pub(crate) struct Minted {
     minter: Minter,
     max_response_bytes: usize,
     token: RwLock<Arc<CachedToken>>,
     attempt: Mutex<Attempt>,
     refresh_failed: AtomicBool,
+    /// The tick-clock instant (ns) the last token landed ([`NEVER_LANDED`]: none has): the cell's
+    /// next mint, scheduled, brought forward or armed by a request, is never due before
+    /// [`MIN_MINT_INTERVAL_SECS`] after it.
+    landed_ns: AtomicU64,
+    /// Keep an on-demand cell cached until its mint-rate floor elapses on the wall clock.
+    retain_until: AtomicU64,
     /// Minted on demand ([`Minter::TokenExchange`]): no refresh ahead of a request, no retry on a
+    /// schedule; a request that finds no usable token arms the next exchange.
     on_demand: bool,
     /// An on-demand cell's token is presented until this wall-clock epoch second: the instant a
+    /// scheduled style would refresh it ([`next_refresh_secs`] from its mint), or, for a token
+    /// too short-lived for that to reach [`MIN_MINT_INTERVAL_SECS`], that floor or its expiry,
+    /// whichever comes first (never past the expiry).
     usable_until: AtomicU64,
     /// The last failed mint was an outage of the token endpoint ([`Minted::outage`]).
     outage: AtomicBool,
@@ -557,6 +641,7 @@ pub(crate) struct Minted {
     /// An absent `token_type` was logged for this cell (once per cell, O5).
     untyped_warned: AtomicBool,
     /// An on-demand cell whose exchange failed is not retried before this wall-clock epoch second
+    /// (its negative-cache window: requests for its scope fail fast meanwhile); `0` = none.
     retry_at: AtomicU64,
     /// Why the on-demand cell's last exchange failed, answered to the requests in its window.
     failure: Mutex<Option<String>>,
@@ -574,6 +659,7 @@ pub(crate) type Pause = Box<dyn Fn() + Send + Sync>;
 
 impl Minted {
     /// A cell that has minted nothing yet; its first exchange is due at once, on the next `tick` or
+    /// `drive` that advances it.
     pub(crate) fn new(minter: Minter, max_response_bytes: usize) -> Self {
         Self {
             on_demand: matches!(minter, Minter::TokenExchange(_)),
@@ -584,6 +670,8 @@ impl Minted {
             )),
             attempt: Mutex::new(Attempt::Idle { due_ns: 0 }),
             refresh_failed: AtomicBool::new(false),
+            landed_ns: AtomicU64::new(NEVER_LANDED),
+            retain_until: AtomicU64::new(0),
             usable_until: AtomicU64::new(0),
             outage: AtomicBool::new(false),
             unusable: AtomicBool::new(false),
@@ -638,11 +726,18 @@ impl Minted {
     }
 
     /// An on-demand cell whose exchange failed is inside its negative-cache window at wall-clock
+    /// `now`: its scope is not exchanged again until the window ends.
     pub(crate) fn backing_off(&self, now: u64) -> bool {
         now < self.retry_at.load(Ordering::Acquire)
     }
 
+    /// Evicting this cell now would discard its minimum interval between successful mints.
+    pub(crate) fn cooling_down(&self, now: u64) -> bool {
+        now < self.retain_until.load(Ordering::Acquire)
+    }
+
     /// Why a request for this cell's scope fails at once at wall-clock `now`: the cached failure,
+    /// while the cell backs off; `None` outside the window.
     pub(crate) fn backoff_reason(&self, now: u64) -> Option<String> {
         let (why, secs) = self.backoff(now)?;
         Some(format!(
@@ -682,6 +777,7 @@ impl Minted {
     }
 
     /// An on-demand cell's exchange failed at wall-clock `wall` for `why`: its scope backs off for
+    /// the window `retry` sets ([`backoff_secs`]). A scheduled cell retries on its own schedule.
     fn back_off(&self, wall: u64, retry: Option<RetryAfter>, why: &str) {
         if !self.on_demand {
             return;
@@ -709,31 +805,66 @@ impl Minted {
     }
 
     /// THE `ready` FACT at wall-clock `now` (epoch seconds), by the rule [`Minted::read`] applies:
+    /// a call would present a credential now. Not before the first mint, not for a token that
+    /// yields no header (bytes invalid in a header value), and not once the token has expired,
+    /// whether or not its refresh failed (contract `abi/auth/outbound.rs`: "`0` = not yet (before
+    /// the first mint, or expired with a failed refresh)"; an expired token is never presented).
+    /// It changes nothing: a probe does not bring a refresh forward.
     pub(crate) fn presents(&self, now: u64) -> bool {
         if self.on_demand {
             return self.usable(now);
         }
-        self.read(now, |r| matches!(r, Read::Header(_)))
+        let tok = self.current();
+        !tok.token.is_empty() && now < tok.expires_at && tok.header().is_some()
     }
 
     /// Present the cached token for a request at wall-clock `now` (epoch seconds), through `f`
+    /// (so the borrow of the cached value never escapes the read).
     pub(crate) fn read<T>(&self, now: u64, f: impl FnOnce(Read<'_>) -> T) -> T {
         if self.on_demand && !self.usable(now) {
             self.mint_now(now);
             return f(Read::Wait);
         }
 
-        let tok = self.current();
+        let mut tok = self.current();
 
         if tok.token.is_empty() {
             return f(Read::Refuse(NO_TOKEN));
         }
-        if now >= tok.expires_at && self.refresh_failed.load(Ordering::Acquire) {
-            return f(Read::Wait);
+        if !self.on_demand && now >= tok.expires_at {
+            let mut attempt = self
+                .attempt
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            tok = self.current();
+            if now >= tok.expires_at {
+                let answer = self.expired(&mut attempt);
+                drop(attempt);
+                return f(answer);
+            }
         }
         match tok.header() {
             Some(h) => f(Read::Header(h)),
             None => f(Read::Refuse(UNPRESENTABLE)),
+        }
+    }
+
+    /// A scheduled cell's token has expired before its refresh landed, judged under the exchange's
+    /// lock (`attempt`), which every mint lands and fails under: an exchange in flight is waited
+    /// for; a refresh that failed is backing off, so the call fails closed ([`EXPIRED`]) and the
+    /// retry stays on its schedule; otherwise the refresh is brought forward to
+    /// [`MIN_MINT_INTERVAL_SECS`] after the last landed token (at once, after a host suspend) and
+    /// waited for.
+    fn expired(&self, attempt: &mut Attempt) -> Read<'static> {
+        match attempt {
+            Attempt::InFlight { .. } => Read::Wait,
+            Attempt::Idle { .. } if self.refresh_failed.load(Ordering::Acquire) => {
+                Read::Refuse(EXPIRED)
+            }
+            Attempt::Idle { due_ns } => {
+                *due_ns = (*due_ns).min(self.earliest_mint_ns());
+                Read::Wait
+            }
         }
     }
 
@@ -748,12 +879,23 @@ impl Minted {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Attempt::Idle { due_ns } = &mut *attempt {
             if !self.backing_off(now) {
-                *due_ns = 0;
+                *due_ns = (*due_ns).min(self.earliest_mint_ns());
             }
         }
     }
 
+    /// The earliest tick-clock instant (ns) the next mint may start: [`MIN_MINT_INTERVAL_SECS`]
+    /// after the last token landed, or at once when none has.
+    fn earliest_mint_ns(&self) -> u64 {
+        match self.landed_ns.load(Ordering::Acquire) {
+            NEVER_LANDED => 0,
+            at => at.saturating_add(MIN_MINT_INTERVAL_SECS * NS),
+        }
+    }
+
     /// Advance the exchange at tick-clock `now_ns` and the host's wall clock `wall` (epoch seconds):
+    /// start one when due, read what arrived, finish it. Answers when the cell next wants a tick,
+    /// and what happened.
     pub(crate) fn tick(
         &self,
         now_ns: u64,
@@ -984,23 +1126,36 @@ impl Minted {
                 fresh.token_type = None;
                 fresh.issued_token_type = None;
                 let now = wall;
-                let ahead = next_refresh_secs(fresh.expires_at, now);
+                let fresh_expires_at = fresh.expires_at;
+                let ahead = next_refresh_secs(fresh_expires_at, now);
 
                 let due = if self.on_demand {
                     u64::MAX
                 } else {
-                    now_ns.saturating_add(ahead.saturating_mul(NS))
+                    let floored = scheduled_refresh_secs(fresh.expires_at, now);
+                    now_ns.saturating_add(floored.saturating_mul(NS))
                 };
                 *self
                     .token
                     .write()
                     .unwrap_or_else(std::sync::PoisonError::into_inner) = Arc::new(fresh);
                 if self.on_demand {
+                    let ttl = fresh_expires_at.saturating_sub(now);
+                    self.retain_until.store(
+                        if ttl < 2 * MIN_MINT_INTERVAL_SECS {
+                            now.saturating_add(MIN_MINT_INTERVAL_SECS)
+                        } else {
+                            0
+                        },
+                        Ordering::Release,
+                    );
+                    let usable = ahead.max(MIN_MINT_INTERVAL_SECS.min(ttl));
                     self.usable_until
-                        .store(now.saturating_add(ahead), Ordering::Release);
+                        .store(now.saturating_add(usable), Ordering::Release);
                     self.retry_at.store(0, Ordering::Release);
                 }
                 self.refresh_failed.store(false, Ordering::Release);
+                self.landed_ns.store(now_ns, Ordering::Release);
                 *ex = Attempt::Idle { due_ns: due };
                 (due, Some(Report::Minted))
             }
@@ -1009,16 +1164,20 @@ impl Minted {
     }
 
     /// Whether this cell's last failed mint was an OUTAGE of its token endpoint (a 5xx or 429, a
+    /// timeout, a connection lost), not a refusal of its credential or its configuration.
     pub(crate) fn outage(&self) -> bool {
         self.outage.load(Ordering::Acquire)
     }
 
     /// Whether this cell's last failed mint got a reply it cannot use as a bearer, or had nothing
+    /// to sign or date with: the operator's to see (WARN), though no outage.
     pub(crate) fn unusable(&self) -> bool {
         self.unusable.load(Ordering::Acquire)
     }
 
-    /// A failed mint at tick-clock `now_ns` and wall-clock `wall`: keep serving whatever token is
+    /// A failed mint at tick-clock `now_ns` and wall-clock `wall`: keep serving the current token
+    /// until it expires (never past it: [`Minted::read`]), and retry at `MIN_SLEEP_SECS` (an on-demand cell retries when a request next arms
+    /// it, after its negative-cache window: `retry`, the reply's `Retry-After`, sets it).
     fn failed(
         &self,
         ex: &mut Attempt,
@@ -1081,6 +1240,9 @@ fn answered(status: u32, body: &[u8], wall: u64) -> Result<(CachedToken, bool), 
 }
 
 /// APPEND `bytes` to the token response `body`, growing it to what has arrived (never reserving
+/// the cap up front: a large cap costs nothing per mint) and at most one read past `cap` (the read
+/// that trips it). A growth moves the bytes into a new buffer with a fallible reservation and wipes
+/// the old one as it drops, so no unwiped copy of the access token is left behind.
 fn append_wiped(body: &mut Zeroizing<Vec<u8>>, bytes: &[u8], cap: usize) -> Result<(), String> {
     let need = body.len().saturating_add(bytes.len());
     if need > body.capacity() {
@@ -1104,11 +1266,13 @@ fn append_wiped(body: &mut Zeroizing<Vec<u8>>, bytes: &[u8], cap: usize) -> Resu
 }
 
 /// Whether a token endpoint's reply `status` is an OUTAGE (S4): a 5xx or a 429, the endpoint down
+/// or shedding load, never a refusal of the credential.
 pub(crate) const fn outage_status(status: u32) -> bool {
     status == 429 || (status >= 500 && status <= 599)
 }
 
 /// Whether a connection error is the token endpoint being unreachable (an outage): a timeout, a
+/// lost connection or a fault, never a refusal the host made by its own rules.
 const fn endpoint_down(e: ConnError) -> bool {
     matches!(
         e,

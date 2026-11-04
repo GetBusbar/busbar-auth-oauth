@@ -2,6 +2,8 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! The self-minting machinery over a scripted need: the refresh schedule (ported from
+//! `bearer_token_tests.rs`), the token response texts and cap (ported from the two mint bodies'
+//! tests), and the tick-driven exchange with THE EXPIRED-TOKEN RULE.
 
 use super::*;
 use busbar_contract::abi::sdk::cred::SealedWrite;
@@ -16,6 +18,7 @@ pub(crate) fn seen(r: Read<'_>) -> String {
 }
 
 /// The unit tests' wall clock (epoch seconds): their doubles stand in for the host's `clock.now`.
+/// The plugin itself reads no clock (THE DESIGN §1: "one clock"); see [`HostClock`].
 pub(crate) fn now_epoch() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -195,6 +198,8 @@ fn a_cached_token_omits_the_header_for_bytes_invalid_in_a_header_value() {
 }
 
 /// The texts a failed exchange names: the status line plus, only when the body is JSON with an
+/// RFC 6749 section 5.2 `error` code, that code; never other body text (a server may reflect the
+/// request, client secret and assertion included, into the diag channel).
 #[test]
 fn a_refused_or_malformed_response_is_named_in_1_5_5_words() {
     let long = "x".repeat(500);
@@ -240,6 +245,7 @@ fn token_response_tolerates_expires_in_as_number_string_or_absent() {
 }
 
 /// `expires_in` that is not a non-negative finite number is a mint failure, never a token: a
+/// negative number, a NaN or infinite string and a non-numeric string are each refused.
 #[test]
 fn token_response_refuses_an_expires_in_that_is_not_a_non_negative_number() {
     for body in [
@@ -301,6 +307,7 @@ fn an_escaped_access_token_is_read_into_one_wiped_buffer_never_by_the_decoder() 
 }
 
 /// A token landed on the first tick: the header is presented, the cell is ready, and the next tick
+/// is scheduled a skew ahead of expiry.
 #[test]
 fn the_first_tick_mints_and_the_request_path_presents_it() {
     let w = Scripted::default();
@@ -327,6 +334,7 @@ fn the_first_tick_mints_and_the_request_path_presents_it() {
 }
 
 /// A token endpoint's `expires_in` is untrusted: one so large that `ahead * NS` would overflow
+/// u64 schedules the refresh a day on (L4), never a wrapped (arbitrary) instant.
 #[test]
 fn a_huge_expires_in_schedules_no_overflowed_refresh() {
     let w = Scripted::default();
@@ -359,6 +367,7 @@ fn a_pending_read_is_finished_on_a_later_tick() {
 }
 
 /// THE CAP: a body past the kernel's `max_response_bytes` is refused before any JSON parse, in
+/// 1.5.5's words.
 #[test]
 fn a_response_body_over_the_cap_is_refused() {
     let w = Scripted::default();
@@ -410,6 +419,7 @@ fn a_dropped_or_refused_exchange_is_a_failure() {
 }
 
 /// A connection close before the protocol's terminal piece is an outage, even when the
+/// partial response body happens to be complete JSON.
 #[test]
 fn a_close_before_the_terminal_piece_is_an_outage() {
     let w = Scripted::default();
@@ -467,38 +477,203 @@ fn an_empty_token_is_a_failure_not_a_token() {
     assert!(!m.is_ready());
 }
 
+/// A SHORT-LIVED EXCHANGED TOKEN CANNOT DRIVE A TIGHT EXCHANGE LOOP: an on-demand cell whose token
+/// lives a second is exchanged again no sooner than `MIN_MINT_INTERVAL_SECS` after it landed, however
+/// many requests find it expired, and a token too short-lived for half its life to reach the floor
+/// is presented up to its expiry, never past it. RED before the fix: the request one second on
+/// armed an exchange due at once, and the 3 s token was not presented after its first second.
 #[test]
-fn an_expired_token_whose_refresh_failed_answers_wait_until_a_mint_lands() {
+fn a_short_lived_exchanged_token_is_not_exchanged_again_before_the_floor() {
+    let scoped = |w: &Scripted, body: &str| {
+        let exchange = Arc::new(token_exchange::build(
+            "subject",
+            "https://as.example/token",
+            token_exchange::ACCESS_TOKEN_TYPE,
+            "https://tools.example/rpc",
+        ));
+        w.ok(body);
+        Minted::new(
+            Minter::TokenExchange(token_exchange::Scoped::new(exchange, "s")),
+            DEFAULT_MAX_RESPONSE_BYTES,
+        )
+    };
+    let wall = now_epoch();
+    let w = Scripted::default();
+    let cell = scoped(
+        &w,
+        r#"{"access_token":"one","token_type":"Bearer","expires_in":1}"#,
+    );
+    assert_eq!(
+        cell.read(wall, seen),
+        "Wait",
+        "no token yet: the exchange is armed"
+    );
+    assert_eq!(cell.tick(0, wall, Some(&w)).1, Some(Report::Minted));
+    assert_eq!(cell.read(wall, seen), "Header(\"Bearer one\")");
+    assert_eq!(
+        cell.read(wall + 1, seen),
+        "Wait",
+        "expired: never presented"
+    );
+    assert_eq!(
+        cell.tick(S, wall + 1, Some(&w)),
+        (MIN_MINT_INTERVAL_SECS * S, None),
+        "the request armed the next exchange no sooner than the floor"
+    );
+    assert_eq!(w.sent.lock().unwrap().len(), 1);
+    w.ok(r#"{"access_token":"two","token_type":"Bearer","expires_in":1}"#);
+    assert_eq!(
+        cell.tick(MIN_MINT_INTERVAL_SECS * S, wall + 5, Some(&w)).1,
+        Some(Report::Minted)
+    );
+    assert_eq!(cell.read(wall + 5, seen), "Header(\"Bearer two\")");
+
+    let w = Scripted::default();
+    let cell = scoped(
+        &w,
+        r#"{"access_token":"three","token_type":"Bearer","expires_in":3}"#,
+    );
+    assert_eq!(cell.read(wall, seen), "Wait");
+    assert_eq!(cell.tick(0, wall, Some(&w)).1, Some(Report::Minted));
+    assert_eq!(
+        cell.read(wall + 2, seen),
+        "Header(\"Bearer three\")",
+        "presented while it lives, since it cannot be exchanged again before the floor"
+    );
+    assert_eq!(cell.read(wall + 3, seen), "Wait", "never past its expiry");
+}
+
+/// AN EXPIRED TOKEN IS NEVER PRESENTED (RFC 6750 §3.1): a token past its expiry whose refresh has
+/// not failed (the host was suspended: the wall clock moved, the tick clock did not) answers
+/// `Wait` and brings its refresh forward; once that refresh has failed the call fails closed
+/// (`EXPIRED`) and the retry keeps its back-off; a token not yet expired is still presented while
+/// refreshes fail. RED before the fix: the first expired read presented `Bearer old`.
+#[test]
+fn an_expired_token_is_never_presented_and_a_failed_refresh_fails_the_call_closed() {
+    let wall = now_epoch();
     let w = Scripted::default();
     w.ok(r#"{"access_token":"old","expires_in":60}"#);
     let m = Minted::new(client_credentials(), DEFAULT_MAX_RESPONSE_BYTES);
-    let (due, _) = m.tick(0, now_epoch(), Some(&w));
-    let later = now_epoch() + 3600;
+    let (due, _) = m.tick(0, wall, Some(&w));
+    assert_eq!(
+        due,
+        30 * S,
+        "1.5.5's half-life schedule for a one-minute token"
+    );
+    let later = wall + 3600;
     assert_eq!(
         m.read(later, seen),
-        "Header(\"Bearer old\")",
-        "expired, refresh not failed: the current token"
+        "Wait",
+        "expired, refresh not failed: not presented, the refresh is waited for"
     );
+    assert!(!m.presents(later), "an expired token is not ready");
     w.push(vec![Step::Head(500), Step::Body(b"down".to_vec(), true)]);
-    let (due, report) = m.tick(due, now_epoch(), Some(&w));
+    let (due, report) = m.tick(MIN_MINT_INTERVAL_SECS * S, wall, Some(&w));
     assert_eq!(
         report,
         Some(Report::MintFailed(
             "token endpoint returned 500 Internal Server Error".to_string()
-        ))
+        )),
+        "the refresh was brought forward to the floor after the last mint"
     );
-    assert_eq!(m.read(later, seen), "Wait");
+    assert_eq!(due, (MIN_MINT_INTERVAL_SECS + MIN_SLEEP_SECS) * S);
+    assert_eq!(m.read(later, seen), format!("Refuse({EXPIRED:?})"));
     assert_eq!(
-        m.read(now_epoch(), seen),
+        m.tick(due - 1, wall, Some(&w)),
+        (due, None),
+        "the failed refresh keeps its back-off: a refused call does not bring it forward"
+    );
+    assert_eq!(w.sent.lock().unwrap().len(), 2);
+    assert_eq!(
+        m.read(wall, seen),
         "Header(\"Bearer old\")",
         "not yet expired: served even while refreshes fail"
     );
     w.ok(r#"{"access_token":"new","expires_in":3600}"#);
-    assert_eq!(m.tick(due, now_epoch(), Some(&w)).1, Some(Report::Minted));
-    assert_eq!(m.read(later, seen), "Header(\"Bearer new\")");
+    assert_eq!(m.tick(due, wall, Some(&w)).1, Some(Report::Minted));
+    assert_eq!(m.read(later - 1, seen), "Header(\"Bearer new\")");
+}
+
+/// A HOST SUSPEND DOES NOT PRESENT THE STALE BEARER: a one-hour token read two hours on (the tick
+/// clock barely moved) waits, and the refresh it brings forward is due at once, on the next tick,
+/// rather than at the old schedule. RED before the fix: the read presented `Bearer stale` and the
+/// tick minted nothing until 3300 s on the tick clock.
+#[test]
+fn a_token_expired_across_a_host_suspend_is_refreshed_at_once_not_presented() {
+    let w = Scripted::default();
+    w.ok(r#"{"access_token":"stale","expires_in":3600}"#);
+    let m = Minted::new(client_credentials(), DEFAULT_MAX_RESPONSE_BYTES);
+    let wall = now_epoch();
+    let (due, _) = m.tick(0, wall, Some(&w));
+    assert_eq!(due, (3600 - REFRESH_SKEW_SECS) * S);
+    let resumed = wall + 7200;
+    assert_eq!(m.read(resumed, seen), "Wait");
+    w.ok(r#"{"access_token":"fresh","expires_in":3600}"#);
+    let tick_clock = 60 * S;
+    assert_eq!(
+        m.tick(tick_clock, resumed, Some(&w)).1,
+        Some(Report::Minted),
+        "the brought-forward refresh is due at once"
+    );
+    assert_eq!(m.read(resumed, seen), "Header(\"Bearer fresh\")");
+}
+
+/// A PROVIDER ISSUING VERY SHORT TOKENS CANNOT DRIVE A TIGHT MINT LOOP: a scheduled token that
+/// lives a second or two is re-minted no sooner than `MIN_MINT_INTERVAL_SECS` after it landed (1.5.5
+/// re-minted it about once a second), while a token living at least twice the floor keeps 1.5.5's
+/// schedule exactly. Such a provider still mints and its token is presented while it lives; a call
+/// after its expiry waits for the next mint (it does not bring it before the floor). RED before the
+/// fix: the 1 s and 2 s tokens were due again at 1 s.
+#[test]
+fn a_token_of_a_second_or_two_is_reminted_no_more_often_than_the_floor() {
+    let now = 1_000_000;
+    for (ttl, want) in [
+        (1, 5),
+        (2, 5),
+        (9, 5),
+        (10, 5),
+        (11, 5),
+        (20, 10),
+        (60, 30),
+        (3600, 3300),
+    ] {
+        assert_eq!(scheduled_refresh_secs(now + ttl, now), want, "ttl {ttl}");
+        assert_eq!(
+            scheduled_refresh_secs(now + ttl, now),
+            next_refresh_secs(now + ttl, now).max(MIN_MINT_INTERVAL_SECS),
+            "ttl {ttl}: 1.5.5's schedule, floored"
+        );
+    }
+
+    let w = Scripted::default();
+    w.ok(r#"{"access_token":"brief","token_type":"Bearer","expires_in":1}"#);
+    let m = Minted::new(client_credentials(), DEFAULT_MAX_RESPONSE_BYTES);
+    let wall = now_epoch();
+    let (due, report) = m.tick(0, wall, Some(&w));
+    assert_eq!(report, Some(Report::Minted), "a 1 s token still mints");
+    assert_eq!(due, MIN_MINT_INTERVAL_SECS * S, "not once a second");
+    assert_eq!(
+        m.read(wall, seen),
+        "Header(\"Bearer brief\")",
+        "presented while it lives"
+    );
+    assert_eq!(m.read(wall + 1, seen), "Wait", "expired: never presented");
+    assert_eq!(
+        m.tick(S, wall + 1, Some(&w)),
+        (MIN_MINT_INTERVAL_SECS * S, None),
+        "a call after expiry does not bring the mint before the floor"
+    );
+    assert_eq!(w.sent.lock().unwrap().len(), 1);
+    w.ok(r#"{"access_token":"next","token_type":"Bearer","expires_in":1}"#);
+    assert_eq!(
+        m.tick(MIN_MINT_INTERVAL_SECS * S, wall + 5, Some(&w)).1,
+        Some(Report::Minted)
+    );
+    assert_eq!(m.read(wall + 5, seen), "Header(\"Bearer next\")");
 }
 
 /// A reply code too large for 16 bits is not read as another code: 65736 is 200 modulo 65536, but
+/// it is no success, so its (valid-looking) body is not taken as a token.
 #[test]
 fn a_reply_code_past_sixteen_bits_is_a_failure_not_a_token() {
     let w = Scripted::default();
@@ -518,6 +693,8 @@ fn a_reply_code_past_sixteen_bits_is_a_failure_not_a_token() {
 }
 
 /// THE LOSSY TEXT OF A TOKEN RESPONSE IS BUILT ONCE: a body with bytes that are not UTF-8 becomes
+/// the text `from_utf8_lossy` gives, in a string sized exactly first, so it never grows (a growth
+/// would free an unwiped copy of the access token).
 #[test]
 fn the_lossy_body_is_one_exactly_sized_string() {
     let raw: &[u8] = b"{\"access_token\":\"a\xffb\xc3\x28c\xe2\x82\",\"x\":\"\xf0\x90\"}";
@@ -578,6 +755,8 @@ fn a_redirecting_token_endpoint_fails_the_mint() {
 }
 
 /// THE TOKEN REQUEST FORM IS THE CHIP'S (`cred::FormBody`): it carries the client secret, the
+/// subject token or the signed assertion as sealed values, and is written byte for byte as
+/// `serde_urlencoded` (reqwest's `.form()`) wrote it, for every byte.
 #[test]
 fn the_form_is_serde_urlencoded_byte_for_byte() {
     use busbar_contract::abi::sdk::test_support::chip::cred;
@@ -629,6 +808,10 @@ fn an_exchange_in_flight_reserves_no_buffer_the_size_of_the_cap() {
 }
 
 /// AN ON-DEMAND READ NEVER PRESENTS A TOKEN SNAPSHOTTED BEFORE THE EXCHANGE LANDED: a read racing
+/// the tick that stores the token either waits or presents the new token. It never answers
+/// `Nothing` (an unauthenticated token-exchange call) for a cell whose exchange succeeds.
+/// A test-only callback pins the usability judgement while the real mint publishes its token;
+/// production sets no callback (passing the seam is one unset-cell read).
 #[test]
 fn an_on_demand_read_racing_the_exchange_never_presents_nothing() {
     let exchange = Arc::new(token_exchange::build(
@@ -1174,4 +1357,32 @@ fn an_on_demand_read_inside_the_back_off_does_not_rearm_the_exchange() {
         Some(Report::Minted),
         "past the window a read re-arms the exchange"
     );
+}
+
+/// An expired token stays hidden while its refresh is waiting for the endpoint's reply.
+#[test]
+fn an_expired_token_waits_for_an_in_flight_refresh_without_starting_another() {
+    let wall = now_epoch();
+    let wire = Scripted::default();
+    wire.ok(r#"{"access_token":"old","expires_in":60}"#);
+    let cell = Minted::new(client_credentials(), DEFAULT_MAX_RESPONSE_BYTES);
+    let (due, _) = cell.tick(0, wall, Some(&wire));
+    wire.push(vec![
+        Step::Pending,
+        Step::Head(200),
+        Step::Body(
+            br#"{"access_token":"new","expires_in":3600}"#.to_vec(),
+            true,
+        ),
+    ]);
+    assert_eq!(cell.tick(due, wall + 60, Some(&wire)).1, None);
+    assert_eq!(cell.read(wall + 60, seen), "Wait");
+    assert!(!cell.presents(wall + 60));
+    assert_eq!(wire.sent.lock().unwrap().len(), 2);
+    assert_eq!(
+        cell.tick(due + IN_FLIGHT_POLL_NS, wall + 60, Some(&wire)).1,
+        Some(Report::Minted)
+    );
+    assert_eq!(cell.read(wall + 60, seen), "Header(\"Bearer new\")");
+    assert_eq!(wire.sent.lock().unwrap().len(), 2);
 }

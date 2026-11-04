@@ -8,11 +8,18 @@
 use zeroize::Zeroizing;
 
 /// THE TOP-LEVEL STRING MEMBER `name` of `json` (a document the decoder has already judged
+/// well-formed), its escapes resolved into ONE buffer sized to the escaped length (unescaping only
+/// shortens) and wiped on drop; `None` when that member is not a string.
+///
+/// A secret member is read here and never by the decoder: `serde_json` unescapes a string that
+/// carries an escape into a scratch buffer of its own, which it frees unwiped. The decode names the
+/// member `serde::de::IgnoredAny` (skipping copies nothing) and its value is read with this.
 pub(crate) fn wiped_member(json: &str, name: &[u8]) -> Option<Zeroizing<String>> {
     unescape(top_level_string(json.as_bytes(), name)?)
 }
 
 /// The escaped bytes (between the quotes) of the top-level object member `name` of the
+/// well-formed JSON document `json`, when that member is a string.
 fn top_level_string<'a>(json: &'a [u8], name: &[u8]) -> Option<&'a [u8]> {
     let mut i = 0;
     let mut depth = 0_usize;
@@ -65,6 +72,7 @@ fn top_level_string<'a>(json: &'a [u8], name: &[u8]) -> Option<&'a [u8]> {
 }
 
 /// JSON string escapes resolved (RFC 8259 section 7), into a buffer sized once to the escaped
+/// length; `None` for an escape the decoder would have refused.
 fn unescape(raw: &[u8]) -> Option<Zeroizing<String>> {
     let mut out = Zeroizing::new(String::with_capacity(raw.len()));
     let mut i = 0;
@@ -113,11 +121,17 @@ fn unescape(raw: &[u8]) -> Option<Zeroizing<String>> {
 }
 
 /// Default token TTL when a token endpoint omits `expires_in` (RFC 6749 section 5.1 makes it
+/// RECOMMENDED, not required): a conservative 1 h so the token still refreshes on schedule.
 pub fn default_expires_in() -> u64 {
     3600
 }
 
 /// Deserialize an OAuth `expires_in` TOLERANTLY. RFC 6749 specifies a number of seconds, but real IdPs
+/// vary — some emit it as a JSON STRING (`"3600"`), and some omit it (handled by
+/// `#[serde(default = "default_expires_in")]` on the field). A strict `u64` field breaks token minting
+/// for those providers, silently downing the lane. Accept an integer, a JSON float/decimal
+/// (`3600.0` / `"3600.5"`, truncated toward zero — a fractional second on a token TTL is noise), or a
+/// numeric string. A negative or non-finite value is rejected.
 pub fn deserialize_expires_in<'de, D>(d: D) -> Result<u64, D::Error>
 where
     D: serde::Deserializer<'de>,

@@ -2,6 +2,37 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! `open_outbound`'s body: `jwt-bearer` and `oauth-client-credentials` bind from their settings
+//! ([`open_binding`]). Neither touches the network at open — an open wakes the instance's driver
+//! ticket and the first mint runs on the `drive` that wake brings (before the instance's first
+//! `tick`, on that tick). Neither serves a caller-credential passthrough mode: an OAuth token is always minted
+//! from the OPERATOR's own configured credential (a service-account key, a client id/secret), never
+//! from a per-request caller credential, so this mechanism declares no
+//! [`busbar_contract::abi::auth::STYLE_CALLER_CREDENTIAL`].
+//!
+//! The settings schema:
+//!
+//! | style | settings |
+//! |---|---|
+//! | `jwt-bearer` | `{token_uri?, scope?, subject?, max_response_bytes?}` (`token_uri`: the host's judged copy of the service account's endpoint) |
+//! | `oauth-client-credentials` | `{token_url, scope?, max_response_bytes?}` (no `scope`: the request states none, RFC 6749 §4.4.2) |
+//! | `oauth-token-exchange` | `{token_url, resource, subject_token_type?, max_response_bytes?}` |
+//!
+//! `max_response_bytes` (the token response cap; default 256 KiB) must be from 1024 to 1048576.
+//!
+//! A key outside a style's row is refused (`settings: unknown key `<k>``), so a typo never
+//! silently falls back to a default, unless core forwards it to every style from its shared
+//! provider schema (`token_url`, `token_uri`, `scope`, `subject`): a style that does not read such
+//! a key binds all the same and logs one WARN for it (`settings.<k>: not used by the <style>
+//! style; ignored`).
+//!
+//! `oauth-token-exchange` (RFC 8693) binds busbar's own
+//! subject token (the credential) and mints nothing at open: each request's scope (the call's
+//! extensions blob) is its own exchange, on demand, cached per scope ([`ExchangeBinding`]).
+//!
+//! The refusals: a binding that cannot open answers FAILED with one
+//! line per finding, each `credential: <text>` or `settings: <text>`. The kernel composes the
+//! sentence — `provider '<p>' <style> credential (from <src>) is invalid: <text>`, or
+//! `provider '<p>' <text>`.
 
 use std::sync::Arc;
 
@@ -29,6 +60,7 @@ pub enum Binding {
 }
 
 /// AN `oauth-token-exchange` BINDING: the exchange material every scope shares, the key its scopes'
+/// cells are cached under, and the response cap.
 pub struct ExchangeBinding {
     exchange: Arc<mint::token_exchange::Exchange>,
     key: [u8; 32],
@@ -37,6 +69,7 @@ pub struct ExchangeBinding {
 
 impl ExchangeBinding {
     /// Whether `cell` is one of this binding's scopes: made by this binding, or by an earlier
+    /// opening of it (the same credential and settings, so the same key).
     pub(crate) fn owns(&self, cell: &Minted) -> bool {
         cell.exchange().is_some_and(|x| x.binding() == self.key)
     }
@@ -47,6 +80,7 @@ impl ExchangeBinding {
     }
 
     /// The cache key of this binding's cell for `scope`: SHA-256 over the binding's own key and the
+    /// scope, so two scopes never share a token and two bindings never share a scope's.
     pub fn scope_key(&self, scope: &[u8]) -> [u8; 32] {
         use sha2::{Digest, Sha256};
         let mut h = Sha256::new();
@@ -57,6 +91,7 @@ impl ExchangeBinding {
     }
 
     /// What a new cell for `scope` mints with, and its response cap: built only when the cache
+    /// holds no cell for the scope yet.
     pub(crate) fn minter(&self, scope: &str) -> (Minter, usize) {
         (
             Minter::TokenExchange(mint::token_exchange::Scoped::new(
@@ -89,6 +124,8 @@ impl Refusal {
 }
 
 /// The keys each style documents (the schema table above). `jwt-bearer`'s `token_uri` is the host's
+/// judged copy of the service account's endpoint: the mint dials it (the credential's own stays the
+/// assertion's `aud`).
 const JWT_BEARER_KEYS: &[&str] = &["token_uri", "scope", "subject", "max_response_bytes"];
 const OAUTH_CLIENT_CREDENTIALS_KEYS: &[&str] = &["token_url", "scope", "max_response_bytes"];
 const OAUTH_TOKEN_EXCHANGE_KEYS: &[&str] = &[
@@ -99,6 +136,7 @@ const OAUTH_TOKEN_EXCHANGE_KEYS: &[&str] = &[
 ];
 
 /// Every key the instance's own settings may hold: the keys of every style's row (the host opens
+/// the instance over a binding's settings).
 const INSTANCE_KEYS: &[&[&str]] = &[
     JWT_BEARER_KEYS,
     OAUTH_CLIENT_CREDENTIALS_KEYS,
@@ -106,6 +144,10 @@ const INSTANCE_KEYS: &[&[&str]] = &[
 ];
 
 /// The instance's own settings `m`: every key some style reads is accepted; any other is refused,
+/// naming it.
+///
+/// # Errors
+/// Findings for unknown keys and malformed present settings.
 pub(crate) fn instance_keys(m: &Map<String, Value>) -> Result<(), Vec<Refusal>> {
     let mut refusals: Vec<Refusal> = m
         .keys()
@@ -135,9 +177,13 @@ pub(crate) fn instance_keys(m: &Map<String, Value>) -> Result<(), Vec<Refusal>> 
 }
 
 /// The keys core forwards from its shared provider/style schema to every style's open (the kind
+/// rule, lead ruling 2026-10-30, as sigv4 and header): a style that does not read one ignores it,
+/// with one WARN at the open, and never refuses it.
 const FORWARDED_KEYS: &[&str] = &["token_url", "token_uri", "scope", "subject"];
 
 /// Refuse every key the style does not document and core does not forward, naming it: a typo'd
+/// optional key must not silently fall back to its default. A forwarded key the style does not
+/// read is logged as ignored, once per key.
 fn deny_unknown(m: &Map<String, Value>, allowed: &[&str], style: &str) -> Result<(), Vec<Refusal>> {
     let unknown: Vec<Refusal> = m
         .keys()
@@ -176,6 +222,7 @@ fn object(settings: Option<&[u8]>) -> Result<Map<String, Value>, Refusal> {
 }
 
 /// The setting `key` read as `T`; a value of another type is refused naming the key and `want`
+/// (what it must be), never with the decoder's text, which quotes the value.
 fn field<T: for<'de> Deserialize<'de>>(
     m: &Map<String, Value>,
     key: &str,
@@ -215,9 +262,11 @@ fn text(m: &Map<String, Value>, key: &str) -> Result<Option<String>, Refusal> {
 }
 
 /// The bounds a token response cap may take: below 1 KiB no real token response fits; above
+/// 1 MiB a cap bounds nothing a token endpoint should send.
 const MAX_RESPONSE_BYTES_RANGE: std::ops::RangeInclusive<usize> = 1024..=1_048_576;
 
 /// The token response cap (`max_response_bytes`), its default when unset; one outside
+/// [`MAX_RESPONSE_BYTES_RANGE`] is refused, naming the key.
 fn max_response_bytes(m: &Map<String, Value>) -> Result<usize, Refusal> {
     let Some(max) = field::<usize>(m, "max_response_bytes", "a non-negative integer")? else {
         return Ok(mint::DEFAULT_MAX_RESPONSE_BYTES);
@@ -234,14 +283,21 @@ fn max_response_bytes(m: &Map<String, Value>) -> Result<usize, Refusal> {
 }
 
 /// What opening a style needs from the instance: the token cache, keyed by (style, credential,
+/// settings), so a re-open shares the cell a previous generation minted into.
 pub trait TokenCache {
     /// The cell for `key`; `minter` makes it when absent (and is dropped when a cell is held).
     fn cell(&self, key: [u8; 32], minter: Minter, max: usize) -> Arc<Minted>;
     /// The cache key of `parts` (style, credential, settings): a derivation keyed by the cache's
+    /// own secret, never a plain digest of the credential.
     fn key(&self, parts: &[&[u8]]) -> [u8; 32];
 }
 
 /// Bind `style` to `credential` under `settings`, whichever this plugin serves — `open_outbound`'s
+/// body. Never touches the network.
+///
+/// # Errors
+///
+/// Every finding that refuses the binding.
 pub fn open(
     style: &str,
     credential: Option<&[u8]>,
@@ -256,6 +312,9 @@ pub fn open(
 }
 
 /// `oauth-token-exchange`: the keyless contradiction (the credential IS the subject token), then
+/// `token_url` and `resource` (the previous release required both: an exchange with no RFC 8707
+/// resource indicator mints a token spendable at any backend the authorization server serves), then
+/// the binding. `subject_token_type` defaults to an access token.
 fn open_token_exchange(
     credential: Option<&[u8]>,
     settings: Option<&[u8]>,
@@ -343,6 +402,12 @@ fn open_token_exchange(
 }
 
 /// Bind `style` to `credential` under `settings` — `open_outbound`'s body for a minted style.
+/// Never touches the network: the door wakes the driver ticket and a minted style's first mint runs
+/// on the `drive` that wake brings (before the instance's first `tick`, on that tick).
+///
+/// # Errors
+///
+/// Every finding that refuses the binding, in check order.
 pub fn open_binding(
     style: &str,
     credential: Option<&[u8]>,
@@ -378,6 +443,7 @@ pub fn open_binding(
 }
 
 /// `oauth-client-credentials`: the checks, in order (the keyless
+/// contradiction, `token_url`, a blank `scope`, the credential shape), then the binding.
 fn open_client_credentials(
     m: &Map<String, Value>,
     credential: Option<&str>,

@@ -2,6 +2,8 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! `open_outbound`'s body: `jwt-bearer` and `oauth-client-credentials` bind from their settings,
+//! and every refusal is 1.5.5's own words in the `credential:` / `settings:` lines the kernel
+//! composes (ARCHITECT ruling Q5).
 
 use super::*;
 use std::collections::HashMap;
@@ -78,6 +80,7 @@ fn a_blank_optional_setting_is_refused_instead_of_using_its_default() {
 }
 
 /// `oauth-client-credentials`: 1.5.5's `config_validate` findings, in its order, each the words
+/// BOOT-030 / BOOT-034 / BOOT-035 pin after the kernel's `provider '<p>' ` prefix.
 #[test]
 fn oauth_client_credentials_refuses_in_1_5_5_words_and_order() {
     assert_eq!(
@@ -116,6 +119,7 @@ fn oauth_client_credentials_refuses_in_1_5_5_words_and_order() {
 }
 
 /// `jwt-bearer`: BOOT-036's credential clause is the redacted 1.6.0 sentence (accepted difference
+/// F-BOOT-036: the argument is never echoed), and a keyless declaration is refused.
 #[test]
 fn jwt_bearer_refuses_in_the_accepted_words() {
     let l = lines(open(JWT_BEARER, Some("unused"), "{}"));
@@ -160,6 +164,7 @@ fn an_unknown_style_or_malformed_settings_is_refused() {
 }
 
 /// THE TOKEN CACHE OUTLIVES A HANDLE: a re-open of the same (style, credential, settings) shares
+/// the cell a previous generation minted into; any change makes a new one.
 #[test]
 fn a_reopen_shares_the_token_cell_and_a_change_does_not() {
     let cache = Cache::default();
@@ -249,6 +254,8 @@ fn a_jwt_binding_dials_the_judged_token_uri_setting() {
 }
 
 /// NO SETTINGS VALUE IS ECHOED (S1): a wrong-typed or malformed setting is refused naming the key
+/// and what it must be, never with the decoder's text, which quotes the value (an operator may
+/// paste a secret into the wrong key). RED: `invalid type: string "<the value>"` reached the line.
 #[test]
 fn a_bad_setting_is_refused_without_its_value() {
     const PASTED: &str = "s3cr3t-pasted-here";

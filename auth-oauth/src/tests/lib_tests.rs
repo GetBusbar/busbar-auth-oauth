@@ -2,6 +2,8 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! The crate root's own constants: what the `fields` door writes, and the diagnostic table's
+//! shape (its id strings are read by the plugin crate's conformance test, where reading an
+//! `AbiStr`'s bytes is allowed).
 
 use super::*;
 use crate::instance::diag;
@@ -12,6 +14,7 @@ fn the_authorization_field_is_written_sensitive() {
 }
 
 /// The diagnostic indices are the Statement's table positions, in `DIAG_IDS` order (the plugin
+/// crate's conformance test pins which code each position holds).
 #[test]
 fn the_diag_indices_are_the_table_positions() {
     assert_eq!(DIAG_IDS.len(), 3);
@@ -21,6 +24,7 @@ fn the_diag_indices_are_the_table_positions() {
 }
 
 /// Settings that are not a JSON object are FAILED (the contract's settings refusal), never
+/// REFUSED, at validate, open and refresh alike.
 #[test]
 fn bad_settings_answer_failed_at_validate_open_and_refresh() {
     use busbar_contract::abi::mechanism::call::Outcome;
@@ -61,6 +65,10 @@ fn the_oauth_styles_state_their_token_endpoint_and_rank_after_the_header_styles(
 }
 
 /// THE INSTANCE'S OWN SETTINGS (S2): the host opens the instance over a binding's settings, so
+/// every key a style reads is accepted there, and any other key is refused BY NAME, FAILED, in the
+/// contract's instance-relative line form, at validate, open and refresh alike (`validate` refuses
+/// exactly what `open` refuses). RED: any JSON object was accepted, and the refusal line named the
+/// plugin instead of `settings`.
 #[test]
 fn an_unknown_instance_setting_is_refused_by_name_at_validate_open_and_refresh() {
     use busbar_contract::abi::mechanism::call::Outcome;
@@ -128,6 +136,7 @@ fn invalid_present_settings_are_refused_at_every_lifecycle_entry() {
 }
 
 /// A REFUSED BINDING IS LOGGED ONCE AT INFO (S5), `module = "oauth"`, with its reason and never the
+/// credential. RED: the refusal was answered and logged nowhere.
 #[test]
 fn a_refused_binding_is_logged_once_at_info() {
     use crate::test_support::OAuthEvents;
