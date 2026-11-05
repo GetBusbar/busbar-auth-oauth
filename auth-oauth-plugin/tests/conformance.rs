@@ -815,6 +815,8 @@ mod mint_door {
     #[derive(Default)]
     struct TokenEndpoint {
         slab: ConnSlab<()>,
+        carrier_facts: Option<ConnFacts>,
+        prepared: Mutex<HashMap<ConnId, (NeedId, u64)>>,
         declared: Mutex<Vec<(u32, ReadNeed, Option<String>)>>,
         opened: Mutex<Vec<Opened>>,
         replies: Mutex<Replies>,
@@ -830,7 +832,7 @@ mod mint_door {
             end: kind != PieceKind::Fields,
             status: None,
             status_code: status,
-            status_namespace: None,
+            status_namespace: status.map(|_| "http".to_owned()),
             retry_after_secs: None,
             fault: None,
             reason: None,
@@ -839,6 +841,73 @@ mod mint_door {
     }
 
     impl DeclaredConns for TokenEndpoint {
+        fn prepare_request(
+            &self,
+            caller: InstanceId,
+            need: NeedId,
+            desc: &OpenDesc<'_>,
+            dial_timeout_ms: u64,
+        ) -> Result<ConnId, ConnError> {
+            self.slab.check_need(caller, need)?;
+            assert!(desc.method.is_empty() && desc.fields.is_empty() && desc.body.is_empty());
+            let id = self.slab.insert(caller, need, ())?;
+            self.prepared
+                .lock()
+                .unwrap()
+                .insert(id, (need, dial_timeout_ms));
+            Ok(id)
+        }
+        fn commit_request(
+            &self,
+            caller: InstanceId,
+            id: ConnId,
+            desc: &OpenDesc<'_>,
+            require_secure: bool,
+        ) -> Result<(), ConnError> {
+            self.slab.get(caller, id)?;
+            if require_secure
+                && !self
+                    .carrier_facts
+                    .as_ref()
+                    .is_some_and(|facts| facts.peer_cert.is_some())
+            {
+                return Err(ConnError::AuthRefused);
+            }
+            let (_need, _dial_timeout_ms) = self
+                .prepared
+                .lock()
+                .unwrap()
+                .remove(&id)
+                .ok_or(ConnError::Refused)?;
+            let need = _need;
+            let mut opened = self.opened.lock().unwrap();
+            opened.push((
+                need.0,
+                desc.target.to_owned(),
+                String::from_utf8_lossy(desc.method).into_owned(),
+                String::from_utf8_lossy(desc.head_target).into_owned(),
+                desc.fields
+                    .iter()
+                    .map(|(n, v)| ((*n).to_owned(), String::from_utf8_lossy(v).into_owned()))
+                    .collect(),
+                String::from_utf8_lossy(&desc.body).into_owned(),
+            ));
+            let n = opened.len();
+            let body = format!(
+                r#"{{"access_token":"oracle-minted-{n}","expires_in":{},"token_type":"Bearer"}}"#,
+                if n == 1 { 2 } else { 3600 }
+            );
+
+            self.replies.lock().unwrap().insert(
+                id,
+                VecDeque::from([
+                    (piece(PieceKind::Fields, 0, Some(200)), Vec::new()),
+                    (piece(PieceKind::Body, body.len(), None), body.into_bytes()),
+                    (piece(PieceKind::Completion, 0, None), Vec::new()),
+                ]),
+            );
+            Ok(())
+        }
         fn declare(
             &self,
             owner: InstanceId,
@@ -861,11 +930,79 @@ mod mint_door {
         fn declared(&self, owner: InstanceId, need: NeedId) -> Option<Result<(), ConnError>> {
             self.slab.check_need(owner, need).ok().map(Ok)
         }
-        fn framed(&self, _: InstanceId, _: NeedId) -> bool {
-            true
+        fn framed(&self, owner: InstanceId, need: NeedId) -> bool {
+            self.slab.check_need(owner, need).is_ok()
         }
         fn serves_scheme(&self, scheme: &str) -> bool {
             scheme == "http"
+        }
+    }
+
+    #[test]
+    fn scripted_carrier_requires_preparation_ownership_and_secure_commit() {
+        let owner = InstanceId(71);
+        let other = InstanceId(72);
+        let need = NeedId(0);
+        for carrier_facts in [
+            None,
+            Some(ConnFacts::default()),
+            Some(super::oauth_grants::modeled_secure_facts()),
+        ] {
+            let secure = carrier_facts
+                .as_ref()
+                .is_some_and(|facts| facts.peer_cert.is_some());
+            let available = carrier_facts.is_some();
+            let endpoint = TokenEndpoint {
+                carrier_facts,
+                ..TokenEndpoint::default()
+            };
+            endpoint.slab.declare(owner, need);
+            // URL spelling is deliberately identical for unavailable, insecure and secure carriers.
+            let dial = OpenDesc {
+                target: "https://scripted.invalid/token",
+                ..OpenDesc::default()
+            };
+            let id = endpoint.prepare_request(owner, need, &dial, 0).unwrap();
+            assert!(endpoint.opened.lock().unwrap().is_empty());
+            assert!(endpoint.replies.lock().unwrap().is_empty());
+            assert_eq!(endpoint.facts(owner, id).is_ok(), available);
+            assert!(matches!(
+                endpoint.facts(other, id),
+                Err(ConnError::NotOwner)
+            ));
+            assert_eq!(
+                endpoint.write(owner, id, b"CANARY", false, false),
+                Err(ConnError::Refused)
+            );
+            let request = OpenDesc {
+                method: b"POST",
+                body: b"CANARY".to_vec().into(),
+                timeout_ms: 30_000,
+                ..dial
+            };
+            assert_eq!(
+                endpoint.commit_request(other, id, &request, true),
+                Err(ConnError::NotOwner)
+            );
+            assert_eq!(endpoint.close(other, id), Err(ConnError::NotOwner));
+            let committed = endpoint.commit_request(owner, id, &request, true);
+            if secure {
+                assert_eq!(committed, Ok(()));
+                assert_eq!(endpoint.opened.lock().unwrap().len(), 1);
+                assert!(endpoint.replies.lock().unwrap().contains_key(&id));
+                assert_eq!(
+                    endpoint.commit_request(owner, id, &request, true),
+                    Err(ConnError::Refused)
+                );
+            } else {
+                assert_eq!(committed, Err(ConnError::AuthRefused));
+                assert!(endpoint.opened.lock().unwrap().is_empty());
+                assert!(endpoint.replies.lock().unwrap().is_empty());
+            }
+            endpoint.close(owner, id).unwrap();
+            assert!(endpoint.prepared.lock().unwrap().is_empty());
+            assert!(endpoint.facts(owner, id).is_err());
+            assert!(endpoint.commit_request(owner, id, &request, true).is_err());
         }
     }
 
@@ -877,42 +1014,23 @@ mod mint_door {
             desc: &OpenDesc<'_>,
         ) -> Result<ConnId, ConnError> {
             self.slab.check_need(caller, need)?;
-            let mut opened = self.opened.lock().unwrap();
-            opened.push((
-                need.0,
-                desc.target.to_owned(),
-                String::from_utf8_lossy(desc.method).into_owned(),
-                String::from_utf8_lossy(desc.head_target).into_owned(),
-                desc.fields
-                    .iter()
-                    .map(|(n, v)| ((*n).to_owned(), String::from_utf8_lossy(v).into_owned()))
-                    .collect(),
-                String::from_utf8_lossy(&desc.body).into_owned(),
-            ));
-            let n = opened.len();
-            let body = format!(
-                r#"{{"access_token":"oracle-minted-{n}","expires_in":{},"token_type":"Bearer"}}"#,
-                if n == 1 { 2 } else { 3600 }
-            );
             let id = self.slab.insert(caller, need, ())?;
-            self.replies.lock().unwrap().insert(
-                id,
-                VecDeque::from([
-                    (piece(PieceKind::Fields, 0, Some(200)), Vec::new()),
-                    (piece(PieceKind::Body, body.len(), None), body.into_bytes()),
-                    (piece(PieceKind::Completion, 0, None), Vec::new()),
-                ]),
-            );
+            self.prepared.lock().unwrap().insert(id, (need, 0));
+            self.commit_request(caller, id, desc, false)?;
             Ok(id)
         }
         fn write(
             &self,
-            _: InstanceId,
-            _: ConnId,
+            owner: InstanceId,
+            id: ConnId,
             b: &[u8],
             _: bool,
             _: bool,
         ) -> Result<usize, ConnError> {
+            self.slab.get(owner, id)?;
+            if self.prepared.lock().unwrap().contains_key(&id) {
+                return Err(ConnError::Refused);
+            }
             Ok(b.len())
         }
         fn read(
@@ -940,10 +1058,13 @@ mod mint_door {
         fn wait(&self, _: InstanceId, _: &[ConnId], _: u64) -> Result<usize, ConnError> {
             Err(ConnError::Pending)
         }
-        fn facts(&self, _: InstanceId, _: ConnId) -> Result<ConnFacts, ConnError> {
-            Err(ConnError::Closed)
+        fn facts(&self, owner: InstanceId, id: ConnId) -> Result<ConnFacts, ConnError> {
+            self.slab.get(owner, id)?;
+            self.carrier_facts.clone().ok_or(ConnError::Refused)
         }
         fn close(&self, c: InstanceId, id: ConnId) -> Result<(), ConnError> {
+            self.slab.get(c, id)?;
+            self.prepared.lock().unwrap().remove(&id);
             self.replies.lock().unwrap().remove(&id);
             self.slab.remove(c, id).map(|_| ())
         }
@@ -979,7 +1100,10 @@ mod mint_door {
         if sensitive {
             SEALED_REQUIRED.store(false, Ordering::SeqCst);
         }
-        let table = Arc::new(TokenEndpoint::default());
+        let table = Arc::new(TokenEndpoint {
+            carrier_facts: Some(super::oauth_grants::modeled_secure_facts()),
+            ..TokenEndpoint::default()
+        });
         let dispatcher = Arc::new(Dispatcher::with_services(
             DispatchConfig::default(),
             Arc::new(Clock(Instant::now())),

@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "OAuth lifecycle settings",
+  "description": "Union of the jwt-bearer, oauth-client-credentials and oauth-token-exchange settings. Lifecycle validation does not require an endpoint or a selected style; binding does. Credentials are lent separately. An absent blob is equivalent to {}.",
+  "type": "object",
+  "default": {},
+  "properties": {
+    "token_url": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "pattern": "[^\\x09-\\x0D \\x85\\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]",
+      "description": "Optional non-blank setting; null is treated as absent. Binding applies style-specific requirements."
+    },
+    "token_uri": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "pattern": "[^\\x09-\\x0D \\x85\\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]",
+      "description": "Optional non-blank setting; null is treated as absent. Binding applies style-specific requirements."
+    },
+    "scope": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "pattern": "[^\\x09-\\x0D \\x85\\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]",
+      "description": "Optional non-blank setting; null is treated as absent. Binding applies style-specific requirements."
+    },
+    "subject": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "pattern": "[^\\x09-\\x0D \\x85\\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]",
+      "description": "Optional non-blank setting; null is treated as absent. Binding applies style-specific requirements."
+    },
+    "resource": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "pattern": "[^\\x09-\\x0D \\x85\\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]",
+      "description": "Optional non-blank setting; null is treated as absent. Binding applies style-specific requirements."
+    },
+    "subject_token_type": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "pattern": "[^\\x09-\\x0D \\x85\\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]",
+      "description": "Optional non-blank setting; null is treated as absent. Binding applies style-specific requirements."
+    },
+    "max_response_bytes": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 1024,
+      "maximum": 1048576,
+      "default": 262144,
+      "description": "Token response byte limit; null also selects the default.",
+      "x-busbar-integer-token": "unsigned"
+    }
+  },
+  "additionalProperties": false,
+  "x-busbar-settings-profile": "integer-token-v1"
+}

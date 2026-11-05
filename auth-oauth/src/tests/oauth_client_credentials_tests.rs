@@ -69,3 +69,18 @@ fn the_token_request_is_the_form_1_5_5_posted() {
         "grant_type=client_credentials&client_id=my+id&client_secret=s3cr%26t%3D&scope=https%3A%2F%2Fcognitiveservices.azure.com%2F.default"
     );
 }
+
+#[test]
+fn token_endpoint_owner_marks_the_client_secret_security_requirement() {
+    for (target, required) in [
+        ("https://issuer/token", true),
+        ("HTTPS://issuer/token", true),
+        ("http://127.0.0.1/token", false),
+    ] {
+        let binding = build("client:secret", target, None).unwrap();
+        assert_eq!(
+            binding.request().body.encoded().unwrap().secure_required(),
+            required
+        );
+    }
+}

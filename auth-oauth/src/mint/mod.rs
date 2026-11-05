@@ -510,8 +510,27 @@ pub(crate) trait Wire: Send + Sync {
         body: &mut SealedWrite,
         timeout_ms: u64,
     ) -> Result<ConnId, ConnError>;
+    /// Continue one opening without rebuilding its request or losing a pending host handle.
+    fn advance_open(
+        &self,
+        req: &TokenRequest,
+        body: &mut SealedWrite,
+        timeout_ms: u64,
+        _state: &mut Option<Box<host_wire::Opening>>,
+    ) -> Result<ConnId, ConnError> {
+        self.open(req, body, timeout_ms)
+    }
     /// Read one piece into `buf`; [`ConnError::Pending`] when nothing is ready.
     fn read(&self, conn: ConnId, buf: &mut [u8]) -> Result<Got, ConnError>;
+    /// Continue a pending reply read on its original completion handle.
+    fn advance_read(
+        &self,
+        conn: ConnId,
+        buf: &mut [u8],
+        _state: &mut Option<Box<host_wire::PendingRead>>,
+    ) -> Result<Got, ConnError> {
+        self.read(conn, buf)
+    }
     /// Close the connection.
     fn close(&self, conn: ConnId);
     /// The host's clock (`clock.now`; one clock, which also drives every plugin's `tick`), one
@@ -535,9 +554,18 @@ pub(crate) struct HostClock {
 enum Attempt {
     /// No exchange; the next is due at `due_ns` on the tick clock.
     Idle { due_ns: u64 },
+    /// The request and its zeroizing encoding survive pending connection security checks.
+    Opening {
+        request: TokenRequest,
+        sealed: SealedWrite,
+        state: Option<Box<host_wire::Opening>>,
+        started_ns: u64,
+    },
     /// An exchange is in flight on `conn`.
     InFlight {
         conn: ConnId,
+        connection: Option<Box<host_wire::Opening>>,
+        pending_read: Option<Box<host_wire::PendingRead>>,
         started_ns: u64,
         status: Option<u32>,
         /// The reply head's `Retry-After`, when it carried one.
@@ -857,7 +885,7 @@ impl Minted {
     /// waited for.
     fn expired(&self, attempt: &mut Attempt) -> Read<'static> {
         match attempt {
-            Attempt::InFlight { .. } => Read::Wait,
+            Attempt::Opening { .. } | Attempt::InFlight { .. } => Read::Wait,
             Attempt::Idle { .. } if self.refresh_failed.load(Ordering::Acquire) => {
                 Read::Refuse(EXPIRED)
             }
@@ -910,7 +938,7 @@ impl Minted {
             if now_ns < due_ns {
                 return (due_ns, None);
             }
-            let Some(wire) = wire else {
+            let Some(_) = wire else {
                 return self.failed(
                     &mut ex,
                     now_ns,
@@ -939,7 +967,7 @@ impl Minted {
                 Err(e) => return self.failed(&mut ex, now_ns, wall, e, Fail::Refused, None),
             };
 
-            let mut body = match req.body.encoded() {
+            let body = match req.body.encoded() {
                 Ok(b) => b,
                 Err(r) => {
                     return self.failed(
@@ -952,17 +980,48 @@ impl Minted {
                     )
                 }
             };
-            match wire.open(&req, &mut body, MINT_DEADLINE_SECS * 1000) {
+            *ex = Attempt::Opening {
+                request: req,
+                sealed: body,
+                state: None,
+                started_ns: now_ns,
+            };
+        }
+        if let Attempt::Opening { started_ns, .. } = &*ex {
+            if now_ns.saturating_sub(*started_ns) >= MINT_DEADLINE_SECS * NS {
+                return self.failed(
+                    &mut ex,
+                    now_ns,
+                    wall,
+                    "token endpoint request did not open before the mint deadline".into(),
+                    Fail::Outage,
+                    None,
+                );
+            }
+        }
+        let Some(wire) = wire else {
+            return (now_ns.saturating_add(IN_FLIGHT_POLL_NS), None);
+        };
+        if let Attempt::Opening {
+            request,
+            sealed,
+            state,
+            started_ns,
+        } = &mut *ex
+        {
+            match wire.advance_open(request, sealed, MINT_DEADLINE_SECS * 1000, state) {
                 Ok(conn) => {
                     *ex = Attempt::InFlight {
                         conn,
-                        started_ns: now_ns,
+                        connection: state.take(),
+                        pending_read: None,
+                        started_ns: *started_ns,
                         status: None,
                         retry_after: None,
-
                         body: Zeroizing::new(Vec::new()),
-                    }
+                    };
                 }
+                Err(ConnError::Pending) => return (now_ns.saturating_add(IN_FLIGHT_POLL_NS), None),
                 Err(e) => {
                     return self.failed(
                         &mut ex,
@@ -975,11 +1034,10 @@ impl Minted {
                 }
             }
         }
-        let Some(wire) = wire else {
-            return (now_ns.saturating_add(IN_FLIGHT_POLL_NS), None);
-        };
         let Attempt::InFlight {
             conn,
+            connection,
+            pending_read,
             started_ns,
             status,
             retry_after,
@@ -1015,7 +1073,7 @@ impl Minted {
                     Fail::Outage,
                 ));
             }
-            match wire.read(conn, &mut buf[..]) {
+            match wire.advance_read(conn, &mut buf[..], pending_read) {
                 Ok(got) => {
                     if got.status.is_some() {
                         *status = got.status;
@@ -1068,6 +1126,9 @@ impl Minted {
             }
         };
         let retry = *retry_after;
+        if let Some(connection) = connection {
+            connection.release();
+        }
         wire.close(conn);
         match finished.and_then(|(status, body)| answered(status, &body, wall)) {
             Ok((fresh, _)) if !fresh.token.is_empty() && fresh.expires_at <= wall => self.failed(

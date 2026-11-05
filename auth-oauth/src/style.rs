@@ -347,11 +347,10 @@ fn open_token_exchange(
              token endpoint busbar's subject token is exchanged at)"
                 .to_string(),
         )),
-        Some(Some(url)) if busbar_contract::net::parse_url(url).is_err() => {
-            refusals.push(Refusal::Settings(
-                "outbound auth setting `token_url` is invalid: it must be an absolute URL"
-                    .to_string(),
-            ));
+        Some(Some(url)) => {
+            if let Err(reason) = token_endpoint(url) {
+                refusals.push(Refusal::Settings(reason));
+            }
         }
         _ => {}
     }
@@ -442,8 +441,85 @@ pub fn open_binding(
     }
 }
 
-/// `oauth-client-credentials`: the checks, in order (the keyless
-/// contradiction, `token_url`, a blank `scope`, the credential shape), then the binding.
+/// OAuth token endpoint syntax belongs to the auth owner. Network and metadata admission remain
+/// host policy; this pure parser only establishes this protocol's security requirement.
+fn token_endpoint(url: &str) -> Result<(), String> {
+    use busbar_contract::net::{host_is_private_or_loopback, parse_url, scheme_is};
+    let parts = parse_url(url).map_err(|_| {
+        "outbound auth setting `token_url` is invalid: it must be an absolute URL".to_owned()
+    })?;
+    if parts.userinfo {
+        return Err(
+            "token_url must not contain userinfo; credentials are supplied separately".into(),
+        );
+    }
+    if scheme_is(url, "https")
+        || (scheme_is(url, "http") && host_is_private_or_loopback(&parts.host))
+    {
+        return Ok(());
+    }
+    if scheme_is(url, "http") {
+        Err(format!("token_url must use https for a public host (got '{url}'); it carries the client secret, so plaintext http is permitted only for a private/loopback token endpoint"))
+    } else {
+        Err(format!("token_url must use http or https (got '{url}')"))
+    }
+}
+
+/// Validate settings while the credential is deferred, without constructing a token cache or
+/// opening an auth instance. Only styles advertising a settings endpoint need this hook.
+pub fn check_settings(style: &str, settings: &[u8]) -> Result<(), Vec<Refusal>> {
+    let m = object(Some(settings)).map_err(|r| vec![r])?;
+    if style != OAUTH_CLIENT_CREDENTIALS {
+        return Err(vec![Refusal::Settings(format!(
+            "style '{style}' has no settings-only validator"
+        ))]);
+    }
+    deny_unknown(&m, OAUTH_CLIENT_CREDENTIALS_KEYS, style)?;
+    let mut refusals = Vec::new();
+    let _ = client_credentials_fields(&m, &mut refusals);
+    let _ = kept(&mut refusals, max_response_bytes(&m));
+    if refusals.is_empty() {
+        Ok(())
+    } else {
+        Err(refusals)
+    }
+}
+
+fn client_credentials_fields(
+    m: &Map<String, Value>,
+    refusals: &mut Vec<Refusal>,
+) -> (Option<Option<String>>, Option<String>) {
+    let token_url = kept(refusals, field::<String>(m, "token_url", "a string"))
+        .map(|value| value.filter(|url| !url.trim().is_empty()));
+    if matches!(token_url, Some(None)) {
+        refusals.push(Refusal::Settings(
+            "uses auth: oauth-client-credentials but has no `token_url` (the OAuth token endpoint \
+             the client credentials are POSTed to)"
+                .to_string(),
+        ));
+    }
+
+    if let Some(Some(url)) = token_url.as_ref() {
+        if let Err(reason) = token_endpoint(url) {
+            refusals.push(Refusal::Settings(reason));
+        }
+    }
+
+    let scope = match m.get("scope") {
+        Some(Value::String(s)) if s.trim().is_empty() => {
+            refusals.push(Refusal::Settings(
+                "outbound auth setting `scope` is invalid: it must not be blank (omit it to request \
+                 the token endpoint's default scope)"
+                    .to_string(),
+            ));
+            None
+        }
+        _ => kept(refusals, text(m, "scope")).flatten(),
+    };
+    (token_url, scope)
+}
+
+// Keep binding refusal order: keyless contradiction, endpoint/scope, credential, response cap.
 fn open_client_credentials(
     m: &Map<String, Value>,
     credential: Option<&str>,
@@ -461,26 +537,7 @@ fn open_client_credentials(
                 .to_string(),
         ));
     }
-    let token_url = kept(&mut refusals, text(m, "token_url"));
-    if matches!(token_url, Some(None)) {
-        refusals.push(Refusal::Settings(
-            "uses auth: oauth-client-credentials but has no `token_url` (the OAuth token endpoint \
-             the client credentials are POSTed to)"
-                .to_string(),
-        ));
-    }
-
-    let scope = match m.get("scope") {
-        Some(Value::String(s)) if s.trim().is_empty() => {
-            refusals.push(Refusal::Settings(
-                "outbound auth setting `scope` is invalid: it must not be blank (omit it to request \
-                 the token endpoint's default scope)"
-                    .to_string(),
-            ));
-            None
-        }
-        _ => kept(&mut refusals, text(m, "scope")).flatten(),
-    };
+    let (token_url, scope) = client_credentials_fields(m, &mut refusals);
     let cred = credential.unwrap_or("");
     if credential.is_some() {
         if let Err(e) = mint::oauth_client_credentials::validate_credential(cred) {

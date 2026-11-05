@@ -630,3 +630,68 @@ fn a_client_credentials_binding_names_a_mistyped_setting_with_the_credential_ref
         ]
     );
 }
+
+#[test]
+fn token_endpoint_protocol_policy_belongs_to_the_oauth_owner() {
+    for url in [
+        "https://idp.example/token",
+        "http://127.0.0.1/token",
+        "http://[::1]/token",
+        "http://0x7f000001/token",
+    ] {
+        let settings = serde_json::json!({"token_url": url}).to_string();
+        assert!(
+            open(OAUTH_CLIENT_CREDENTIALS, Some("client:secret"), &settings).is_ok(),
+            "{url}"
+        );
+    }
+    for url in [
+        "http://idp.example/token",
+        "foreign://idp.example/token",
+        "https://secret@idp.example/token",
+    ] {
+        let settings = serde_json::json!({"token_url": url}).to_string();
+        let refused = lines(open(
+            OAUTH_CLIENT_CREDENTIALS,
+            Some("client:secret"),
+            &settings,
+        ));
+        assert!(
+            refused.iter().any(|line| line.contains("token_url")),
+            "{url}: {refused:?}"
+        );
+        assert!(!refused.iter().any(|line| line.contains("secret@")));
+    }
+}
+
+#[test]
+fn deferred_credential_settings_are_checked_without_a_binding_or_cache() {
+    for settings in [
+        br#"{"token_url":"https://unreachable.invalid/token"}"#.as_slice(),
+        br#"{"token_url":"http://127.0.0.1:9/token"}"#,
+    ] {
+        check_settings(OAUTH_CLIENT_CREDENTIALS, settings).expect("credential is not needed");
+    }
+    for (settings, expected) in [
+        (br#"{}"#.as_slice(), "no `token_url`"),
+        (
+            br#"{"token_url":"http://login.example.com/token"}"#,
+            "must use https",
+        ),
+        (
+            br#"{"token_url":"foreign://login.example.com/token"}"#,
+            "must use http or https",
+        ),
+        (
+            br#"{"token_url":"https://login.example.com/token","scope":" "}"#,
+            "must not be blank",
+        ),
+    ] {
+        let refused = check_settings(OAUTH_CLIENT_CREDENTIALS, settings).unwrap_err();
+        assert!(
+            refused.iter().any(|r| r.line().contains(expected)),
+            "{refused:?}"
+        );
+        assert!(refused.iter().all(|r| matches!(r, Refusal::Settings(_))));
+    }
+}

@@ -414,3 +414,24 @@ fn an_escaped_private_key_member_opens_the_same_signing_identity() {
     assert!(build(&ordinary, None, None).is_ok());
     assert!(build(&escaped, None, None).is_ok());
 }
+
+#[test]
+fn token_endpoint_owner_marks_the_assertion_security_requirement() {
+    for (target, required) in [
+        ("https://issuer/token", true),
+        ("HTTPS://issuer/token", true),
+        ("http://127.0.0.1/token", false),
+    ] {
+        let account = serde_json::json!({"client_email": "account@example.com",
+            "private_key": TEST_PRIVATE_KEY_PEM, "token_uri": target})
+        .to_string();
+        let signer = build(&account, None, None).unwrap();
+        assert_eq!(signer.key.secure_required(), required);
+        let signer = signer.dialling("https://judged/token".into());
+        assert!(signer.key.secure_required());
+        assert!(signer
+            .dialling("http://127.0.0.1/token".into())
+            .key
+            .secure_required());
+    }
+}

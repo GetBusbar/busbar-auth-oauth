@@ -28,6 +28,18 @@ use busbar_plugin_loader::dispatch::{
     load_dropped, load_linked, now_ns, Bind, ConnTable, DispatchConfig, Dispatcher, Frame, Lent,
     LinkedRow, NoSink, Plugin, Reply,
 };
+/// Explicit scripted carrier evidence, independent of request URL spelling.
+pub(super) fn modeled_secure_facts() -> ConnFacts {
+    ConnFacts {
+        peer_cert: Some(busbar_contract::transport::wire::CertFacts {
+            subject: "scripted carrier".into(),
+            issuer: "fixture".into(),
+            fingerprint: "ab".repeat(32),
+        }),
+        ..ConnFacts::default()
+    }
+}
+
 /// The request one `fields` call signs.
 #[derive(Clone)]
 struct Head {
@@ -356,6 +368,8 @@ struct Endpoint {
     deadlines: Mutex<Vec<(u64, u64)>>,
     framed: bool,
     slab: ConnSlab<()>,
+    carrier_facts: Option<ConnFacts>,
+    prepared: Mutex<HashMap<ConnId, (NeedId, u64)>>,
     answers: Vec<(u32, Vec<u8>)>,
     sent: Mutex<Vec<Sent>>,
     replies: Mutex<Replies>,
@@ -369,7 +383,7 @@ fn piece(kind: PieceKind, len: usize, status: Option<u32>) -> Piece {
         end: kind != PieceKind::Fields,
         status: None,
         status_code: status,
-        status_namespace: None,
+        status_namespace: status.map(|_| "http".to_owned()),
         retry_after_secs: None,
         fault: None,
         reason: None,
@@ -378,9 +392,10 @@ fn piece(kind: PieceKind, len: usize, status: Option<u32>) -> Piece {
 }
 
 impl Endpoint {
-    fn new(answers: Vec<(u32, Vec<u8>)>) -> Self {
+    fn new(answers: Vec<(u32, Vec<u8>)>, carrier_facts: Option<ConnFacts>) -> Self {
         Self {
             answers,
+            carrier_facts,
             framed: true,
             ..Self::default()
         }
@@ -435,6 +450,77 @@ impl Endpoint {
 }
 
 impl DeclaredConns for Endpoint {
+    fn prepare_request(
+        &self,
+        caller: InstanceId,
+        need: NeedId,
+        desc: &OpenDesc<'_>,
+        dial_timeout_ms: u64,
+    ) -> Result<ConnId, ConnError> {
+        self.slab.check_need(caller, need)?;
+        assert!(desc.method.is_empty() && desc.fields.is_empty() && desc.body.is_empty());
+        let id = self.slab.insert(caller, need, ())?;
+        self.prepared
+            .lock()
+            .unwrap()
+            .insert(id, (need, dial_timeout_ms));
+        Ok(id)
+    }
+    fn commit_request(
+        &self,
+        caller: InstanceId,
+        id: ConnId,
+        desc: &OpenDesc<'_>,
+        require_secure: bool,
+    ) -> Result<(), ConnError> {
+        self.slab.get(caller, id)?;
+        if require_secure
+            && !self
+                .carrier_facts
+                .as_ref()
+                .is_some_and(|facts| facts.peer_cert.is_some())
+        {
+            return Err(ConnError::AuthRefused);
+        }
+        let (_need, _dial_timeout_ms) = self
+            .prepared
+            .lock()
+            .unwrap()
+            .remove(&id)
+            .ok_or(ConnError::Refused)?;
+        self.deadlines
+            .lock()
+            .unwrap()
+            .push((_dial_timeout_ms, desc.timeout_ms));
+        let n = {
+            let mut sent = self.sent.lock().unwrap_or_else(|e| e.into_inner());
+            sent.push(Sent {
+                target: desc.target.to_owned(),
+                method: String::from_utf8_lossy(desc.method).into_owned(),
+                fields: desc
+                    .fields
+                    .iter()
+                    .map(|(n, v)| ((*n).to_owned(), String::from_utf8_lossy(v).into_owned()))
+                    .collect(),
+                body: desc.body.to_vec(),
+            });
+            sent.len()
+        };
+        let (status, body) = self.answers[(n - 1).min(self.answers.len() - 1)].clone();
+
+        self.replies
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(
+                id,
+                VecDeque::from([
+                    (piece(PieceKind::Fields, 0, Some(status)), Vec::new()),
+                    (piece(PieceKind::Body, body.len(), None), body),
+                    (piece(PieceKind::Completion, 0, None), Vec::new()),
+                ]),
+            );
+        Ok(())
+    }
     fn declare(
         &self,
         owner: InstanceId,
@@ -465,18 +551,85 @@ impl DeclaredConns for Endpoint {
         require_secure: bool,
         dial_timeout_ms: u64,
     ) -> Result<ConnId, ConnError> {
-        if require_secure {
-            return Err(ConnError::AuthRefused);
-        }
         self.slab.check_need(owner, need)?;
-        self.deadlines
+        let id = self.slab.insert(owner, need, ())?;
+        self.prepared
             .lock()
             .unwrap()
-            .push((dial_timeout_ms, desc.timeout_ms));
-        self.open(owner, need, desc)
+            .insert(id, (need, dial_timeout_ms));
+        if let Err(error) = self.commit_request(owner, id, desc, require_secure) {
+            self.close(owner, id)?;
+            return Err(error);
+        }
+        Ok(id)
     }
     fn serves_scheme(&self, _: &str) -> bool {
         true
+    }
+}
+
+#[test]
+fn scripted_carrier_requires_preparation_ownership_and_secure_commit() {
+    let owner = InstanceId(71);
+    let other = InstanceId(72);
+    let need = NeedId(0);
+    for carrier_facts in [
+        None,
+        Some(ConnFacts::default()),
+        Some(modeled_secure_facts()),
+    ] {
+        let secure = carrier_facts
+            .as_ref()
+            .is_some_and(|facts| facts.peer_cert.is_some());
+        let available = carrier_facts.is_some();
+        let endpoint = Endpoint::new(vec![(200, b"{}".to_vec())], carrier_facts);
+        endpoint.slab.declare(owner, need);
+        // URL spelling is deliberately identical for unavailable, insecure and secure carriers.
+        let dial = OpenDesc {
+            target: "https://scripted.invalid/token",
+            ..OpenDesc::default()
+        };
+        let id = endpoint.prepare_request(owner, need, &dial, 0).unwrap();
+        assert!(endpoint.sent.lock().unwrap().is_empty());
+        assert!(endpoint.replies.lock().unwrap().is_empty());
+        assert_eq!(endpoint.facts(owner, id).is_ok(), available);
+        assert!(matches!(
+            endpoint.facts(other, id),
+            Err(ConnError::NotOwner)
+        ));
+        assert_eq!(
+            endpoint.write(owner, id, b"CANARY", false, false),
+            Err(ConnError::Refused)
+        );
+        let request = OpenDesc {
+            method: b"POST",
+            body: b"CANARY".to_vec().into(),
+            timeout_ms: 30_000,
+            ..dial
+        };
+        assert_eq!(
+            endpoint.commit_request(other, id, &request, true),
+            Err(ConnError::NotOwner)
+        );
+        assert_eq!(endpoint.close(other, id), Err(ConnError::NotOwner));
+        let committed = endpoint.commit_request(owner, id, &request, true);
+        if secure {
+            assert_eq!(committed, Ok(()));
+            assert_eq!(endpoint.sent.lock().unwrap().len(), 1);
+            assert!(endpoint.replies.lock().unwrap().contains_key(&id));
+            assert_eq!(
+                endpoint.commit_request(owner, id, &request, true),
+                Err(ConnError::Refused)
+            );
+        } else {
+            assert_eq!(committed, Err(ConnError::AuthRefused));
+            assert!(endpoint.sent.lock().unwrap().is_empty());
+            assert!(endpoint.replies.lock().unwrap().is_empty());
+        }
+        endpoint.close(owner, id).unwrap();
+        assert!(endpoint.prepared.lock().unwrap().is_empty());
+        assert!(endpoint.facts(owner, id).is_err());
+        assert!(endpoint.commit_request(owner, id, &request, true).is_err());
     }
 }
 
@@ -488,33 +641,9 @@ impl Conns for Endpoint {
         desc: &OpenDesc<'_>,
     ) -> Result<ConnId, ConnError> {
         self.slab.check_need(caller, need)?;
-        let n = {
-            let mut sent = self.sent.lock().unwrap_or_else(|e| e.into_inner());
-            sent.push(Sent {
-                target: desc.target.to_owned(),
-                method: String::from_utf8_lossy(desc.method).into_owned(),
-                fields: desc
-                    .fields
-                    .iter()
-                    .map(|(n, v)| ((*n).to_owned(), String::from_utf8_lossy(v).into_owned()))
-                    .collect(),
-                body: desc.body.to_vec(),
-            });
-            sent.len()
-        };
-        let (status, body) = self.answers[(n - 1).min(self.answers.len() - 1)].clone();
         let id = self.slab.insert(caller, need, ())?;
-        self.replies
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(
-                id,
-                VecDeque::from([
-                    (piece(PieceKind::Fields, 0, Some(status)), Vec::new()),
-                    (piece(PieceKind::Body, body.len(), None), body),
-                    (piece(PieceKind::Completion, 0, None), Vec::new()),
-                ]),
-            );
+        self.prepared.lock().unwrap().insert(id, (need, 0));
+        self.commit_request(caller, id, desc, false)?;
         Ok(id)
     }
     fn write(
@@ -526,6 +655,9 @@ impl Conns for Endpoint {
         _: bool,
     ) -> Result<usize, ConnError> {
         self.slab.get(owner, id)?;
+        if self.prepared.lock().unwrap().contains_key(&id) {
+            return Err(ConnError::Refused);
+        }
         Ok(b.len())
     }
     fn read(&self, c: InstanceId, id: ConnId, _: u64, buf: &mut [u8]) -> Result<Piece, ConnError> {
@@ -550,10 +682,13 @@ impl Conns for Endpoint {
     fn wait(&self, _: InstanceId, _: &[ConnId], _: u64) -> Result<usize, ConnError> {
         Err(ConnError::Pending)
     }
-    fn facts(&self, _: InstanceId, _: ConnId) -> Result<ConnFacts, ConnError> {
-        Err(ConnError::Closed)
+    fn facts(&self, owner: InstanceId, id: ConnId) -> Result<ConnFacts, ConnError> {
+        self.slab.get(owner, id)?;
+        self.carrier_facts.clone().ok_or(ConnError::Refused)
     }
     fn close(&self, c: InstanceId, id: ConnId) -> Result<(), ConnError> {
+        self.slab.get(c, id)?;
+        self.prepared.lock().unwrap().remove(&id);
         self.replies
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -1241,6 +1376,7 @@ fn grant_case(x: OAuthGrant) {
                 .iter()
                 .map(|v| (v.status, v.body.clone()))
                 .collect(),
+            Some(modeled_secure_facts()),
         ));
         let (clock, d) = clock_dispatcher(x.head.timestamp);
         let p = product(dropped, &d, e.clone());
@@ -1323,10 +1459,10 @@ fn grant_case(x: OAuthGrant) {
         // The actual loader faults a closed instance before any product operation crossing.
         assert_eq!(closed, "Fault ", "a closed instance cannot produce fields");
         steps.push(closed);
-        let failing = Arc::new(Endpoint::new(vec![(
-            500,
-            b"conformance: the token endpoint is down".to_vec(),
-        )]));
+        let failing = Arc::new(Endpoint::new(
+            vec![(500, b"conformance: the token endpoint is down".to_vec())],
+            Some(modeled_secure_facts()),
+        ));
         let (clock, d) = clock_dispatcher(x.head.timestamp);
         let p = product(dropped, &d, failing.clone());
         let (h, failure_open) = opened(&p, &d, &x);
@@ -1507,7 +1643,7 @@ fn close_stream(p: &Plugin<Auth>, stream: u64) -> (Outcome, u64, String) {
 
 #[test]
 fn actual_oauth_host_connections_refuse_undeclared_need_and_other_owner() {
-    let mut endpoint = Endpoint::new(vec![(200, b"{}".to_vec())]);
+    let mut endpoint = Endpoint::new(vec![(200, b"{}".to_vec())], None);
     endpoint.framed = false; // Exercise raw host connection custody on the actual auth context.
     let endpoint = Arc::new(endpoint);
     let d = Dispatcher::new(DispatchConfig::default());
@@ -1562,4 +1698,31 @@ fn actual_oauth_host_connections_refuse_undeclared_need_and_other_owner() {
     assert_eq!(close_stream(&owner, conn).0, Outcome::Ready);
     close(&owner);
     close(&other);
+}
+
+#[test]
+fn actual_oauth_does_not_send_credentials_without_secure_carrier_facts_both_doors() {
+    for dropped in [false, true] {
+        for carrier_facts in [None, Some(ConnFacts::default())] {
+            let endpoint = Arc::new(Endpoint::new(vec![(200, b"{}".to_vec())], carrier_facts));
+            let case = client_credentials_case();
+            let (clock, dispatcher) = clock_dispatcher(case.head.timestamp);
+            let plugin = product(dropped, &dispatcher, endpoint.clone());
+            let (binding, _) = opened(&plugin, &dispatcher, &case);
+            let driver = dispatcher.driver(&plugin, 0).unwrap();
+            let _ = tick_driver(&plugin, &dispatcher, &clock, driver, T0);
+            let (flags, point) = flags(&case);
+            let result = sign(&plugin, binding, &case.head, flags, point);
+            assert!(result.starts_with("Failed "), "{result}");
+            assert_eq!(
+                endpoint.count(),
+                0,
+                "HTTPS does not establish carrier security"
+            );
+            assert!(endpoint.deadlines.lock().unwrap().is_empty());
+            assert!(endpoint.replies.lock().unwrap().is_empty());
+            close(&plugin);
+            assert!(endpoint.prepared.lock().unwrap().is_empty());
+        }
+    }
 }

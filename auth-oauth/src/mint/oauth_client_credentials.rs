@@ -44,7 +44,12 @@ pub(crate) fn build(
     let (client_id, client_secret) = split_credential(credential)?;
     Ok(ClientCreds {
         client_id: client_id.to_string(),
-        client_secret: Cred::captured(Zeroizing::new(client_secret.as_bytes().to_vec())),
+        client_secret: Cred::captured(Zeroizing::new(client_secret.as_bytes().to_vec()))
+            .require_secure_if(
+                token_url
+                    .split_once("://")
+                    .is_some_and(|(scheme, _)| scheme.eq_ignore_ascii_case("https")),
+            ),
         token_url: token_url.to_string(),
         scope: scope.map(str::to_string),
     })

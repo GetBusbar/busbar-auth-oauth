@@ -70,7 +70,12 @@ pub(crate) fn build(
     resource: &str,
 ) -> Exchange {
     Exchange {
-        subject_token: Cred::captured(Zeroizing::new(subject_token.as_bytes().to_vec())),
+        subject_token: Cred::captured(Zeroizing::new(subject_token.as_bytes().to_vec()))
+            .require_secure_if(
+                token_url
+                    .split_once("://")
+                    .is_some_and(|(scheme, _)| scheme.eq_ignore_ascii_case("https")),
+            ),
         subject_token_type: subject_token_type.to_string(),
         token_url: token_url.to_string(),
         resource: resource.to_string(),

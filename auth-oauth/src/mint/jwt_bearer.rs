@@ -68,7 +68,11 @@ pub(crate) fn build(
 ) -> Result<Signer, String> {
     let (sa, key) = parse_service_account(credential)?;
     Ok(Signer {
-        key,
+        key: key.require_secure_if(
+            sa.token_uri
+                .split_once("://")
+                .is_some_and(|(scheme, _)| scheme.eq_ignore_ascii_case("https")),
+        ),
         issuer: sa.client_email,
         endpoint: sa.token_uri.clone(),
         token_uri: sa.token_uri,
@@ -140,6 +144,11 @@ impl Signer {
     /// account's own `token_uri`.
     #[must_use]
     pub(crate) fn dialling(mut self, endpoint: String) -> Self {
+        self.key = self.key.require_secure_if(
+            endpoint
+                .split_once("://")
+                .is_some_and(|(scheme, _)| scheme.eq_ignore_ascii_case("https")),
+        );
         self.endpoint = endpoint;
         self
     }

@@ -134,11 +134,14 @@ const STYLES: &[StyleDecl] = &[
 /// THE AUTH STATEMENT TAIL: outbound only, no login, no inbound carriers.
 const TAIL: &AuthTail = &outbound_tail(0, STYLES);
 
+/// Token endpoint response fields consumed by the mint's retry policy.
+const KEPT_REPLY_FIELDS: &[AbiStr] = &[abi_str("retry-after")];
+
 /// One token endpoint's need: outbound, `provider` (refused a private address unless
 /// allowlisted, kept in its class though its config names the target; never
 /// `operator-infrastructure`, which admits a private address with no entry), over the http
-/// transport, its target the binding's setting `target_from` names. It reads no response field
-/// beyond the reply's code.
+/// transport, its target the binding's setting `target_from` names. The mint reads the reply's
+/// code and `retry-after`; the host keeps exactly that declared response field.
 const fn token_need(target_from: &'static str) -> Need {
     Need {
         direction: DIRECTION_OUTBOUND,
@@ -148,6 +151,7 @@ const fn token_need(target_from: &'static str) -> Need {
         keep_mode: KEEP_NAMED,
         ..Need::EMPTY
     }
+    .with_keep_response_headers(KEPT_REPLY_FIELDS)
 }
 
 /// THE PLUGIN'S OWN NEEDS, in `mint::need` order: `oauth-client-credentials` and
@@ -165,14 +169,26 @@ const DIAG_IDS: &[AbiStr] = &[
     abi_str("BUSBAR-4016"),
 ];
 
-/// What the plugin states: its name, version, the concurrency it serves, its diagnostics, its own
-/// needs and its outbound styles.
-pub const STATEMENT: Statement = with_tail(
-    statement("busbar-auth-oauth", env!("CARGO_PKG_VERSION"), 1024)
-        .with_diag_ids(DIAG_IDS)
-        .with_needs(NEEDS),
-    TAIL,
-);
+const SETTINGS_CHECK_KEY: &str = busbar_contract::abi::auth::EXT_OUTBOUND_SETTINGS_CHECK;
+const SETTINGS_CHECK_EXTENSION: [u8; busbar_contract::abi::mechanism::extensions::entry_len(
+    SETTINGS_CHECK_KEY,
+    &[1],
+)] = busbar_contract::abi::mechanism::extensions::entry(SETTINGS_CHECK_KEY, &[1]);
+
+/// JSON Schema for the lifecycle settings document, embedded in the signed Statement.
+const SETTINGS_SCHEMA: &[u8] = include_bytes!("../settings.schema.json");
+
+/// The auth declaration, including pure settings-only validation support.
+pub const STATEMENT: Statement = Statement {
+    settings_schema: busbar_contract::abi::mechanism::call::Blob::json(SETTINGS_SCHEMA),
+    extensions: busbar_contract::abi::mechanism::call::Blob::of(&SETTINGS_CHECK_EXTENSION),
+    ..with_tail(
+        statement("busbar-auth-oauth", env!("CARGO_PKG_VERSION"), 1024)
+            .with_diag_ids(DIAG_IDS)
+            .with_needs(NEEDS),
+        TAIL,
+    )
+};
 
 busbar_contract::auth_outbound_door!(Oauth, STATEMENT);
 
@@ -398,6 +414,18 @@ impl Oauth {
 }
 
 impl OutboundPlugin for Oauth {
+    fn validate_outbound_settings(style: &str, settings: &[u8]) -> Result<(), Refusal> {
+        style::check_settings(style, settings).map_err(|refusals| {
+            Refusal::failed(
+                refusals
+                    .iter()
+                    .map(style::Refusal::line)
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            )
+        })
+    }
+
     fn validate(settings: &[u8]) -> Result<(), Refusal> {
         judged(settings)
     }
@@ -494,3 +522,6 @@ impl OutboundPlugin for Oauth {
         CANCEL_CONTINUES
     }
 }
+
+#[cfg(test)]
+mod settings_schema_tests;

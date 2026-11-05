@@ -35,7 +35,11 @@ struct Script {
     replies: VecDeque<(ReplyPiece, Vec<u8>)>,
     /// How many CLOSEs.
     closed: u32,
+    security_pending: bool,
+    secure: bool,
 }
+
+static CASE: Mutex<()> = Mutex::new(());
 
 static SCRIPT: Mutex<Script> = Mutex::new(Script {
     established: Vec::new(),
@@ -43,6 +47,8 @@ static SCRIPT: Mutex<Script> = Mutex::new(Script {
     opened: Vec::new(),
     replies: VecDeque::new(),
     closed: 0,
+    security_pending: false,
+    secure: false,
 });
 
 use busbar_contract::abi::auth::{OutboundReadyIn, OutboundReadyOut};
@@ -260,26 +266,44 @@ impl DeclaredConns for WireEndpoint {
     fn framed(&self, _: InstanceId, _: NeedId) -> bool {
         true
     }
-    fn open_request(
+    fn prepare_request(
         &self,
         owner: InstanceId,
         need: NeedId,
         desc: &OpenDesc<'_>,
-        require_secure: bool,
         dial_timeout_ms: u64,
     ) -> Result<ConnId, ConnError> {
-        // This local host-value script has no secure network connection. Preserve fail-closed
-        // custody, while treating dial and request deadlines as the two distinct ABI values.
-        if require_secure {
+        self.slab.check_need(owner, need)?;
+        let mut script = SCRIPT.lock().unwrap();
+        script.deadlines.push((dial_timeout_ms, desc.timeout_ms));
+        script.established.push((desc.target.to_owned(), need.0));
+        self.slab.insert(owner, need, ())
+    }
+    fn commit_request(
+        &self,
+        owner: InstanceId,
+        conn: ConnId,
+        desc: &OpenDesc<'_>,
+        require_secure: bool,
+    ) -> Result<(), ConnError> {
+        self.slab.get(owner, conn)?;
+        let mut script = SCRIPT.lock().unwrap();
+        if script.security_pending {
+            return Err(ConnError::Pending);
+        }
+        if require_secure && !script.secure {
             return Err(ConnError::AuthRefused);
         }
-        self.slab.check_need(owner, need)?;
-        SCRIPT
-            .lock()
-            .unwrap()
-            .deadlines
-            .push((dial_timeout_ms, desc.timeout_ms));
-        self.open(owner, need, desc)
+        script.opened.push((
+            desc.method.to_vec(),
+            desc.head_target.to_vec(),
+            desc.fields
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_vec()))
+                .collect(),
+            desc.body.to_vec(),
+        ));
+        Ok(())
     }
     fn serves_scheme(&self, scheme: &str) -> bool {
         scheme == "http"
@@ -359,8 +383,22 @@ impl Conns for WireEndpoint {
     fn wait(&self, _: InstanceId, _: &[ConnId], _: u64) -> Result<usize, ConnError> {
         Err(ConnError::Pending)
     }
-    fn facts(&self, _: InstanceId, _: ConnId) -> Result<ConnFacts, ConnError> {
-        Err(ConnError::Closed)
+    fn facts(&self, owner: InstanceId, conn: ConnId) -> Result<ConnFacts, ConnError> {
+        self.slab.get(owner, conn)?;
+        let script = SCRIPT.lock().unwrap();
+        if script.security_pending {
+            return Err(ConnError::Pending);
+        }
+        Ok(ConnFacts {
+            peer_cert: script
+                .secure
+                .then(|| busbar_contract::transport::wire::CertFacts {
+                    subject: String::new(),
+                    issuer: String::new(),
+                    fingerprint: "cd".repeat(32),
+                }),
+            ..Default::default()
+        })
     }
     fn close(&self, owner: InstanceId, id: ConnId) -> Result<(), ConnError> {
         self.slab.remove(owner, id)?;
@@ -544,6 +582,17 @@ fn each_host_failure_maps_to_its_connection_error() {
 #[test]
 fn a_jwt_bearer_mint_runs_over_the_host_wire_at_the_hosts_wall_seconds() {
     use base64::Engine as _;
+    let _case = CASE.lock().unwrap();
+    {
+        let mut script = SCRIPT.lock().unwrap();
+        script.established.clear();
+        script.deadlines.clear();
+        script.opened.clear();
+        script.replies.clear();
+        script.closed = 0;
+        script.security_pending = false;
+        script.secure = true; // This script explicitly models a completed TLS handshake.
+    }
     let block = b"retry-after: 7\r\n".to_vec();
     let body = br#"{"access_token":"ya29.wire","token_type":"Bearer","expires_in":3600}"#.to_vec();
     {
@@ -597,6 +646,17 @@ fn a_jwt_bearer_mint_runs_over_the_host_wire_at_the_hosts_wall_seconds() {
         connector.write_request(stream, &piece, &bytes),
         std::task::Poll::Ready(Ok(_))
     ));
+    // Like the real mint's sealed-body path, this probe observes the prepared connection
+    // before committing the request. Without FACTS an empty unsealed body takes the direct
+    // open path, which does not exercise prepare_request's separate dial/request deadlines.
+    assert!(matches!(
+        connector.facts(stream),
+        std::task::Poll::Ready(Ok(Some(facts))) if facts.secure
+    ));
+    assert!(
+        SCRIPT.lock().unwrap().opened.is_empty(),
+        "observing the prepared connection must not commit the probe request"
+    );
     for kind in [
         busbar_contract::abi::host::conn::connector::REQUEST_BODY,
         busbar_contract::abi::host::conn::connector::REQUEST_END,
@@ -753,4 +813,166 @@ fn a_jwt_bearer_mint_runs_over_the_host_wire_at_the_hosts_wall_seconds() {
         std::task::Poll::Ready(busbar_contract::abi::sdk::auth_outbound::FieldsAnswer::Ready)
     ));
     assert_eq!(written, ["Bearer ya29.wire"]);
+}
+
+#[test]
+fn pending_security_keeps_one_connection_and_closes_on_completion_timeout_or_drop() {
+    let _case = CASE.lock().unwrap();
+    let hosted = host_wire();
+    let issued = AtomicU32::new(0);
+    let driver = hosted._dispatcher.driver(&hosted._plugin, 0).unwrap();
+    let wire = HostWire::new(&hosted.host, driver, &issued);
+    let reset = || {
+        let mut script = SCRIPT.lock().unwrap();
+        script.established.clear();
+        script.deadlines.clear();
+        script.opened.clear();
+        script.replies.clear();
+        script.closed = 0;
+        script.security_pending = true;
+        script.secure = true;
+    };
+    let request = || TokenRequest {
+        need: 1,
+        target: "https://oauth2.googleapis.com/token".into(),
+        fields: vec![],
+        body: busbar_contract::abi::sdk::cred::FormBody::new().sealed(
+            "client_secret",
+            &busbar_contract::abi::sdk::test_support::chip::cred("pending-secret").require_secure(),
+        ),
+    };
+    reset();
+    let req = request();
+    let mut sealed = req.body.encoded().unwrap();
+    let mut opening = None;
+    assert_eq!(
+        wire.advance_open(&req, &mut sealed, 30_000, &mut opening),
+        Err(ConnError::Pending)
+    );
+    let stream = opening.as_ref().unwrap().stream;
+    let pending = opening.as_ref().unwrap().pending;
+    assert!(stream.is_some());
+    assert!(
+        SCRIPT.lock().unwrap().opened.is_empty(),
+        "no request committed during handshake"
+    );
+    // Another operation may reserve a completion ID while this opening is held.
+    assert!(wire.with(|c| c.facts(stream.unwrap())).is_pending());
+    let interleaved = issued.load(Ordering::Acquire);
+    assert_eq!(
+        wire.advance_open(&req, &mut sealed, 30_000, &mut opening),
+        Err(ConnError::Pending)
+    );
+    assert_eq!(opening.as_ref().unwrap().stream, stream);
+    assert_eq!(opening.as_ref().unwrap().pending, pending);
+    assert_eq!(issued.load(Ordering::Acquire), interleaved);
+    assert_eq!(SCRIPT.lock().unwrap().established.len(), 1);
+    SCRIPT.lock().unwrap().security_pending = false;
+    let conn = wire
+        .advance_open(&req, &mut sealed, 30_000, &mut opening)
+        .unwrap();
+    assert_eq!(SCRIPT.lock().unwrap().opened.len(), 1);
+    assert_eq!(
+        SCRIPT.lock().unwrap().opened[0].3,
+        b"client_secret=pending-secret"
+    );
+    let mut pending_read = None;
+    let mut buf = [0_u8; 128];
+    assert!(matches!(
+        wire.advance_read(conn, &mut buf, &mut pending_read),
+        Err(ConnError::Pending)
+    ));
+    let read_seq = pending_read.as_ref().unwrap().seq;
+    let read_ticket = pending_read.as_ref().unwrap().ticket;
+    assert!(matches!(wire.with(|c| c.facts(conn.0)), Poll::Ready(Ok(_))));
+    let interleaved = issued.load(Ordering::Acquire);
+    assert!(matches!(
+        wire.advance_read(conn, &mut buf, &mut pending_read),
+        Err(ConnError::Pending)
+    ));
+    assert_eq!(pending_read.as_ref().unwrap().seq, read_seq);
+    assert_eq!(pending_read.as_ref().unwrap().ticket, read_ticket);
+    assert_eq!(issued.load(Ordering::Acquire), interleaved);
+    SCRIPT.lock().unwrap().replies.push_back((
+        ReplyPiece {
+            kind: REPLY_HEAD,
+            code: 200,
+            ..Default::default()
+        },
+        Vec::new(),
+    ));
+    assert_eq!(
+        wire.advance_read(conn, &mut buf, &mut pending_read)
+            .unwrap()
+            .status,
+        Some(200)
+    );
+    assert!(pending_read.is_none());
+    opening.as_mut().unwrap().release();
+    wire.close(conn);
+    drop(opening);
+    assert_eq!(SCRIPT.lock().unwrap().closed, 1);
+
+    reset();
+    let req = request();
+    let mut sealed = req.body.encoded().unwrap();
+    let mut opening = None;
+    assert_eq!(
+        wire.advance_open(&req, &mut sealed, 30_000, &mut opening),
+        Err(ConnError::Pending)
+    );
+    drop(opening.take()); // Cancellation and retirement discard the same owned opening.
+    drop(opening);
+    assert_eq!(SCRIPT.lock().unwrap().closed, 1);
+    assert!(SCRIPT.lock().unwrap().opened.is_empty());
+
+    reset();
+    let minted = crate::mint::Minted::new(crate::mint::tests::client_credentials(), 1024);
+    assert_eq!(minted.tick(17, WALL_NS / NS, Some(&wire)).1, None);
+    assert_eq!(SCRIPT.lock().unwrap().established.len(), 1);
+    assert!(matches!(
+        minted
+            .tick(
+                17 + crate::mint::MINT_DEADLINE_SECS * NS,
+                WALL_NS / NS,
+                Some(&wire)
+            )
+            .1,
+        Some(crate::mint::Report::MintFailed(_))
+    ));
+    drop(minted);
+    assert_eq!(SCRIPT.lock().unwrap().closed, 1);
+    assert!(SCRIPT.lock().unwrap().opened.is_empty());
+
+    reset();
+    SCRIPT.lock().unwrap().security_pending = false;
+    let minted = crate::mint::Minted::new(crate::mint::tests::client_credentials(), 1024);
+    assert_eq!(minted.tick(17, WALL_NS / NS, Some(&wire)).1, None);
+    assert_eq!(SCRIPT.lock().unwrap().opened.len(), 1);
+    drop(minted); // Dropping the response owner also closes its pending read exactly once.
+    assert_eq!(SCRIPT.lock().unwrap().closed, 1);
+
+    reset();
+    let req = request();
+    let mut sealed = req.body.encoded().unwrap();
+    let mut opening = None;
+    assert_eq!(
+        wire.advance_open(&req, &mut sealed, 30_000, &mut opening),
+        Err(ConnError::Pending)
+    );
+    {
+        let mut script = SCRIPT.lock().unwrap();
+        script.security_pending = false;
+        script.secure = false;
+    }
+    assert_eq!(
+        wire.advance_open(&req, &mut sealed, 30_000, &mut opening),
+        Err(ConnError::Refused)
+    );
+    drop(opening);
+    assert_eq!(SCRIPT.lock().unwrap().closed, 1);
+    assert!(
+        SCRIPT.lock().unwrap().opened.is_empty(),
+        "unknown or insecure facts must fail closed"
+    );
 }

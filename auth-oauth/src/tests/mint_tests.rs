@@ -792,7 +792,7 @@ fn an_exchange_in_flight_reserves_no_buffer_the_size_of_the_cap() {
     assert_eq!(m.tick(0, now_epoch(), Some(&w)), (IN_FLIGHT_POLL_NS, None));
     let held = match &*m.attempt.lock().unwrap() {
         Attempt::InFlight { body, .. } => body.capacity(),
-        Attempt::Idle { .. } => panic!("the exchange is in flight"),
+        Attempt::Idle { .. } | Attempt::Opening { .. } => panic!("the exchange is in flight"),
     };
     assert!(
         held <= READ_BUF_BYTES,
@@ -1385,4 +1385,57 @@ fn an_expired_token_waits_for_an_in_flight_refresh_without_starting_another() {
     );
     assert_eq!(cell.read(wall + 60, seen), "Header(\"Bearer new\")");
     assert_eq!(wire.sent.lock().unwrap().len(), 2);
+}
+
+#[test]
+fn pending_opening_keeps_the_request_and_original_deadline() {
+    let wire = Scripted::default();
+    wire.refuse(ConnError::Pending);
+    wire.ok(r#"{"access_token":"after-handshake","expires_in":3600}"#);
+    let minted = Minted::new(client_credentials(), DEFAULT_MAX_RESPONSE_BYTES);
+    assert_eq!(minted.tick(7, now_epoch(), Some(&wire)).1, None);
+    let (request, sealed) = match &*minted.attempt.lock().unwrap() {
+        Attempt::Opening {
+            request,
+            sealed,
+            started_ns,
+            ..
+        } => {
+            assert_eq!(*started_ns, 7);
+            (request as *const TokenRequest, sealed as *const SealedWrite)
+        }
+        _ => panic!("opening must remain pending"),
+    };
+    assert_eq!(minted.tick(8, now_epoch(), None).1, None);
+    match &*minted.attempt.lock().unwrap() {
+        Attempt::Opening {
+            request: r,
+            sealed: s,
+            ..
+        } => {
+            assert_eq!(request, r as *const TokenRequest);
+            assert_eq!(sealed, s as *const SealedWrite);
+        }
+        _ => panic!("opening must retain its request and sealed body"),
+    }
+    assert_eq!(
+        minted.tick(9, now_epoch(), Some(&wire)).1,
+        Some(Report::Minted)
+    );
+    assert_eq!(*wire.closed.lock().unwrap(), 1);
+
+    let wire = Scripted::default();
+    wire.refuse(ConnError::Pending);
+    let minted = Minted::new(client_credentials(), DEFAULT_MAX_RESPONSE_BYTES);
+    assert_eq!(minted.tick(7, now_epoch(), Some(&wire)).1, None);
+    let report = minted
+        .tick(7 + MINT_DEADLINE_SECS * NS, now_epoch(), None)
+        .1;
+    assert!(matches!(report, Some(Report::MintFailed(_))));
+    assert!(minted.outage());
+    assert_eq!(
+        wire.sent.lock().unwrap().len(),
+        1,
+        "deadline must not rebuild or retry the request"
+    );
 }

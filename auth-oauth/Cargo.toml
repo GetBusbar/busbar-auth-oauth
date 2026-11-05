@@ -38,6 +38,7 @@ sha2 = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
+jsonschema = { workspace = true }
 # The token request forms are the chip's (`cred::FormBody`); the tests read the sealed bytes back
 # (`test-seal`, dev-only) and hold them to `serde_urlencoded`'s.
 busbar-contract = { workspace = true, features = ["test-seal"] }

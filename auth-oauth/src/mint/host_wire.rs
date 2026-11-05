@@ -86,12 +86,12 @@ fn error_of(f: &ConnFailure) -> ConnError {
     }
 }
 
-/// A service answer that must not pend (a held framed request's pieces never do).
+/// Preserve pending as a resumable answer.
 fn now<T>(a: Poll<Result<T, ConnFailure>>) -> Result<T, ConnError> {
     match a {
         Poll::Ready(Ok(v)) => Ok(v),
         Poll::Ready(Err(f)) => Err(error_of(&f)),
-        Poll::Pending => Err(ConnError::Refused),
+        Poll::Pending => Err(ConnError::Pending),
     }
 }
 
@@ -145,6 +145,47 @@ fn head_retry_after(
         .and_then(|(_, value)| retry_after(value))
 }
 
+/// The stream and completion handle retained while an opening is pending. Dropping an
+/// unfinished opening (deadline, cancellation, retirement) closes its stream on no ticket.
+pub(crate) struct Opening {
+    host: Host,
+    ticket: Ticket,
+    stream: Option<u64>,
+    stage: OpenStage,
+    pending: Option<u32>,
+}
+
+impl Opening {
+    /// The response owner has closed the stream, or an immediate caller takes custody.
+    pub(crate) fn release(&mut self) {
+        self.stream = None;
+    }
+}
+
+/// A pending reply carries the complete ticket and sequence, and the original host snapshot.
+pub(crate) struct PendingRead {
+    host: Host,
+    ticket: Ticket,
+    seq: u32,
+}
+
+#[derive(Clone, Copy)]
+enum OpenStage {
+    Establish,
+    Head,
+    Facts,
+    Body,
+    End,
+}
+
+impl Drop for Opening {
+    fn drop(&mut self) {
+        if let Some(stream) = self.stream.take() {
+            let _ = self.host.connector(Ticket::NONE).close(stream);
+        }
+    }
+}
+
 impl Wire for HostWire<'_> {
     fn open(
         &self,
@@ -152,40 +193,155 @@ impl Wire for HostWire<'_> {
         body: &mut SealedWrite,
         timeout_ms: u64,
     ) -> Result<ConnId, ConnError> {
-        let (head, head_piece) = head(req, timeout_ms)?;
-        let body_piece = RequestPiece {
-            kind: REQUEST_BODY,
-            ..RequestPiece::default()
-        };
-        let end_piece = RequestPiece {
-            kind: REQUEST_END,
-            ..RequestPiece::default()
-        };
-        self.with(|c| {
-            let stream = now(c.establish(req.need, Some(&req.target), ""))?;
-            let sent = (|| {
-                if now(c.write_request(stream, &head_piece, &head))? != head.len() {
-                    return Err(ConnError::Refused);
-                }
-
-                if now(body.request(c, stream, &body_piece))? != body.len() {
-                    return Err(ConnError::Refused);
-                }
-                now(c.write_request(stream, &end_piece, &[])).map(|_| ())
-            })();
-            match sent {
-                Ok(()) => Ok(ConnId(stream)),
-                Err(e) => {
-                    let _ = c.close(stream);
-                    Err(e)
-                }
+        let mut state = None;
+        let result = self.advance_open(req, body, timeout_ms, &mut state);
+        if result.is_ok() {
+            if let Some(opening) = &mut state {
+                opening.release();
             }
-        })
+        }
+        result
+    }
+
+    fn advance_open(
+        &self,
+        req: &TokenRequest,
+        body: &mut SealedWrite,
+        timeout_ms: u64,
+        state: &mut Option<Box<Opening>>,
+    ) -> Result<ConnId, ConnError> {
+        let opening = state.get_or_insert_with(|| {
+            Box::new(Opening {
+                host: *self.host,
+                ticket: self.ticket,
+                stream: None,
+                stage: OpenStage::Establish,
+                pending: None,
+            })
+        });
+        loop {
+            // Reuse precisely the pending service's handle, while subsequent services allocate
+            // beyond ALL services issued by this driver's other cells and clock reads.
+            let seq = opening.pending.take().unwrap_or_else(|| {
+                if matches!(opening.stage, OpenStage::Body) && body.secure_required() {
+                    // SealedWrite may issue FACTS and BODY in one call. Reserve both
+                    // before yielding so its continuation cannot reuse another call's ID.
+                    self.issued.fetch_add(2, Ordering::AcqRel)
+                } else {
+                    self.issued.load(Ordering::Acquire)
+                }
+            });
+            let mut c = opening.host.connector_from(opening.ticket, seq);
+            let answer = match opening.stage {
+                OpenStage::Establish => c.establish(req.need, Some(&req.target), ""),
+                OpenStage::Head => {
+                    let (bytes, piece) = head(req, timeout_ms)?;
+                    c.write_request(opening.stream.unwrap(), &piece, &bytes)
+                        .map(|r| {
+                            r.and_then(|n| {
+                                if n == bytes.len() {
+                                    Ok(0)
+                                } else {
+                                    Err(ConnFailure::Fault)
+                                }
+                            })
+                        })
+                }
+                OpenStage::Facts => c.facts(opening.stream.unwrap()).map(|r| {
+                    r.and_then(|facts| {
+                        if facts.is_some_and(|facts| facts.secure) {
+                            Ok(0)
+                        } else {
+                            Err(ConnFailure::Refused(
+                                busbar_contract::abi::sdk::cred::NOT_SECURE.into(),
+                            ))
+                        }
+                    })
+                }),
+                OpenStage::Body => body
+                    .request(
+                        &mut c,
+                        opening.stream.unwrap(),
+                        &RequestPiece {
+                            kind: REQUEST_BODY,
+                            ..RequestPiece::default()
+                        },
+                    )
+                    .map(|r| {
+                        r.and_then(|n| {
+                            if n == body.len() {
+                                Ok(0)
+                            } else {
+                                Err(ConnFailure::Fault)
+                            }
+                        })
+                    }),
+                OpenStage::End => c
+                    .write_request(
+                        opening.stream.unwrap(),
+                        &RequestPiece {
+                            kind: REQUEST_END,
+                            ..RequestPiece::default()
+                        },
+                        &[],
+                    )
+                    .map(|r| r.map(|_| 0)),
+            };
+            self.issued.fetch_max(c.issued(), Ordering::AcqRel);
+            if answer.is_pending() {
+                opening.pending = Some(c.issued().saturating_sub(1));
+                return Err(ConnError::Pending);
+            }
+            // The sealed writer owns closing a stream whose security confirmation fails.
+            if matches!(opening.stage, OpenStage::Body)
+                && matches!(&answer, Poll::Ready(Err(ConnFailure::Refused(reason))) if reason == busbar_contract::abi::sdk::cred::NOT_SECURE)
+            {
+                opening.stream = None;
+            }
+            let value = now(answer)?;
+            opening.stage = match opening.stage {
+                OpenStage::Establish => {
+                    opening.stream = Some(value);
+                    OpenStage::Head
+                }
+                OpenStage::Head => {
+                    if body.secure_required() {
+                        OpenStage::Facts
+                    } else {
+                        OpenStage::Body
+                    }
+                }
+                OpenStage::Facts => OpenStage::Body,
+                OpenStage::Body => OpenStage::End,
+                OpenStage::End => return Ok(ConnId(opening.stream.unwrap())),
+            };
+        }
     }
 
     fn read(&self, conn: ConnId, buf: &mut [u8]) -> Result<Got, ConnError> {
+        self.advance_read(conn, buf, &mut None)
+    }
+
+    fn advance_read(
+        &self,
+        conn: ConnId,
+        buf: &mut [u8],
+        state: &mut Option<Box<PendingRead>>,
+    ) -> Result<Got, ConnError> {
+        let pending = state.get_or_insert_with(|| {
+            Box::new(PendingRead {
+                host: *self.host,
+                ticket: self.ticket,
+                seq: self.issued.load(Ordering::Acquire),
+            })
+        });
+        let mut c = pending.host.connector_from(pending.ticket, pending.seq);
         let mut slot = ReplyPiece::default();
-        let answer = self.with(|c| c.read_reply(conn.0, buf, &mut slot));
+        let answer = c.read_reply(conn.0, buf, &mut slot);
+        self.issued.fetch_max(c.issued(), Ordering::AcqRel);
+        if !answer.is_pending() {
+            *state = None;
+        }
         match answer {
             Poll::Pending => Err(ConnError::Pending),
             Poll::Ready(Err(f)) => Err(error_of(&f)),

@@ -863,3 +863,15 @@ fn a_configured_subject_token_type_reaches_the_actual_exchange() {
         ACCESS_TOKEN_TYPE.to_string()
     )));
 }
+
+#[test]
+fn token_endpoint_owner_marks_the_subject_token_security_requirement() {
+    for (target, required) in [
+        ("https://issuer/token", true),
+        ("HTTPS://issuer/token", true),
+        ("http://127.0.0.1/token", false),
+    ] {
+        let binding = build("subject-secret", target, "urn:token", "resource");
+        assert_eq!(binding.subject_token.secure_required(), required);
+    }
+}

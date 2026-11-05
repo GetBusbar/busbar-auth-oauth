@@ -10,8 +10,8 @@ use busbar_contract::abi::{
     },
     host::{
         conn::connector::{
-            self as conn, ConnectorSlots, EstablishIn, ReplyIn, ReplyPiece, RequestIn,
-            RequestPiece, StreamIn,
+            self as conn, ConnectorSlots, EstablishIn, FactsIn, ReplyIn, ReplyPiece, RequestIn,
+            RequestPiece, StreamFacts, StreamIn,
         },
         service::{self, ClockNowIn, ClockReading, HostSlots, ServiceOut},
     },
@@ -55,6 +55,8 @@ struct Trace {
     wakes: Vec<Ticket>,
     errors: Vec<String>,
     wall_ns: u64,
+    secure: bool,
+    facts_reads: usize,
 }
 static TRACE: Mutex<Trace> = Mutex::new(Trace {
     calls: Vec::new(),
@@ -63,6 +65,8 @@ static TRACE: Mutex<Trace> = Mutex::new(Trace {
     wakes: Vec::new(),
     errors: Vec::new(),
     wall_ns: WALL_NS,
+    secure: false,
+    facts_reads: 0,
 });
 
 // SAFETY: every callback below is installed only in its named host ABI slot. OAuth lends the
@@ -139,6 +143,28 @@ extern "C" fn establish(ctx: HostCtx, input: *const c_void, out: *mut ServiceOut
         .calls
         .push(Crossing::Establish(target.to_owned(), i.need));
     answer(out, Outcome::Ready, 5, 0)
+}
+extern "C" fn facts(ctx: HostCtx, input: *const c_void, out: *mut ServiceOut) -> RawOutcome {
+    if !valid(ctx, input, out) {
+        return answer(out, Outcome::Fault, 0, 0);
+    }
+    // SAFETY: FACTS lends its concrete input and writable StreamFacts for this crossing.
+    let i = unsafe { &*input.cast::<FactsIn>() };
+    if i.stream != 5 || i.facts.is_null() {
+        return refused(out, "FACTS invalid stream or missing facts buffer");
+    }
+    let mut trace = TRACE.lock().unwrap_or_else(|p| p.into_inner());
+    trace.facts_reads += 1;
+    // This fixture explicitly models a completed handshake, independently of the target URL.
+    // SAFETY: the checked non-null facts pointer is the SDK's live writable output loan.
+    unsafe {
+        *i.facts = StreamFacts {
+            size: size_of::<StreamFacts>() as u32,
+            secure: u32::from(trace.secure),
+            ..zero()
+        };
+    }
+    answer(out, Outcome::Ready, 0, 0)
 }
 extern "C" fn write_request(
     ctx: HostCtx,
@@ -281,6 +307,8 @@ fn actual_jwt_door_emits_raw_host_wire_pieces_and_waits_for_completion() {
         wakes: Vec::new(),
         errors: Vec::new(),
         wall_ns: WALL_NS,
+        secure: true,
+        facts_reads: 0,
     };
     let services = HostSlots {
         size: size_of::<HostSlots>() as u32,
@@ -292,6 +320,7 @@ fn actual_jwt_door_emits_raw_host_wire_pieces_and_waits_for_completion() {
         size: size_of::<ConnectorSlots>() as u32,
         slots: conn::SERVICES,
         establish: Some(establish),
+        facts: Some(facts),
         write_request: Some(write_request),
         read_reply: Some(read_reply),
         close: Some(close),
@@ -415,6 +444,7 @@ fn actual_jwt_door_emits_raw_host_wire_pieces_and_waits_for_completion() {
             trace.errors
         );
         assert!(matches!(trace.calls.last(), Some(Crossing::Pending)));
+        assert!(trace.facts_reads > 0, "the mint checked observed security");
         assert!(!trace.calls.iter().any(|c| matches!(c, Crossing::Close)));
     }
     TRACE
@@ -593,6 +623,8 @@ fn actual_on_demand_door_obeys_the_raw_head_retry_after_seven_seconds() {
         wakes: Vec::new(),
         errors: Vec::new(),
         wall_ns: WALL_NS,
+        secure: true,
+        facts_reads: 0,
     };
     let services = HostSlots {
         size: size_of::<HostSlots>() as u32,
@@ -604,6 +636,7 @@ fn actual_on_demand_door_obeys_the_raw_head_retry_after_seven_seconds() {
         size: size_of::<ConnectorSlots>() as u32,
         slots: conn::SERVICES,
         establish: Some(establish),
+        facts: Some(facts),
         write_request: Some(write_request),
         read_reply: Some(read_reply),
         close: Some(close),
@@ -884,6 +917,7 @@ fn actual_on_demand_door_obeys_the_raw_head_retry_after_seven_seconds() {
         matches!(trace.calls.last(), Some(Crossing::Close)),
         "no reads after completion"
     );
+    assert!(trace.facts_reads > 0, "the mint checked observed security");
     drop(trace);
     let close = ih::<InHead>(life::slot::CLOSE, Ticket::NONE);
     let mut closed = oh::<OutHead>();
