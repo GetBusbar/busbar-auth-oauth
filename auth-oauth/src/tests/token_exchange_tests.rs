@@ -156,7 +156,7 @@ fn each_scope_is_its_own_exchange_and_its_own_cached_token() {
         fields(&o, &host, h, a, Some("fs_read_file")).0,
         Outcome::Pending
     );
-    w.ok(r#"{"access_token":"tok-read","token_type":"Bearer","expires_in":3600}"#);
+    w.ok(r#"{"issued_token_type":"urn:ietf:params:oauth:token-type:access_token","access_token":"tok-read","token_type":"Bearer","expires_in":3600}"#);
     let mut diags = Diags::default();
     o.tick(1_000, Ticket::NONE, Some(&host.host), &mut diags);
     assert_eq!(host.take(), vec![a], "the landed exchange wakes its call");
@@ -170,7 +170,7 @@ fn each_scope_is_its_own_exchange_and_its_own_cached_token() {
         Outcome::Pending,
         "another scope never shares the first's token"
     );
-    w.ok(r#"{"access_token":"tok-both","expires_in":3600}"#);
+    w.ok(r#"{"token_type":"Bearer","issued_token_type":"urn:ietf:params:oauth:token-type:access_token","access_token":"tok-both","expires_in":3600}"#);
     o.tick(2_000, Ticket::NONE, Some(&host.host), &mut diags);
     assert_eq!(host.take(), vec![b]);
     assert_eq!(
@@ -249,7 +249,7 @@ fn two_bindings_on_one_instance_never_share_a_scopes_token() {
     let mut diags = Diags::default();
 
     assert_eq!(fields(&o, &host, h1, a, Some("s")).0, Outcome::Pending);
-    w.ok(r#"{"access_token":"tok-one","expires_in":3600}"#);
+    w.ok(r#"{"token_type":"Bearer","issued_token_type":"urn:ietf:params:oauth:token-type:access_token","access_token":"tok-one","expires_in":3600}"#);
     o.tick(1_000, Ticket::NONE, Some(&host.host), &mut diags);
     assert_eq!(host.take(), vec![a]);
     assert_eq!(
@@ -262,7 +262,7 @@ fn two_bindings_on_one_instance_never_share_a_scopes_token() {
         Outcome::Pending,
         "the other binding, same scope: its own exchange, not the first's cached token"
     );
-    w.ok(r#"{"access_token":"tok-two","expires_in":3600}"#);
+    w.ok(r#"{"token_type":"Bearer","issued_token_type":"urn:ietf:params:oauth:token-type:access_token","access_token":"tok-two","expires_in":3600}"#);
     o.tick(2_000, Ticket::NONE, Some(&host.host), &mut diags);
     assert_eq!(host.take(), vec![b]);
     assert_eq!(
@@ -324,7 +324,7 @@ fn a_refused_exchange_fails_the_calls_that_waited_and_the_next_call_asks_again()
         test_support::fields_at(&o, &host, h, later, Some("s"), now_epoch() + 31).0,
         Outcome::Pending
     );
-    w.ok(r#"{"access_token":"tok-s","expires_in":3600}"#);
+    w.ok(r#"{"token_type":"Bearer","issued_token_type":"urn:ietf:params:oauth:token-type:access_token","access_token":"tok-s","expires_in":3600}"#);
     o.tick(2_000, Ticket::NONE, Some(&host.host), &mut diags);
     assert_eq!(host.take(), vec![later]);
     assert_eq!(
@@ -392,7 +392,7 @@ fn a_retire_keeps_the_exchange_a_parked_call_waits_on() {
         Outcome::Pending
     );
     o.retire(1);
-    w.ok(r#"{"access_token":"tok-kept","token_type":"Bearer","expires_in":3600}"#);
+    w.ok(r#"{"issued_token_type":"urn:ietf:params:oauth:token-type:access_token","access_token":"tok-kept","token_type":"Bearer","expires_in":3600}"#);
     let mut diags = Diags::default();
     o.tick(1_000, Ticket::NONE, Some(&host.host), &mut diags);
     assert_eq!(
@@ -410,7 +410,7 @@ fn an_exchanged_token_with_invalid_header_bytes_fails_the_calls_that_waited() {
     let h = open(&o);
     let (first, later) = (ticket(211), ticket(212));
     assert_eq!(fields(&o, &host, h, first, Some("s")).0, Outcome::Pending);
-    w.ok("{\"access_token\":\"tok\\u0001bad\",\"expires_in\":3600}");
+    w.ok("{\"token_type\":\"Bearer\",\"issued_token_type\":\"urn:ietf:params:oauth:token-type:access_token\",\"access_token\":\"tok\\u0001bad\",\"expires_in\":3600}");
     let mut diags = Diags::default();
     o.tick(1_000, Ticket::NONE, Some(&host.host), &mut diags);
     assert_eq!(host.take(), vec![first]);
@@ -460,7 +460,7 @@ fn a_token_exchange_binding_is_not_ready_while_its_last_exchange_failed() {
         Outcome::Pending,
         "after the back-off window a request arms a fresh exchange"
     );
-    w.ok(r#"{"access_token":"tok-s","expires_in":3600}"#);
+    w.ok(r#"{"token_type":"Bearer","issued_token_type":"urn:ietf:params:oauth:token-type:access_token","access_token":"tok-s","expires_in":3600}"#);
     o.tick(2_000, Ticket::NONE, Some(&host.host), &mut diags);
     assert!(o.ready(h), "an exchange landed: ready again");
 }
@@ -480,7 +480,7 @@ fn a_never_used_exchange_lane_is_tried_on_its_first_request() {
         fields(&o, &host, h, ticket(401), Some("s")).0,
         Outcome::Pending
     );
-    w.ok(r#"{"access_token":"tok-first","expires_in":3600}"#);
+    w.ok(r#"{"token_type":"Bearer","issued_token_type":"urn:ietf:params:oauth:token-type:access_token","access_token":"tok-first","expires_in":3600}"#);
     o.tick(1_000, Ticket::NONE, Some(&host.host), &mut Diags::default());
     assert_eq!(
         w.sent.lock().unwrap().len(),
@@ -600,7 +600,7 @@ fn a_failed_exchange_backs_off_for_its_window_and_fails_fast_meanwhile() {
         Outcome::Pending,
         "after the window a request arms a fresh exchange"
     );
-    b.w.ok(r#"{"access_token":"tok-s","expires_in":3600}"#);
+    b.w.ok(r#"{"token_type":"Bearer","issued_token_type":"urn:ietf:params:oauth:token-type:access_token","access_token":"tok-s","expires_in":3600}"#);
     b.tick(T0 + 31);
     assert_eq!(b.sent(), 2);
     assert_eq!(
@@ -643,7 +643,7 @@ fn a_failed_exchange_honours_retry_after_capped_at_300_seconds() {
 fn a_token_exchange_binding_is_ready_unless_every_tried_scope_is_failing() {
     let b = ClockedBinding::new();
     assert_eq!(b.call(ticket(701), "good", T0), Outcome::Pending);
-    b.w.ok(r#"{"access_token":"tok-good","expires_in":3600}"#);
+    b.w.ok(r#"{"token_type":"Bearer","issued_token_type":"urn:ietf:params:oauth:token-type:access_token","access_token":"tok-good","expires_in":3600}"#);
     b.tick(T0);
     assert_eq!(b.call(ticket(702), "bad", T0), Outcome::Pending);
     b.w.push(vec![
@@ -742,7 +742,7 @@ fn a_reload_keeps_the_scope_tokens_of_a_binding_that_survives_it() {
         fields(&o, &host, h1, ticket(901), Some("s")).0,
         Outcome::Pending
     );
-    w.ok(r#"{"access_token":"tok-kept","token_type":"Bearer","expires_in":3600}"#);
+    w.ok(r#"{"issued_token_type":"urn:ietf:params:oauth:token-type:access_token","access_token":"tok-kept","token_type":"Bearer","expires_in":3600}"#);
     o.tick(1_000, Ticket::NONE, Some(&host.host), &mut Diags::default());
     o.set_generation(2);
     let h2 = open(&o);
@@ -810,7 +810,7 @@ fn invalid_scope_bytes_are_refused_before_any_exchange_or_token_presentation() {
         fields(&oauth, &host, handle, call, Some("read write")).0,
         Outcome::Pending
     );
-    wire.ok(r#"{"access_token":"valid-scope","expires_in":3600}"#);
+    wire.ok(r#"{"token_type":"Bearer","issued_token_type":"urn:ietf:params:oauth:token-type:access_token","access_token":"valid-scope","expires_in":3600}"#);
     oauth.tick(1, Ticket::NONE, Some(&host.host), &mut Diags::default());
     assert_eq!(
         fields(&oauth, &host, handle, call, Some("read write")).1,
@@ -843,7 +843,7 @@ fn a_configured_subject_token_type_reaches_the_actual_exchange() {
         fields(&oauth, &host, handle, call, Some("read")).0,
         Outcome::Pending
     );
-    wire.ok(r#"{"access_token":"jwt-subject-result","expires_in":3600}"#);
+    wire.ok(r#"{"token_type":"Bearer","issued_token_type":"urn:ietf:params:oauth:token-type:access_token","access_token":"jwt-subject-result","expires_in":3600}"#);
     oauth.tick(1_000, Ticket::NONE, Some(&host.host), &mut Diags::default());
     assert_eq!(host.take(), [call]);
     assert_eq!(
@@ -873,5 +873,53 @@ fn token_endpoint_owner_marks_the_subject_token_security_requirement() {
     ] {
         let binding = build("subject-secret", target, "urn:token", "resource");
         assert_eq!(binding.subject_token.secure_required(), required);
+    }
+}
+
+#[test]
+fn missing_or_null_exchange_types_fail_without_presenting_or_caching_a_bearer() {
+    for body in [
+        r#"{"access_token":"must-not-be-presented"}"#,
+        r#"{"access_token":"must-not-be-presented","token_type":"Bearer"}"#,
+        r#"{"access_token":"must-not-be-presented","issued_token_type":"urn:ietf:params:oauth:token-type:access_token"}"#,
+        r#"{"access_token":"must-not-be-presented","token_type":null,"issued_token_type":"urn:ietf:params:oauth:token-type:access_token"}"#,
+        r#"{"access_token":"must-not-be-presented","token_type":"Bearer","issued_token_type":null}"#,
+        r#"{"access_token":"must-not-be-presented","token_type":null,"issued_token_type":null}"#,
+    ] {
+        let host = TestHost::new();
+        let wire = Arc::new(Scripted::default());
+        let oauth = instance(&wire);
+        let handle = open(&oauth);
+        let call = ticket(9901);
+        assert_eq!(
+            fields(&oauth, &host, handle, call, Some("read")).0,
+            Outcome::Pending
+        );
+        wire.ok(body);
+        let mut diags = Diags::default();
+        oauth.tick(1_000, Ticket::NONE, Some(&host.host), &mut diags);
+        assert_eq!(
+            host.take(),
+            vec![call],
+            "the failed exchange wakes its caller"
+        );
+        assert_eq!(
+            fields(&oauth, &host, handle, call, Some("read")),
+            (Outcome::Failed, String::new()),
+            "{body}"
+        );
+        assert!(diags.iter().any(|(id, _, text)| {
+            id == crate::instance::diag::OAUTH_MINT_FAILED
+                && text.contains("requires token_type and issued_token_type")
+                && !text.contains("must-not-be-presented")
+        }));
+        assert!(!oauth.ready(handle), "the scope backs off a failed mint");
+        assert_eq!(
+            fields(&oauth, &host, handle, ticket(9902), Some("read")),
+            (Outcome::Failed, String::new()),
+            "the rejected response must not become a reusable cached bearer"
+        );
+        oauth.tick(2_000, Ticket::NONE, Some(&host.host), &mut diags);
+        assert_eq!(wire.sent.lock().unwrap().len(), 1);
     }
 }

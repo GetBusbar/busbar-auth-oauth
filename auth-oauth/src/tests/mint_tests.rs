@@ -501,7 +501,7 @@ fn a_short_lived_exchanged_token_is_not_exchanged_again_before_the_floor() {
     let w = Scripted::default();
     let cell = scoped(
         &w,
-        r#"{"access_token":"one","token_type":"Bearer","expires_in":1}"#,
+        r#"{"issued_token_type":"urn:ietf:params:oauth:token-type:access_token","access_token":"one","token_type":"Bearer","expires_in":1}"#,
     );
     assert_eq!(
         cell.read(wall, seen),
@@ -521,7 +521,7 @@ fn a_short_lived_exchanged_token_is_not_exchanged_again_before_the_floor() {
         "the request armed the next exchange no sooner than the floor"
     );
     assert_eq!(w.sent.lock().unwrap().len(), 1);
-    w.ok(r#"{"access_token":"two","token_type":"Bearer","expires_in":1}"#);
+    w.ok(r#"{"issued_token_type":"urn:ietf:params:oauth:token-type:access_token","access_token":"two","token_type":"Bearer","expires_in":1}"#);
     assert_eq!(
         cell.tick(MIN_MINT_INTERVAL_SECS * S, wall + 5, Some(&w)).1,
         Some(Report::Minted)
@@ -531,7 +531,7 @@ fn a_short_lived_exchanged_token_is_not_exchanged_again_before_the_floor() {
     let w = Scripted::default();
     let cell = scoped(
         &w,
-        r#"{"access_token":"three","token_type":"Bearer","expires_in":3}"#,
+        r#"{"issued_token_type":"urn:ietf:params:oauth:token-type:access_token","access_token":"three","token_type":"Bearer","expires_in":3}"#,
     );
     assert_eq!(cell.read(wall, seen), "Wait");
     assert_eq!(cell.tick(0, wall, Some(&w)).1, Some(Report::Minted));
@@ -821,7 +821,7 @@ fn an_on_demand_read_racing_the_exchange_never_presents_nothing() {
         "https://tools.example/rpc",
     ));
     let wire = Scripted::default();
-    wire.ok(r#"{"access_token":"tok-x","expires_in":3600}"#);
+    wire.ok(r#"{"token_type":"Bearer","issued_token_type":"urn:ietf:params:oauth:token-type:access_token","access_token":"tok-x","expires_in":3600}"#);
     let cell = Minted::new(
         Minter::TokenExchange(token_exchange::Scoped::new(exchange, "s")),
         DEFAULT_MAX_RESPONSE_BYTES,
@@ -1351,7 +1351,7 @@ fn an_on_demand_read_inside_the_back_off_does_not_rearm_the_exchange() {
     );
     assert_eq!(w.sent.lock().unwrap().len(), 1);
     assert_eq!(cell.read(now + MAX_BACKOFF_SECS, seen), "Wait");
-    w.ok(r#"{"access_token":"t","expires_in":3600}"#);
+    w.ok(r#"{"token_type":"Bearer","issued_token_type":"urn:ietf:params:oauth:token-type:access_token","access_token":"t","expires_in":3600}"#);
     assert_eq!(
         cell.tick(2, now, Some(&w)).1,
         Some(Report::Minted),

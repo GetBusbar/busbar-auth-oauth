@@ -615,6 +615,7 @@ fn actual_jwt_door_emits_raw_host_wire_pieces_and_waits_for_completion() {
 
 #[test]
 fn actual_on_demand_door_obeys_the_raw_head_retry_after_seven_seconds() {
+    const BODY: &[u8] = br#"{"token_type":"Bearer","issued_token_type":"urn:ietf:params:oauth:token-type:access_token","access_token":"ya29.wire","expires_in":3600}"#;
     let _serial = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     *TRACE.lock().unwrap_or_else(|p| p.into_inner()) = Trace {
         calls: Vec::new(),

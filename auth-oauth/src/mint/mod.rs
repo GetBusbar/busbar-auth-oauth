@@ -1142,6 +1142,24 @@ impl Minted {
                 retry,
             ),
 
+            // RFC 8693 uses access_token for arbitrary security tokens. Its required
+            // type metadata must identify a usable bearer before it enters the cache.
+            Ok((fresh, _))
+                if self.on_demand
+                    && (fresh.token_type.is_none() || fresh.issued_token_type.is_none()) =>
+            {
+                self.failed(
+                    &mut ex,
+                    now_ns,
+                    wall,
+                    "token exchange response requires token_type and issued_token_type; \
+                     an untyped token is not presented"
+                        .to_string(),
+                    Fail::Unusable,
+                    retry,
+                )
+            }
+
             Ok((fresh, _))
                 if fresh.not_bearer().is_some()
                     || (self.on_demand && fresh.not_access_token().is_some()) =>

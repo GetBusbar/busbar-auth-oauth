@@ -565,7 +565,7 @@ fn a_cell_settled_between_the_lookup_and_the_park_is_not_a_lost_wake() {
         );
         drop(caller.join().unwrap());
     });
-    w.ok(r#"{"access_token":"tok-s","expires_in":3600}"#);
+    w.ok(r#"{"token_type":"Bearer","issued_token_type":"urn:ietf:params:oauth:token-type:access_token","access_token":"tok-s","expires_in":3600}"#);
     o.tick(1_000, Ticket::NONE, Some(&host.host), &mut Diags::default());
     assert_eq!(
         host.take(),
@@ -713,7 +713,7 @@ fn token_expiry_and_caching_are_judged_on_the_hosts_clock() {
         Outcome::Pending,
         "no token for the scope yet: the call waits on its exchange"
     );
-    w.ok(r#"{"access_token":"tok-x","expires_in":3600}"#);
+    w.ok(r#"{"token_type":"Bearer","issued_token_type":"urn:ietf:params:oauth:token-type:access_token","access_token":"tok-x","expires_in":3600}"#);
     o.tick(1_000, Ticket::NONE, Some(&host.host), &mut diags);
     let sent = w.sent.lock().unwrap().len();
     assert_eq!(
@@ -742,7 +742,7 @@ fn token_expiry_and_caching_are_judged_on_the_hosts_clock() {
         sent,
         "the cached token was served without a new exchange until the host's clock passed it"
     );
-    w.ok(r#"{"access_token":"tok-y","expires_in":3600}"#);
+    w.ok(r#"{"token_type":"Bearer","issued_token_type":"urn:ietf:params:oauth:token-type:access_token","access_token":"tok-y","expires_in":3600}"#);
     o.tick(3_000, Ticket::NONE, Some(&host.host), &mut diags);
     assert_eq!(
         w.sent.lock().unwrap().len(),
@@ -1079,7 +1079,7 @@ fn a_binding_holds_at_most_256_scope_cells_evicting_the_least_recently_used_idle
             test_support::fields(&o, &host, h, call(i), Some(&format!("s{i}"))).0,
             Outcome::Pending
         );
-        w.ok(r#"{"access_token":"tok","expires_in":3600}"#);
+        w.ok(r#"{"token_type":"Bearer","issued_token_type":"urn:ietf:params:oauth:token-type:access_token","access_token":"tok","expires_in":3600}"#);
     }
     o.tick(1_000, Ticket::NONE, Some(&host.host), &mut Diags::default());
     assert_eq!(o.cache.read().unwrap().len(), 256, "256 scopes minted");
@@ -1167,7 +1167,7 @@ fn a_scope_cell_backing_off_a_failure_is_never_evicted() {
             Outcome::Pending,
             "a refusal (4xx) of one scope does not hold the others back"
         );
-        w.ok(r#"{"access_token":"tok","expires_in":3600}"#);
+        w.ok(r#"{"token_type":"Bearer","issued_token_type":"urn:ietf:params:oauth:token-type:access_token","access_token":"tok","expires_in":3600}"#);
     }
     o.tick(2_000, Ticket::NONE, Some(&host.host), &mut Diags::default());
     assert_eq!(o.cache.read().unwrap().len(), 256);
@@ -1242,11 +1242,11 @@ fn an_on_demand_exchange_landing_no_usable_token_is_logged_at_warn() {
     use crate::test_support::OAuthEvents;
     for (body, logged) in [
         (
-            r#"{"access_token":"","expires_in":3600}"#,
+            r#"{"token_type":"Bearer","issued_token_type":"urn:ietf:params:oauth:token-type:access_token","access_token":"","expires_in":3600}"#,
             "empty access_token",
         ),
         (
-            "{\"access_token\":\"tok\\u0001bad\",\"expires_in\":3600}",
+            "{\"token_type\":\"Bearer\",\"issued_token_type\":\"urn:ietf:params:oauth:token-type:access_token\",\"access_token\":\"tok\\u0001bad\",\"expires_in\":3600}",
             "bytes invalid in a header value",
         ),
     ] {
@@ -1464,7 +1464,7 @@ fn an_expired_short_exchange_keeps_its_mint_floor_through_cache_cleanup() {
         fields_at(&oauth, &host, handle, call, Some("short"), wall).0,
         Outcome::Pending
     );
-    wire.ok(r#"{"access_token":"brief","expires_in":1}"#);
+    wire.ok(r#"{"token_type":"Bearer","issued_token_type":"urn:ietf:params:oauth:token-type:access_token","access_token":"brief","expires_in":1}"#);
     oauth.tick(0, Ticket::NONE, Some(&host.host), &mut Diags::default());
     let landed = oauth.wall_secs();
     assert_eq!(
@@ -1493,7 +1493,7 @@ fn an_expired_short_exchange_keeps_its_mint_floor_through_cache_cleanup() {
         1,
         "no fresh cache cell bypasses the floor"
     );
-    wire.ok(r#"{"access_token":"next","expires_in":1}"#);
+    wire.ok(r#"{"token_type":"Bearer","issued_token_type":"urn:ietf:params:oauth:token-type:access_token","access_token":"next","expires_in":1}"#);
     oauth.saw_wall(landed + mint::MIN_MINT_INTERVAL_SECS);
     oauth.tick(
         mint::MIN_MINT_INTERVAL_SECS * NS,
