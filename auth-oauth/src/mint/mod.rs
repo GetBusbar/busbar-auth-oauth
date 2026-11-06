@@ -335,7 +335,6 @@ fn lossy_wiped(b: &[u8]) -> Zeroizing<String> {
 /// The RFC 6749 section 5.2 `error` code of a JSON error body: a string member of at most 64 chars
 /// from `%x20-21 / %x23-5B / %x5D-7E`; `None` for anything else (never other body text).
 fn oauth_error_code(body: &str) -> Option<Zeroizing<String>> {
-    serde_json::from_str::<serde::de::IgnoredAny>(body).ok()?;
     let code = wiped_member(body, b"error")?;
     let ok = code.len() <= 64
         && code
@@ -408,84 +407,15 @@ pub(crate) fn scheduled_refresh_secs(expires_at: u64, now: u64) -> u64 {
 }
 
 /// A `Retry-After` value (RFC 9110 §10.2.3): `delay-seconds`, or an `HTTP-date` in any of its three
-/// formats ([`http_date`]).
+/// formats, using the shared calendar and the fleet wall-clock floor.
 pub(crate) fn retry_after(value: &[u8]) -> Option<RetryAfter> {
     let v = std::str::from_utf8(value).ok()?.trim();
     if !v.is_empty() && v.bytes().all(|b| b.is_ascii_digit()) {
         return Some(RetryAfter::Secs(v.parse().unwrap_or(u64::MAX)));
     }
-    http_date(v).map(RetryAfter::At)
-}
-
-/// The number (1 to 12) of a month's three-letter name.
-fn month(name: &str) -> Option<u64> {
-    const MONTHS: [&str; 12] = [
-        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-    ];
-    MONTHS.iter().position(|m| *m == name).map(|i| i as u64 + 1)
-}
-
-/// An `HTTP-date` as epoch seconds, in each of the three formats a recipient MUST accept (RFC 9110
-/// §5.6.7): IMF-fixdate (`Sun, 06 Nov 1994 08:49:37 GMT`), the obsolete RFC 850 form
-/// (`Sunday, 06-Nov-94 08:49:37 GMT`) and asctime (`Sun Nov  6 08:49:37 1994`). An RFC 850
-/// two-digit year more than 50 years past the fleet's wall-clock floor is read in the century
-/// before.
-fn http_date(v: &str) -> Option<u64> {
-    let mut it = v.split_ascii_whitespace();
-    let weekday = it.next()?;
-    let (day, mon, year, time) = if weekday.ends_with(',') {
-        let date = it.next()?;
-        let parts = match date.split_once('-') {
-            Some((day, rest)) => {
-                let (mon, yy) = rest.split_once('-')?;
-                if yy.len() != 2 {
-                    return None;
-                }
-                let year = 2000 + yy.parse::<u64>().ok()?;
-                let floor_year = 1970 + WALL_FLOOR_SECS / 31_556_952;
-                let year = if year > floor_year + 50 {
-                    year - 100
-                } else {
-                    year
-                };
-                (day, mon, year, it.next()?)
-            }
-            None => (date, it.next()?, it.next()?.parse().ok()?, it.next()?),
-        };
-        if it.next()? != "GMT" {
-            return None;
-        }
-        parts
-    } else {
-        let mon = it.next()?;
-        let day = it.next()?;
-        let time = it.next()?;
-        (day, mon, it.next()?.parse().ok()?, time)
-    };
-    if it.next().is_some() {
-        return None;
-    }
-    let day: u64 = day.parse().ok()?;
-    let month = month(mon)?;
-    let mut hms = time.split(':');
-    let h: u64 = hms.next()?.parse().ok()?;
-    let m: u64 = hms.next()?.parse().ok()?;
-    let sec: u64 = hms.next()?.parse().ok()?;
-    if hms.next().is_some() {
-        return None;
-    }
-    if !(1..=31).contains(&day) || !(1970..=9999).contains(&year) || h > 23 || m > 59 || sec > 60 {
-        return None;
-    }
-
-    let y = if month <= 2 { year - 1 } else { year };
-    let era = y / 400;
-    let yoe = y - era * 400;
-    let mp = (month + 9) % 12;
-    let doy = (153 * mp + 2) / 5 + day - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    let days = (era * 146_097 + doe).checked_sub(719_468)?;
-    Some(days * 86_400 + h * 3_600 + m * 60 + sec)
+    busbar_contract::abi::auth::http_date_unix(v, WALL_FLOOR_SECS)
+        .and_then(|at| u64::try_from(at).ok())
+        .map(RetryAfter::At)
 }
 
 /// The negative-cache window of a failed exchange at wall-clock `wall`: the reply's `Retry-After`

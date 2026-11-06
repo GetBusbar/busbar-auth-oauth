@@ -1,123 +1,17 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
-//! Reading an OAuth token endpoint's JSON: the zeroizing top-level string member scanner
-//! ([`wiped_member`]) every secret member is read with (the access token, the error code, the
-//! service account's `private_key`), and `expires_in`'s default and tolerant decoding.
+//! Provider-specific OAuth expiry decoding, and selected strings read by the shared SDK.
 
 use zeroize::Zeroizing;
 
-/// THE TOP-LEVEL STRING MEMBER `name` of `json` (a document the decoder has already judged
-/// well-formed), its escapes resolved into ONE buffer sized to the escaped length (unescaping only
-/// shortens) and wiped on drop; `None` when that member is not a string.
-///
-/// A secret member is read here and never by the decoder: `serde_json` unescapes a string that
-/// carries an escape into a scratch buffer of its own, which it frees unwiped. The decode names the
-/// member `serde::de::IgnoredAny` (skipping copies nothing) and its value is read with this.
+/// Read a selected top-level string through the SDK's guarded decoder. Duplicate selected
+/// members are refused; unrelated values are validated without retaining their strings.
 pub(crate) fn wiped_member(json: &str, name: &[u8]) -> Option<Zeroizing<String>> {
-    unescape(top_level_string(json.as_bytes(), name)?)
-}
-
-/// The escaped bytes (between the quotes) of the top-level object member `name` of the
-/// well-formed JSON document `json`, when that member is a string.
-fn top_level_string<'a>(json: &'a [u8], name: &[u8]) -> Option<&'a [u8]> {
-    let mut i = 0;
-    let mut depth = 0_usize;
-
-    let mut expect_name = false;
-    let mut want_value = false;
-    while i < json.len() {
-        match json[i] {
-            b'"' => {
-                let start = i + 1;
-                let mut j = start;
-                while j < json.len() && json[j] != b'"' {
-                    j += if json[j] == b'\\' { 2 } else { 1 };
-                }
-                let s = json.get(start..j)?;
-                if depth == 1 && want_value {
-                    return Some(s);
-                }
-                want_value = depth == 1
-                    && expect_name
-                    && (s == name
-                        || (s.contains(&b'\\')
-                            && unescape(s).is_some_and(|key| key.as_bytes() == name)));
-                expect_name = false;
-                i = j + 1;
-                continue;
-            }
-            b'{' => {
-                depth += 1;
-                expect_name = depth == 1;
-                want_value = false;
-            }
-            b'[' => {
-                depth += 1;
-                want_value = false;
-            }
-            b'}' | b']' => depth = depth.saturating_sub(1),
-            b',' => {
-                expect_name = depth == 1;
-                want_value = false;
-            }
-            b':' => {}
-            b if b.is_ascii_whitespace() => {}
-
-            _ => want_value = false,
-        }
-        i += 1;
-    }
-    None
-}
-
-/// JSON string escapes resolved (RFC 8259 section 7), into a buffer sized once to the escaped
-/// length; `None` for an escape the decoder would have refused.
-fn unescape(raw: &[u8]) -> Option<Zeroizing<String>> {
-    let mut out = Zeroizing::new(String::with_capacity(raw.len()));
-    let mut i = 0;
-    let hex4 = |at: usize| -> Option<u32> {
-        let h = raw.get(at..at + 4)?;
-        u32::from_str_radix(std::str::from_utf8(h).ok()?, 16).ok()
-    };
-    while i < raw.len() {
-        if raw[i] != b'\\' {
-            let end = raw[i..]
-                .iter()
-                .position(|b| *b == b'\\')
-                .map_or(raw.len(), |p| i + p);
-            out.push_str(std::str::from_utf8(&raw[i..end]).ok()?);
-            i = end;
-            continue;
-        }
-        let c = match *raw.get(i + 1)? {
-            b'"' => '"',
-            b'\\' => '\\',
-            b'/' => '/',
-            b'b' => '\u{8}',
-            b'f' => '\u{c}',
-            b'n' => '\n',
-            b'r' => '\r',
-            b't' => '\t',
-            b'u' => {
-                let hi = hex4(i + 2)?;
-                if (0xD800..0xDC00).contains(&hi) && raw.get(i + 6..i + 8) == Some(&b"\\u"[..]) {
-                    let lo = hex4(i + 8)?;
-                    if !(0xDC00..=0xDFFF).contains(&lo) {
-                        return None;
-                    }
-                    i += 6;
-                    char::from_u32(0x10000 + ((hi - 0xD800) << 10) + (lo.checked_sub(0xDC00)?))?
-                } else {
-                    char::from_u32(hi)?
-                }
-            }
-            _ => return None,
-        };
-        i += if raw[i + 1] == b'u' { 6 } else { 2 };
-        out.push(c);
-    }
-    Some(out)
+    let name = std::str::from_utf8(name).ok()?;
+    let [value] =
+        busbar_contract::abi::sdk::cred::json_text_members(json.as_bytes(), [name]).ok()?;
+    value
 }
 
 /// Default token TTL when a token endpoint omits `expires_in` (RFC 6749 section 5.1 makes it

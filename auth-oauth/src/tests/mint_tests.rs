@@ -1252,11 +1252,25 @@ fn retry_after_reads_every_http_date_format() {
         retry_after(b"Fri, 15 Jan 2027 08:03:20 GMT"),
         "a two-digit year near the clock floor is this century's"
     );
+    // The absolute date is retained until backoff is measured; a date more than fifty years
+    // beyond the fleet floor belongs to the prior century, even in the boundary year.
+    assert_eq!(
+        retry_after(b"Thursday, 02-Jan-76 00:00:00 GMT"),
+        retry_after(b"Fri, 02 Jan 1976 00:00:00 GMT")
+    );
     assert_eq!(retry_after(b"120"), Some(RetryAfter::Secs(120)));
+    assert_eq!(
+        retry_after(b"18446744073709551616"),
+        Some(RetryAfter::Secs(u64::MAX))
+    );
+    assert_eq!(retry_after(b"Wed, 31 Dec 1969 23:59:59 GMT"), None);
     for bad in [
         "Sun, 06 Nov 1994 08:49:37 UTC",
         "Sun Nov 6 08:49:37",
         "Sunday, 06-Nov-1994 08:49:37 GMT",
+        "Sun, 31 Apr 2026 00:00:00 GMT",
+        "Sun, 29 Feb 2026 00:00:00 GMT",
+        "Wrong, 06 Nov 1994 08:49:37 GMT",
         "soon",
     ] {
         assert_eq!(retry_after(bad.as_bytes()), None, "{bad}");
@@ -1461,4 +1475,17 @@ fn pending_opening_keeps_the_request_and_original_deadline() {
         1,
         "deadline must not rebuild or retry the request"
     );
+}
+
+#[test]
+fn token_response_guarded_selection_rejects_duplicate_error_codes() {
+    let error =
+        parse_response(400, br#"{"error":"invalid_client","error":"CANARY"}"#, 0).unwrap_err();
+    assert_eq!(error, "token endpoint returned 400 Bad Request");
+    for body in [
+        r#"{"access_token":"first","access\u005ftoken":"second"}"#,
+        r#"{"access_token":"secret","ignored":"bad\q"}"#,
+    ] {
+        assert!(parse_response(200, body.as_bytes(), 0).is_err());
+    }
 }
