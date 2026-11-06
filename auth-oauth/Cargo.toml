@@ -29,7 +29,7 @@ base64 = { workspace = true }
 http = { workspace = true }
 ring = { workspace = true }
 serde = { workspace = true }
-serde_json = { workspace = true }
+serde_json = { workspace = true, features = ["raw_value"] }
 # Key material and token bodies are wiped on drop (BUSBAR-1.6.0.md THE DESIGN §6: "auth material is
 # zeroised").
 zeroize = { workspace = true }

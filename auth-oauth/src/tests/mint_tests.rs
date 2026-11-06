@@ -237,10 +237,26 @@ fn token_response_tolerates_expires_in_as_number_string_or_absent() {
         (r#"{"access_token":"a","expires_in":"7200"}"#, 7200),
         (r#"{"access_token":"a"}"#, default_expires_in()),
         (r#"{"access_token":"a","expires_in":3600.0}"#, 3600),
+        (r#"{"access_token":"a","expires_in":3600.9}"#, 3600),
+        (r#"{"access_token":"a","expires_in":3.6e3}"#, 3600),
+        (r#"{"access_token":"a","expires_in":0.9}"#, 0),
         (r#"{"access_token":"a","expires_in":"3600.9"}"#, 3600),
     ] {
         let (t, _) = parse_response(200, body.as_bytes(), 0).unwrap();
         assert_eq!(t.expires_at, want, "{body}");
+    }
+}
+
+#[test]
+fn token_response_preserves_exact_integer_expiry_and_saturates_the_deadline() {
+    for ttl in [0, 1, 9_007_199_254_740_993, u64::MAX] {
+        for literal in [ttl.to_string(), format!("\"{ttl}\"")] {
+            let body = format!(r#"{{"access_token":"a","expires_in":{literal}}}"#);
+            let (token, _) = parse_response(200, body.as_bytes(), 0).unwrap();
+            assert_eq!(token.expires_at, ttl, "{body}");
+            let (token, _) = parse_response(200, body.as_bytes(), 10).unwrap();
+            assert_eq!(token.expires_at, ttl.saturating_add(10), "{body}");
+        }
     }
 }
 
@@ -255,6 +271,13 @@ fn token_response_refuses_an_expires_in_that_is_not_a_non_negative_number() {
         r#"{"access_token":"a","expires_in":"NaN"}"#,
         r#"{"access_token":"a","expires_in":"inf"}"#,
         r#"{"access_token":"a","expires_in":"soon"}"#,
+        r#"{"access_token":"a","expires_in":1e400}"#,
+        r#"{"access_token":"a","expires_in":"1e400"}"#,
+        r#"{"access_token":"a","expires_in":null}"#,
+        r#"{"access_token":"a","expires_in":true}"#,
+        r#"{"access_token":"a","expires_in":[]}"#,
+        r#"{"access_token":"a","expires_in":{}}"#,
+        r#"{"access_token":"a","expires_in":{"$serde_json::private::Number":"3600.0"}}"#,
     ] {
         let e = parse_response(200, body.as_bytes(), 0)
             .err()
