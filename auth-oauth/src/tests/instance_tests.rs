@@ -945,6 +945,27 @@ fn a_token_that_cannot_be_presented_fails_the_call() {
 /// logged nothing (the diag channel only).
 #[test]
 fn a_failed_mint_is_logged_an_outage_at_warn_or_a_refusal_at_info() {
+    // The tracing callsite cache is process-global. Other parallel tests mint without a
+    // subscriber and can register this same callsite while this test changes scoped
+    // subscribers. Keep these logging assertions in their own process; the rest of the
+    // suite still runs in parallel and all WARN/INFO assertions below run unchanged.
+    const TEST: &str =
+        "instance::tests::a_failed_mint_is_logged_an_outage_at_warn_or_a_refusal_at_info";
+    const CHILD: &str = "BUSBAR_OAUTH_ISOLATED_LOG_TEST";
+    if std::env::var(CHILD).as_deref() != Ok(TEST) {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", TEST, "--nocapture"])
+            .env(CHILD, TEST)
+            .output()
+            .expect("run the logging assertions in an isolated test process");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success() && stdout.contains("1 passed; 0 failed"),
+            "isolated logging assertions failed:\n{stdout}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
     use crate::test_support::OAuthEvents;
     let mint_with = |cap: &OAuthEvents, steps: Vec<Step>| {
         tracing::subscriber::with_default(cap.subscriber(), || {
