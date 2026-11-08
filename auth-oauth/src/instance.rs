@@ -402,7 +402,10 @@ impl Oauth {
     /// A mint is wanted now (a binding opened; a request waits on a token): wake the driver
     /// ticket, so a `drive` starts it without waiting for the next `tick`. Before the first `tick`
     /// nothing is woken: that tick, made at once, starts it.
-    pub(crate) fn mint_soon(&self, host: Option<&Host>) {
+    pub(crate) fn mint_soon(
+        &self,
+        host: Option<&Host<busbar_contract::plugin::markers::AuthKind>>,
+    ) {
         let driver = *lock(&self.driver);
         if let (Some(h), false) = (host, driver.is_none()) {
             h.wake(driver);
@@ -417,7 +420,7 @@ impl Oauth {
         &self,
         now_ns: u64,
         ticket: Ticket,
-        host: Option<&Host>,
+        host: Option<&Host<busbar_contract::plugin::markers::AuthKind>>,
         diags: &mut Diags,
     ) -> u64 {
         if !ticket.is_none() {
@@ -435,7 +438,7 @@ impl Oauth {
     pub(crate) fn drive(
         &self,
         ticket: Ticket,
-        host: Option<&Host>,
+        host: Option<&Host<busbar_contract::plugin::markers::AuthKind>>,
         diags: &mut Diags,
     ) -> Option<u64> {
         self.advance(None, ticket, host, diags)
@@ -462,7 +465,7 @@ impl Oauth {
         &self,
         at: Option<u64>,
         ticket: Ticket,
-        host: Option<&Host>,
+        host: Option<&Host<busbar_contract::plugin::markers::AuthKind>>,
         diags: &mut Diags,
     ) -> Option<u64> {
         let host_wire = host
@@ -592,7 +595,7 @@ impl Oauth {
         key: [u8; 32],
         cell: &Minted,
         report: Option<Report>,
-        host: Option<&Host>,
+        host: Option<&Host<busbar_contract::plugin::markers::AuthKind>>,
         diags: &mut Diags,
     ) {
         let failure = match report {

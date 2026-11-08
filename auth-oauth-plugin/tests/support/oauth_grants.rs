@@ -1012,8 +1012,8 @@ impl Clock {
     }
 }
 use busbar_contract::services::{
-    Caller, DiskDest, HookAsk, HostServices, Later, NestAsk, Ran, RecordsList, Snapshot, Stored,
-    TrustKeyRef, UNSERVED,
+    Caller, DiskDest, HookAsk, HostServices, Later, NestAsk, Ran, RecordsList, Stored, TrustKeyRef,
+    UNSERVED,
 };
 
 impl HostServices for Clock {
@@ -1065,17 +1065,20 @@ impl HostServices for Clock {
         _counterparty: &str,
         _item: &str,
         _digest: &str,
-    ) -> Stored {
-        Stored::refused(UNSERVED)
+        _later: Later,
+    ) -> Ran {
+        Ran::Now(Stored::refused(UNSERVED))
     }
     fn trust_decide(
         &self,
         _caller: &Caller,
+        _ticket: busbar_contract::abi::mechanism::ticket::Ticket,
         _key: TrustKeyRef<'_>,
         _expected: Option<&str>,
         _approve: bool,
-    ) -> Stored {
-        Stored::refused(UNSERVED)
+        _later: Later,
+    ) -> Ran {
+        Ran::Now(Stored::refused(UNSERVED))
     }
     fn trust_state(&self, _caller: &Caller, _counterparty: &str) -> Stored {
         Stored::refused(UNSERVED)
@@ -1113,8 +1116,9 @@ impl HostServices for Clock {
         _unit: Option<u64>,
         _ttl_secs: u64,
         _record: &[u8],
-    ) -> Stored {
-        Stored::refused(UNSERVED)
+        _later: Later,
+    ) -> Ran {
+        Ran::Now(Stored::refused(UNSERVED))
     }
     fn ticket_take(&self, _caller: &Caller, _unit: Option<u64>) -> Stored {
         Stored::refused(UNSERVED)
@@ -1187,8 +1191,8 @@ impl HostServices for Clock {
     fn hook_call(&self, _caller: &Caller, _unit: Option<u64>, _ask: HookAsk, _later: Later) -> Ran {
         Ran::Now(Stored::refused(UNSERVED))
     }
-    fn snapshot_read(&self, _caller: &Caller, _scope: u32) -> Snapshot {
-        Snapshot::Refused(UNSERVED)
+    fn snapshot_read(&self, _caller: &Caller, _scope: u32, _later: Later) -> Ran {
+        Ran::Now(Stored::refused(UNSERVED))
     }
 }
 
@@ -1247,11 +1251,15 @@ fn clock_dispatcher(timestamp: u64) -> (Arc<Clock>, Arc<Dispatcher>) {
     });
     (
         clock.clone(),
-        Arc::new(Dispatcher::with_services(DispatchConfig::default(), clock)),
+        Arc::new(Dispatcher::with_services(
+            DispatchConfig::default(),
+            clock,
+            busbar_contract::services::test_caller_binding(),
+        )),
     )
 }
 fn counts(p: &Plugin<Auth>) -> u64 {
-    p.inner.crossings.load(Ordering::SeqCst) - p.inner.resumes.load(Ordering::SeqCst)
+    p.test_invocations().0 - p.test_invocations().1
 }
 fn count<T>(p: &Plugin<Auth>, expected: u64, op: impl FnOnce() -> T) -> T {
     let before = counts(p);
@@ -1318,9 +1326,7 @@ fn opened(p: &Plugin<Auth>, d: &Dispatcher, x: &OAuthGrant) -> (u64, Vec<String>
 fn flags(x: &OAuthGrant) -> (u32, u32) {
     // SAFETY: the real product Statement owns the static auth tail and style declarations.
     unsafe {
-        let t = &*busbar_auth_oauth::STATEMENT
-            .kind_tail
-            .cast::<auth::AuthTail>();
+        let t = &*declared().kind_tail.cast::<auth::AuthTail>();
         let ds = std::slice::from_raw_parts(t.styles, t.styles_len);
         let decl = ds
             .iter()
@@ -1587,7 +1593,7 @@ fn establish(p: &Plugin<Auth>, need: u32, target: &str) -> (Outcome, u64, String
     // the actual loaded instance context; all lent memory remains live through the call.
     let raw = unsafe {
         f(
-            p.inner.ctx(),
+            p.test_host_context(),
             std::ptr::from_ref(&i).cast::<c_void>(),
             &mut o,
         )
@@ -1614,7 +1620,7 @@ fn io(p: &Plugin<Auth>, stream: u64, write: bool) -> (Outcome, u64, String) {
     // the actual loaded instance context; all lent memory remains live through the call.
     let raw = unsafe {
         f.expect("the host offers READ and WRITE")(
-            p.inner.ctx(),
+            p.test_host_context(),
             std::ptr::from_ref(&i).cast::<c_void>(),
             &mut o,
         )
@@ -1633,7 +1639,7 @@ fn close_stream(p: &Plugin<Auth>, stream: u64) -> (Outcome, u64, String) {
     // the actual loaded instance context; all lent memory remains live through the call.
     let raw = unsafe {
         CONN_SLOTS.close.expect("the host offers CLOSE")(
-            p.inner.ctx(),
+            p.test_host_context(),
             std::ptr::from_ref(&i).cast::<c_void>(),
             &mut o,
         )
@@ -1646,7 +1652,10 @@ fn actual_oauth_host_connections_refuse_undeclared_need_and_other_owner() {
     let mut endpoint = Endpoint::new(vec![(200, b"{}".to_vec())], None);
     endpoint.framed = false; // Exercise raw host connection custody on the actual auth context.
     let endpoint = Arc::new(endpoint);
-    let d = Dispatcher::new(DispatchConfig::default());
+    let d = Dispatcher::new(
+        DispatchConfig::default(),
+        busbar_contract::services::test_caller_binding(),
+    );
     let owner = product(false, &d, endpoint.clone());
     let other = product(false, &d, endpoint.clone());
     // These real needs take their targets from binding settings: actual lifecycle and binding
@@ -1664,8 +1673,8 @@ fn actual_oauth_host_connections_refuse_undeclared_need_and_other_owner() {
     );
     assert_ne!(owners[0], owners[1], "real connection owners are distinct");
     assert_ne!(
-        owner.inner.ctx(),
-        other.inner.ctx(),
+        owner.test_host_context(),
+        other.test_host_context(),
         "the actual host contexts are distinct"
     );
     let target = "https://login.conformance.invalid/oauth2/token";
@@ -1725,4 +1734,9 @@ fn actual_oauth_does_not_send_credentials_without_secure_carrier_facts_both_door
             assert!(endpoint.prepared.lock().unwrap().is_empty());
         }
     }
+}
+
+fn declared() -> &'static busbar_contract::abi::mechanism::door::Statement {
+    // SAFETY: the linked entry owns a static immutable declaration.
+    unsafe { &*busbar_auth_oauth::door().statement() }
 }

@@ -157,7 +157,7 @@ const fn token_need(target_from: &'static str) -> Need {
 /// THE PLUGIN'S OWN NEEDS, in `mint::need` order: `oauth-client-credentials` and
 /// `oauth-token-exchange` POST to the
 /// binding's `token_url`, `jwt-bearer` to its `token_uri`.
-pub const NEEDS: &[Need] = &[
+const NEEDS: &[Need] = &[
     token_need("settings.token_url"),
     token_need("settings.token_uri"),
 ];
@@ -179,7 +179,7 @@ const SETTINGS_CHECK_EXTENSION: [u8; busbar_contract::abi::mechanism::extensions
 const SETTINGS_SCHEMA: &[u8] = include_bytes!("../settings.schema.json");
 
 /// The auth declaration, including pure settings-only validation support.
-pub const STATEMENT: Statement = Statement {
+const STATEMENT: Statement = Statement {
     settings_schema: busbar_contract::abi::mechanism::call::Blob::json(SETTINGS_SCHEMA),
     extensions: busbar_contract::abi::mechanism::call::Blob::of(&SETTINGS_CHECK_EXTENSION),
     ..with_tail(
@@ -266,7 +266,7 @@ impl Oauth {
     pub(crate) fn answer(
         &self,
         ask: &Ask<'_>,
-        host: Option<&Host>,
+        host: Option<&Host<busbar_contract::plugin::markers::AuthKind>>,
         present: &mut dyn FnMut(&Cred),
     ) -> Poll<FieldsAnswer> {
         if !ask.own {
@@ -344,7 +344,7 @@ impl Oauth {
         m: &mint::Minted,
         ticket: Ticket,
         now: u64,
-        host: Option<&Host>,
+        host: Option<&Host<busbar_contract::plugin::markers::AuthKind>>,
         present: &mut dyn FnMut(&Cred),
     ) -> Poll<FieldsAnswer> {
         if let Some(a) = m.read(now, |r| ready_answer(r, &mut *present)) {
@@ -384,7 +384,7 @@ impl Oauth {
         style: &str,
         credential: Option<&[u8]>,
         settings: Option<&[u8]>,
-        host: Option<&Host>,
+        host: Option<&Host<busbar_contract::plugin::markers::AuthKind>>,
     ) -> Result<u64, OpenRefusal> {
         match style::open(style, credential, settings, self) {
             Ok(style::Binding::Minted(cell)) => {
@@ -440,7 +440,7 @@ impl OutboundPlugin for Oauth {
         style: &str,
         credential: Option<&[u8]>,
         settings: Option<&[u8]>,
-        host: Option<&Host>,
+        host: Option<&Host<busbar_contract::plugin::markers::AuthKind>>,
         _diags: &mut Diags,
     ) -> Result<u64, OpenRefusal> {
         self.bind(style, credential, settings, host)
@@ -450,7 +450,7 @@ impl OutboundPlugin for Oauth {
         &self,
         request: &FieldsView<'_>,
         out: &mut FieldsWriter<'_>,
-        op: &Op<'_>,
+        op: &Op<'_, busbar_contract::plugin::markers::AuthKind>,
     ) -> Poll<FieldsAnswer> {
         let ask = Ask {
             handle: request.handle(),
@@ -500,7 +500,13 @@ impl OutboundPlugin for Oauth {
         Oauth::retire(self, generation);
     }
 
-    fn tick(&self, now_ns: u64, host: Option<&Host>, driver: Ticket, diags: &mut Diags) -> u64 {
+    fn tick(
+        &self,
+        now_ns: u64,
+        host: Option<&Host<busbar_contract::plugin::markers::AuthKind>>,
+        driver: Ticket,
+        diags: &mut Diags,
+    ) -> u64 {
         Oauth::tick(self, now_ns, driver, host, diags)
     }
 
@@ -508,7 +514,12 @@ impl OutboundPlugin for Oauth {
     /// once): the exchange goes on. PENDING with `wake_at_ns` at the instant a cell is next due, so
     /// a token minted between ticks is refreshed ahead of its expiry on the host's timer (every call
     /// is Ready or Pending(wake); no plugin timer, no plugin thread).
-    fn drive(&self, host: Option<&Host>, driver: Ticket, diags: &mut Diags) -> Driven {
+    fn drive(
+        &self,
+        host: Option<&Host<busbar_contract::plugin::markers::AuthKind>>,
+        driver: Ticket,
+        diags: &mut Diags,
+    ) -> Driven {
         match Oauth::drive(self, driver, host, diags) {
             Some(at) => Driven::Pending { wake_at_ns: at },
             None => Driven::Ready,

@@ -45,4 +45,4 @@ busbar-contract = { workspace = true, features = ["test-seal"] }
 serde_urlencoded = { workspace = true }
 # Standard formatting records refusal/outage events; the loader supplies real host tables.
 tracing-subscriber = { workspace = true, features = ["fmt"] }
-busbar-plugin-loader = { workspace = true }
+busbar-plugin-loader = { workspace = true , features = ["test-support"] }

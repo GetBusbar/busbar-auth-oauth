@@ -416,7 +416,10 @@ fn run(p: &Plugin<Auth>, folds: &Folds) -> (Vec<String>, Vec<String>) {
 
 #[test]
 fn compiled_in_and_dropped_in_answer_every_op_identically() {
-    let d = Dispatcher::new(DispatchConfig::default());
+    let d = Dispatcher::new(
+        DispatchConfig::default(),
+        busbar_contract::services::test_caller_binding(),
+    );
     let folds = Arc::new(Folds::default());
     let (linked_t, linked_f) = run(&linked(&folds, &d), &folds);
     assert_eq!(linked_t, EXPECTED, "the linked door");
@@ -492,15 +495,11 @@ extern "C" fn insensitive_door() -> &'static Door {
 /// `instance::diag`, pinned to 0, 1, 2 by the crate's own unit test).
 #[test]
 fn the_diag_indices_name_their_catalog_codes() {
-    let ids: Vec<&str> = (0..busbar_auth_oauth::STATEMENT.diag_ids_len)
+    let ids: Vec<&str> = (0..declared().diag_ids_len)
         .map(|i| {
             // SAFETY: the Statement's `diag_ids` is a program-lifetime static of `diag_ids_len` `AbiStr`s
             // whose bytes are program-lifetime string literals.
-            unsafe {
-                (*busbar_auth_oauth::STATEMENT.diag_ids.add(i))
-                    .as_str()
-                    .unwrap()
-            }
+            unsafe { (*declared().diag_ids.add(i)).as_str().unwrap() }
         })
         .collect();
     assert_eq!(
@@ -536,7 +535,10 @@ extern "C" fn overrunning_door() -> &'static Door {
 
 #[test]
 fn red_a_writer_that_ignores_the_host_capacity_faults() {
-    let d = Dispatcher::new(DispatchConfig::default());
+    let d = Dispatcher::new(
+        DispatchConfig::default(),
+        busbar_contract::services::test_caller_binding(),
+    );
     let folds = Arc::new(Folds::default());
     let red =
         load_linked::<Auth>(&row(overrunning_door), bind(&folds, &d)).expect("the door loads");
@@ -607,8 +609,8 @@ mod mint_door {
     struct Clock(Instant);
 
     use busbar_contract::services::{
-        Caller, DiskDest, HookAsk, HostServices, Later, NestAsk, Ran, RecordsList, Snapshot,
-        Stored, TrustKeyRef, UNSERVED,
+        Caller, DiskDest, HookAsk, HostServices, Later, NestAsk, Ran, RecordsList, Stored,
+        TrustKeyRef, UNSERVED,
     };
 
     impl HostServices for Clock {
@@ -659,17 +661,20 @@ mod mint_door {
             _counterparty: &str,
             _item: &str,
             _digest: &str,
-        ) -> Stored {
-            Stored::refused(UNSERVED)
+            _later: Later,
+        ) -> Ran {
+            Ran::Now(Stored::refused(UNSERVED))
         }
         fn trust_decide(
             &self,
             _caller: &Caller,
+            _ticket: busbar_contract::abi::mechanism::ticket::Ticket,
             _key: TrustKeyRef<'_>,
             _expected: Option<&str>,
             _approve: bool,
-        ) -> Stored {
-            Stored::refused(UNSERVED)
+            _later: Later,
+        ) -> Ran {
+            Ran::Now(Stored::refused(UNSERVED))
         }
         fn trust_state(&self, _caller: &Caller, _counterparty: &str) -> Stored {
             Stored::refused(UNSERVED)
@@ -707,8 +712,9 @@ mod mint_door {
             _unit: Option<u64>,
             _ttl_secs: u64,
             _record: &[u8],
-        ) -> Stored {
-            Stored::refused(UNSERVED)
+            _later: Later,
+        ) -> Ran {
+            Ran::Now(Stored::refused(UNSERVED))
         }
         fn ticket_take(&self, _caller: &Caller, _unit: Option<u64>) -> Stored {
             Stored::refused(UNSERVED)
@@ -799,8 +805,8 @@ mod mint_door {
         ) -> Ran {
             Ran::Now(Stored::refused(UNSERVED))
         }
-        fn snapshot_read(&self, _caller: &Caller, _scope: u32) -> Snapshot {
-            Snapshot::Refused(UNSERVED)
+        fn snapshot_read(&self, _caller: &Caller, _scope: u32, _later: Later) -> Ran {
+            Ran::Now(Stored::refused(UNSERVED))
         }
     }
 
@@ -1107,6 +1113,7 @@ mod mint_door {
         let dispatcher = Arc::new(Dispatcher::with_services(
             DispatchConfig::default(),
             Arc::new(Clock(Instant::now())),
+            busbar_contract::services::test_caller_binding(),
         ));
         let row = LinkedRow::of(door).expect("the door states its Statement");
         let plugin = load_linked::<Auth>(
@@ -1314,12 +1321,15 @@ fn actual_product_admission_negative_cases() {
     use busbar_contract::abi::mechanism::{rendering::RENDERING_MAGIC, KindCode};
     use busbar_plugin_loader::dispatch::{
         kinds::{
-            export::Export, hook::Hook, plane::Plane, secret::Secret, store::Store,
+            export::Export, hook::Hook, plane::Plane, secret::Secret, store_v4::StoreV4 as Store,
             transport::Transport,
         },
         LoadError,
     };
-    let d = Dispatcher::new(DispatchConfig::default());
+    let d = Dispatcher::new(
+        DispatchConfig::default(),
+        busbar_contract::services::test_caller_binding(),
+    );
     let f = Arc::new(Folds::default());
     let actual = busbar_auth_oauth::door().parts();
     let stated = rendering_of(busbar_auth_oauth::door).unwrap();
@@ -1502,7 +1512,10 @@ extern "C" fn ready_failure_door() -> &'static Door {
 #[test]
 fn actual_oauth_ready_failure_refuses_boot_once() {
     READY_INVOCATIONS.store(0, std::sync::atomic::Ordering::SeqCst);
-    let d = Dispatcher::new(DispatchConfig::default());
+    let d = Dispatcher::new(
+        DispatchConfig::default(),
+        busbar_contract::services::test_caller_binding(),
+    );
     let f = Arc::new(Folds::default());
     let p = load_linked::<Auth>(&row(ready_failure_door), bind(&f, &d)).unwrap();
     assert!(p.has_ready());
@@ -1510,8 +1523,7 @@ fn actual_oauth_ready_failure_refuses_boot_once() {
     open.input.head = in_head();
     open.out.head = out_head();
     assert_eq!(p.call(life::OPEN, &mut open).outcome, Outcome::Ready);
-    let before = p.inner.crossings.load(std::sync::atomic::Ordering::SeqCst)
-        - p.inner.resumes.load(std::sync::atomic::Ordering::SeqCst);
+    let before = p.test_invocations().0 - p.test_invocations().1;
     assert_eq!(
         p.ready(&d, std::time::Duration::from_secs(10)),
         Err(format!(
@@ -1519,12 +1531,7 @@ fn actual_oauth_ready_failure_refuses_boot_once() {
             p.name()
         ))
     );
-    assert_eq!(
-        p.inner.crossings.load(std::sync::atomic::Ordering::SeqCst)
-            - p.inner.resumes.load(std::sync::atomic::Ordering::SeqCst)
-            - before,
-        1
-    );
+    assert_eq!(p.test_invocations().0 - p.test_invocations().1 - before, 1);
     assert_eq!(
         READY_INVOCATIONS.load(std::sync::atomic::Ordering::SeqCst),
         1
@@ -1533,7 +1540,10 @@ fn actual_oauth_ready_failure_refuses_boot_once() {
 #[test]
 fn actual_oauth_serving_requires_connection_table_both_doors() {
     use busbar_plugin_loader::dispatch::{ConnTable, LoadError};
-    let d = Dispatcher::new(DispatchConfig::default());
+    let d = Dispatcher::new(
+        DispatchConfig::default(),
+        busbar_contract::services::test_caller_binding(),
+    );
     let f = Arc::new(Folds::default());
     let b = || Bind {
         conns: ConnTable::NoNeeds,
@@ -1541,7 +1551,7 @@ fn actual_oauth_serving_requires_connection_table_both_doors() {
     };
     let want = LoadError::NoConnectionTable {
         plugin: "busbar-auth-oauth".into(),
-        needs: busbar_auth_oauth::NEEDS.len(),
+        needs: declared().needs_len,
     };
     assert_eq!(
         load_linked::<Auth>(&row(busbar_auth_oauth::door), b()).err(),
@@ -1592,7 +1602,10 @@ fn requested_release_profile_is_used() {
 #[test]
 fn actual_oauth_refuses_undeclared_inbound_and_login_operations() {
     use busbar_contract::abi::auth::{BeginLoginIn, BeginLoginOut, CompleteLoginIn};
-    let d = Dispatcher::new(DispatchConfig::default());
+    let d = Dispatcher::new(
+        DispatchConfig::default(),
+        busbar_contract::services::test_caller_binding(),
+    );
     let folds = Arc::new(Folds::default());
     let mut answers = Vec::new();
     let stated = rendering_of(busbar_auth_oauth::door).unwrap();
@@ -1606,54 +1619,36 @@ fn actual_oauth_refuses_undeclared_inbound_and_login_operations() {
         let mut verify: Frame<VerifyIn, IdentifyOut> = Frame::new(z(), z());
         verify.input.head = in_head();
         verify.out.head = out_head();
-        let before = p.inner.crossings.load(std::sync::atomic::Ordering::SeqCst)
-            - p.inner.resumes.load(std::sync::atomic::Ordering::SeqCst);
+        let before = p.test_invocations().0 - p.test_invocations().1;
         let call = p.call(slot::VERIFY, &mut verify);
         assert_eq!(call.outcome, Outcome::Refused);
         answers.push(format!(
             "{:?} lease={} {:?}",
             call.outcome, call.lease, call.error
         ));
-        assert_eq!(
-            p.inner.crossings.load(std::sync::atomic::Ordering::SeqCst)
-                - p.inner.resumes.load(std::sync::atomic::Ordering::SeqCst)
-                - before,
-            0
-        );
+        assert_eq!(p.test_invocations().0 - p.test_invocations().1 - before, 0);
         let mut begin: Frame<BeginLoginIn, BeginLoginOut> = Frame::new(z(), z());
         begin.input.head = in_head();
         begin.out.head = out_head();
-        let before = p.inner.crossings.load(std::sync::atomic::Ordering::SeqCst)
-            - p.inner.resumes.load(std::sync::atomic::Ordering::SeqCst);
+        let before = p.test_invocations().0 - p.test_invocations().1;
         let call = p.call(slot::BEGIN_LOGIN, &mut begin);
         assert_eq!(call.outcome, Outcome::Refused);
         answers.push(format!(
             "{:?} lease={} {:?}",
             call.outcome, call.lease, call.error
         ));
-        assert_eq!(
-            p.inner.crossings.load(std::sync::atomic::Ordering::SeqCst)
-                - p.inner.resumes.load(std::sync::atomic::Ordering::SeqCst)
-                - before,
-            0
-        );
+        assert_eq!(p.test_invocations().0 - p.test_invocations().1 - before, 0);
         let mut complete: Frame<CompleteLoginIn, IdentifyOut> = Frame::new(z(), z());
         complete.input.head = in_head();
         complete.out.head = out_head();
-        let before = p.inner.crossings.load(std::sync::atomic::Ordering::SeqCst)
-            - p.inner.resumes.load(std::sync::atomic::Ordering::SeqCst);
+        let before = p.test_invocations().0 - p.test_invocations().1;
         let call = p.call(slot::COMPLETE_LOGIN, &mut complete);
         assert_eq!(call.outcome, Outcome::Refused);
         answers.push(format!(
             "{:?} lease={} {:?}",
             call.outcome, call.lease, call.error
         ));
-        assert_eq!(
-            p.inner.crossings.load(std::sync::atomic::Ordering::SeqCst)
-                - p.inner.resumes.load(std::sync::atomic::Ordering::SeqCst)
-                - before,
-            0
-        );
+        assert_eq!(p.test_invocations().0 - p.test_invocations().1 - before, 0);
     }
     assert_eq!(
         &answers[..3],
@@ -1673,9 +1668,7 @@ fn every_actual_outbound_style_has_a_grant_case() {
         .collect();
     // SAFETY: the real product's static Statement owns its static auth tail and style names.
     let mut declared: Vec<_> = unsafe {
-        let tail = &*busbar_auth_oauth::STATEMENT
-            .kind_tail
-            .cast::<auth::AuthTail>();
+        let tail = &*declared().kind_tail.cast::<auth::AuthTail>();
         std::slice::from_raw_parts(tail.styles, tail.styles_len)
             .iter()
             .map(|style| style.name.as_str().unwrap().to_owned())
@@ -1707,11 +1700,13 @@ fn actual_oauth_images_and_loaded_facts_are_distinct_and_equal() {
     let b = rendering::read_auth_tail(&dropped.kind_tail).unwrap();
     assert_eq!(a.caps, b.caps);
     assert_eq!(a.caps, auth::CAP_OUTBOUND);
-    let d = Dispatcher::new(DispatchConfig::default());
+    let d = Dispatcher::new(
+        DispatchConfig::default(),
+        busbar_contract::services::test_caller_binding(),
+    );
     let folds = Arc::new(Folds::default());
     for p in [self::linked(&folds, &d), self::dropped(&folds, &d)] {
-        let before = p.inner.crossings.load(std::sync::atomic::Ordering::SeqCst)
-            - p.inner.resumes.load(std::sync::atomic::Ordering::SeqCst);
+        let before = p.test_invocations().0 - p.test_invocations().1;
         assert_eq!(p.kind(), KindCode::from_raw(linked.kind).unwrap());
         assert_eq!(p.kind(), KindCode::Auth);
         assert_eq!(p.name(), linked.name);
@@ -1721,11 +1716,14 @@ fn actual_oauth_images_and_loaded_facts_are_distinct_and_equal() {
             "the actual loaded cap obeys this test bind's max_inflight_cap"
         );
         assert_eq!(
-            p.inner.crossings.load(std::sync::atomic::Ordering::SeqCst)
-                - p.inner.resumes.load(std::sync::atomic::Ordering::SeqCst)
-                - before,
+            p.test_invocations().0 - p.test_invocations().1 - before,
             0,
             "actual facts are metadata without an operation crossing"
         );
     }
+}
+
+fn declared() -> &'static busbar_contract::abi::mechanism::door::Statement {
+    // SAFETY: the linked entry owns a static immutable declaration.
+    unsafe { &*busbar_auth_oauth::door().statement() }
 }

@@ -59,8 +59,8 @@ use busbar_contract::abi::sdk::{Instance, Lent, Out, SafeSlot};
 use busbar_contract::conn::{ConnSlab, Conns, DeclaredConns, InstanceId, NeedId, OpenDesc, Piece};
 use busbar_contract::ids::StreamId;
 use busbar_contract::services::{
-    Caller, DiskDest, HookAsk, HostServices, Later, NestAsk, Ran, Reading, RecordsList, Snapshot,
-    Stored, TrustKeyRef, UNSERVED,
+    Caller, DiskDest, HookAsk, HostServices, Later, NestAsk, Ran, Reading, RecordsList, Stored,
+    TrustKeyRef, UNSERVED,
 };
 use busbar_contract::transport::ConnFacts;
 use busbar_plugin_loader::dispatch::kinds::auth::Auth;
@@ -122,17 +122,20 @@ impl HostServices for WireEndpoint {
         _counterparty: &str,
         _item: &str,
         _digest: &str,
-    ) -> Stored {
-        Stored::refused(UNSERVED)
+        _later: Later,
+    ) -> Ran {
+        Ran::Now(Stored::refused(UNSERVED))
     }
     fn trust_decide(
         &self,
         _caller: &Caller,
+        _ticket: busbar_contract::abi::mechanism::ticket::Ticket,
         _key: TrustKeyRef<'_>,
         _expected: Option<&str>,
         _approve: bool,
-    ) -> Stored {
-        Stored::refused(UNSERVED)
+        _later: Later,
+    ) -> Ran {
+        Ran::Now(Stored::refused(UNSERVED))
     }
     fn trust_state(&self, _caller: &Caller, _counterparty: &str) -> Stored {
         Stored::refused(UNSERVED)
@@ -170,8 +173,9 @@ impl HostServices for WireEndpoint {
         _unit: Option<u64>,
         _ttl_secs: u64,
         _record: &[u8],
-    ) -> Stored {
-        Stored::refused(UNSERVED)
+        _later: Later,
+    ) -> Ran {
+        Ran::Now(Stored::refused(UNSERVED))
     }
     fn ticket_take(&self, _caller: &Caller, _unit: Option<u64>) -> Stored {
         Stored::refused(UNSERVED)
@@ -244,8 +248,8 @@ impl HostServices for WireEndpoint {
     fn hook_call(&self, _caller: &Caller, _unit: Option<u64>, _ask: HookAsk, _later: Later) -> Ran {
         Ran::Now(Stored::refused(UNSERVED))
     }
-    fn snapshot_read(&self, _caller: &Caller, _scope: u32) -> Snapshot {
-        Snapshot::Refused(UNSERVED)
+    fn snapshot_read(&self, _caller: &Caller, _scope: u32, _later: Later) -> Ran {
+        Ran::Now(Stored::refused(UNSERVED))
     }
 }
 impl DeclaredConns for WireEndpoint {
@@ -406,14 +410,15 @@ impl Conns for WireEndpoint {
         Ok(())
     }
 }
-thread_local! { static CAPTURED: std::cell::RefCell<Option<Host>> = const { std::cell::RefCell::new(None) }; }
+thread_local! { static CAPTURED: std::cell::RefCell<Option<Host<busbar_contract::plugin::markers::AuthKind>>> = const { std::cell::RefCell::new(None) }; }
 struct CaptureHost;
 impl SafeSlot for CaptureHost {
+    type Kind = busbar_contract::plugin::markers::AuthKind;
     type In = OutboundReadyIn;
     type Out = OutboundReadyOut;
     type State = Held<Outbound<crate::instance::Oauth>>;
     fn call(
-        instance: Instance<'_, Self::State>,
+        instance: Instance<'_, Self::State, busbar_contract::plugin::markers::AuthKind>,
         input: Lent<'_, OutboundReadyIn>,
         out: Out<'_, OutboundReadyOut>,
     ) -> Outcome {
@@ -434,14 +439,18 @@ mod host_bridge {
     }, }
 }
 struct HostedWire {
-    host: Host,
+    host: Host<busbar_contract::plugin::markers::AuthKind>,
     _plugin: Plugin<Auth>,
     _dispatcher: Dispatcher,
 }
 fn host_wire() -> HostedWire {
     use busbar_contract::abi::sdk::test_support::zeroed;
     let provider = Arc::new(WireEndpoint::default());
-    let d = Dispatcher::with_services(DispatchConfig::default(), provider.clone());
+    let d = Dispatcher::with_services(
+        DispatchConfig::default(),
+        provider.clone(),
+        busbar_contract::services::test_caller_binding(),
+    );
     let p = load_linked::<Auth>(
         &LinkedRow::of_macro(host_bridge::MACRO_DOOR).unwrap(),
         Bind {

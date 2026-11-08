@@ -31,14 +31,18 @@ use super::{retry_after, Got, HostClock, TokenRequest, Wire, NS};
 
 /// The connector for one entry of the driver ticket's cycle.
 pub(crate) struct HostWire<'a> {
-    host: &'a Host,
+    host: &'a Host<busbar_contract::plugin::markers::AuthKind>,
     ticket: Ticket,
     issued: &'a AtomicU32,
 }
 
 impl<'a> HostWire<'a> {
     /// The need's services over `host`, on `ticket`, the cycle's handle count in `issued`.
-    pub(crate) fn new(host: &'a Host, ticket: Ticket, issued: &'a AtomicU32) -> Self {
+    pub(crate) fn new(
+        host: &'a Host<busbar_contract::plugin::markers::AuthKind>,
+        ticket: Ticket,
+        issued: &'a AtomicU32,
+    ) -> Self {
         Self {
             host,
             ticket,
@@ -47,7 +51,10 @@ impl<'a> HostWire<'a> {
     }
 
     /// Run `f` over the connector, the cycle's handle count carried in and out.
-    fn with<T>(&self, f: impl FnOnce(&mut Connector<'_>) -> T) -> T {
+    fn with<T>(
+        &self,
+        f: impl FnOnce(&mut Connector<'_, busbar_contract::plugin::markers::AuthKind>) -> T,
+    ) -> T {
         let mut c = self
             .host
             .connector_from(self.ticket, self.issued.load(Ordering::Acquire));
@@ -148,7 +155,7 @@ fn head_retry_after(
 /// The stream and completion handle retained while an opening is pending. Dropping an
 /// unfinished opening (deadline, cancellation, retirement) closes its stream on no ticket.
 pub(crate) struct Opening {
-    host: Host,
+    host: Host<busbar_contract::plugin::markers::AuthKind>,
     ticket: Ticket,
     stream: Option<u64>,
     stage: OpenStage,
@@ -164,7 +171,7 @@ impl Opening {
 
 /// A pending reply carries the complete ticket and sequence, and the original host snapshot.
 pub(crate) struct PendingRead {
-    host: Host,
+    host: Host<busbar_contract::plugin::markers::AuthKind>,
     ticket: Ticket,
     seq: u32,
 }

@@ -35,7 +35,7 @@ extern "C" fn wake(ctx: HostCtx, t: Ticket) {
 
 /// A host with a wake and no connector table.
 pub(crate) struct TestHost {
-    pub(crate) host: Host,
+    pub(crate) host: Host<busbar_contract::plugin::markers::AuthKind>,
     id: u64,
 }
 
