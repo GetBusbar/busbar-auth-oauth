@@ -1677,36 +1677,39 @@ fn actual_oauth_host_connections_refuse_undeclared_need_and_other_owner() {
         other.test_host_context(),
         "the actual host contexts are distinct"
     );
-    let target = "https://login.conformance.invalid/oauth2/token";
-    let (outcome, conn, text) = establish(&owner, 0, target);
-    assert_eq!(outcome, Outcome::Ready, "{text}");
-    assert_eq!(
-        *endpoint.deadlines.lock().unwrap(),
-        [(5_000, 0)],
-        "the raw custody probe explicitly supplies its separate dial timeout"
-    );
-    assert_eq!(io(&owner, conn, true).0, Outcome::Ready);
-    for need in [2, u32::MAX] {
-        let (outcome, _, text) = establish(&owner, need, target);
+
+    owner.test_in_host_operation(|| {
+        let target = "https://login.conformance.invalid/oauth2/token";
+        let (outcome, conn, text) = establish(&owner, 0, target);
+        assert_eq!(outcome, Outcome::Ready, "{text}");
         assert_eq!(
-            (outcome, text.as_str()),
-            (Outcome::Refused, ConnError::UndeclaredNeed.text())
+            *endpoint.deadlines.lock().unwrap(),
+            [(5_000, 0)],
+            "the raw custody probe explicitly supplies its separate dial timeout"
         );
-    }
-    for (outcome, _, text) in [
-        io(&other, conn, true),
-        io(&other, conn, false),
-        close_stream(&other, conn),
-    ] {
-        assert_eq!(
-            (outcome, text.as_str()),
-            (Outcome::Refused, ConnError::NotOwner.text())
-        );
-    }
-    assert_eq!(io(&owner, conn, true).0, Outcome::Ready);
-    assert_eq!(close_stream(&owner, conn).0, Outcome::Ready);
-    close(&owner);
-    close(&other);
+        assert_eq!(io(&owner, conn, true).0, Outcome::Ready);
+        for need in [2, u32::MAX] {
+            let (outcome, _, text) = establish(&owner, need, target);
+            assert_eq!(
+                (outcome, text.as_str()),
+                (Outcome::Refused, ConnError::UndeclaredNeed.text())
+            );
+        }
+        for (outcome, _, text) in [
+            io(&other, conn, true),
+            io(&other, conn, false),
+            close_stream(&other, conn),
+        ] {
+            assert_eq!(
+                (outcome, text.as_str()),
+                (Outcome::Refused, ConnError::NotOwner.text())
+            );
+        }
+        assert_eq!(io(&owner, conn, true).0, Outcome::Ready);
+        assert_eq!(close_stream(&owner, conn).0, Outcome::Ready);
+        close(&owner);
+        close(&other);
+    });
 }
 
 #[test]
