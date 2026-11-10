@@ -46,3 +46,6 @@ serde_urlencoded = { workspace = true }
 # Standard formatting records refusal/outage events; the loader supplies real host tables.
 tracing-subscriber = { workspace = true, features = ["fmt"] }
 busbar-plugin-loader = { workspace = true , features = ["test-support"] }
+
+[package.metadata.busbar.test-contexts]
+door_steps = [{ path = "tests/root/door_steps.rs" }]
