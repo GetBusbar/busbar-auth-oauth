@@ -459,9 +459,9 @@ fn token_endpoint(url: &str) -> Result<(), String> {
         return Ok(());
     }
     if scheme_is(url, "http") {
-        Err(format!("token_url must use https for a public host (got '{url}'); it carries the client secret, so plaintext http is permitted only for a private/loopback token endpoint"))
+        Err("token_url must use https for a public host; it carries the client secret, so plaintext http is permitted only for a private/loopback token endpoint".into())
     } else {
-        Err(format!("token_url must use http or https (got '{url}')"))
+        Err("token_url must use http or https".into())
     }
 }
 

@@ -532,11 +532,11 @@ impl Fail {
 /// What a finished tick of one cell reports for the envelope.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Report {
-    /// A mint failed; it will retry (`EGRESS_OAUTH_MINT_FAILED`).
+    /// A mint failed; it will retry (BUSBAR-4016).
     MintFailed(String),
-    /// The endpoint answered 200 with an empty token (`EGRESS_OAUTH_EMPTY_TOKEN`).
+    /// The endpoint answered 200 with an empty token (BUSBAR-4015).
     EmptyToken,
-    /// The minted token holds bytes invalid in a header value (`EGRESS_OAUTH_TOKEN_INVALID_BYTES`).
+    /// The minted token holds bytes invalid in a header value (BUSBAR-4014).
     TokenInvalidBytes,
     /// A token landed.
     Minted,
@@ -557,7 +557,7 @@ pub(crate) const EXPIRED: &str = "the minted OAuth token has expired and its ref
 pub(crate) const UNPRESENTABLE: &str = "the minted OAuth token holds bytes invalid in a header \
      value (see diagnostic BUSBAR-4014); the call is refused rather than sent unauthenticated";
 
-/// The answer the per-request call reads. No `Debug`: it carries the bearer.
+/// The answer the per-request call reads. `Debug` redacts the bearer.
 #[derive(PartialEq, Eq)]
 pub(crate) enum Read<'a> {
     /// Present this credential through the SDK's sealed Bearer field recipe.

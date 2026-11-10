@@ -59,7 +59,7 @@ impl<'a> HostWire<'a> {
             .host
             .connector_from(self.ticket, self.issued.load(Ordering::Acquire));
         let answer = f(&mut c);
-        self.issued.store(c.issued(), Ordering::Release);
+        self.issued.fetch_max(c.issued(), Ordering::Release);
         answer
     }
 }
@@ -79,7 +79,7 @@ fn error_of(f: &ConnFailure) -> ConnError {
     ];
     match f {
         ConnFailure::Unarmed => ConnError::Unarmed,
-        ConnFailure::NoTicket => ConnError::Pending,
+        ConnFailure::NoTicket => ConnError::Fault,
         ConnFailure::Fault => ConnError::Fault,
         ConnFailure::CredentialUnavailable => ConnError::CredentialUnavailable,
         ConnFailure::Failed(t) => ALL

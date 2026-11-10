@@ -559,7 +559,7 @@ fn the_request_head_is_post_the_path_and_query_and_the_field_block() {
 #[test]
 fn each_host_failure_maps_to_its_connection_error() {
     assert_eq!(error_of(&ConnFailure::Unarmed), ConnError::Unarmed);
-    assert_eq!(error_of(&ConnFailure::NoTicket), ConnError::Pending);
+    assert_eq!(error_of(&ConnFailure::NoTicket), ConnError::Fault);
     assert_eq!(error_of(&ConnFailure::Fault), ConnError::Fault);
     assert_eq!(
         error_of(&ConnFailure::CredentialUnavailable),
