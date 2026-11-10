@@ -27,7 +27,9 @@ impl Migrate for OauthMigration {
         if credential.text().is_empty() {
             return Err(CredentialRefusal);
         }
-        let file = credential.read_file(credential.text())?;
+        let Some(file) = credential.file() else {
+            return credential.request_file();
+        };
         let text = std::str::from_utf8(file.bytes()).map_err(|_| CredentialRefusal)?;
         if !text.trim_start().starts_with('{')
             || serde_json::from_str::<serde::de::IgnoredAny>(text).is_err()
@@ -40,8 +42,8 @@ impl Migrate for OauthMigration {
 
 #[cfg(test)]
 mod tests {
-    use busbar_contract::{abi::sdk::migrate::CredentialMigration, redacted::Secret};
-    fn convert(value: &str) -> Result<CredentialMigration, String> {
+    use busbar_contract::{abi::sdk::migrate::MigratedCredential, redacted::Secret};
+    fn convert(value: &str) -> Result<MigratedCredential, String> {
         busbar_plugin_loader::dispatch::migrate::migrate_credential_door(
             busbar_plugin_loader::dispatch::load::raw(crate::door),
             &Secret::new(value.to_owned()),
@@ -66,7 +68,9 @@ mod tests {
         // Spell the same file relative to process cwd without changing process-global cwd.
         let cwd = std::env::current_dir().unwrap();
         let mut relative = std::path::PathBuf::new();
-        for _ in cwd.components().skip(1) { relative.push(".."); }
+        for _ in cwd.components().skip(1) {
+            relative.push("..");
+        }
         relative.push(file.strip_prefix("/").unwrap());
         let answer = convert(relative.to_str().unwrap()).unwrap();
         let mut sources = busbar_contract::secret_ref::Sugars::default();
@@ -92,7 +96,7 @@ mod tests {
             sources
                 .get("artifact")
                 .unwrap()
-                .reference(file.to_str().unwrap())
+                .reference(cwd.join(&relative).to_str().unwrap())
         );
         std::fs::write(&file, b"SYNTHETIC_NOT_JSON").unwrap();
         let error = convert(file.to_str().unwrap()).unwrap_err();
