@@ -537,3 +537,5 @@ impl OutboundPlugin for Oauth {
 
 #[cfg(test)]
 mod settings_schema_tests;
+
+include!(concat!(env!("OUT_DIR"), "/context_test_source.rs"));
