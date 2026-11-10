@@ -52,6 +52,7 @@
 #![deny(missing_docs)]
 
 mod instance;
+mod migrate;
 mod mint;
 mod style;
 mod token_response;
@@ -190,7 +191,7 @@ const STATEMENT: Statement = Statement {
     )
 };
 
-busbar_contract::auth_outbound_door!(Oauth, STATEMENT);
+busbar_contract::auth_outbound_door!(Oauth, STATEMENT, migrate: busbar_contract::abi::sdk::migrate::Migrator<migrate::OauthMigration>);
 
 /// THE COMPILED-IN ENTRY a composition root's `auths` row names: the door at
 /// `compiled_in::door::door`, the same [`door`] the dropped-in build exports (compiled-in =

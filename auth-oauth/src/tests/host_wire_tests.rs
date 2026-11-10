@@ -458,7 +458,9 @@ fn host_wire() -> HostedWire {
             max_inflight_cap: 64,
             sink: Arc::new(NoSink),
             dispatcher: d.adopter(),
-            conns: ConnTable::Host(provider),
+            conns: ConnTable::Host(busbar_contract::conn::admissions::AdmissionAuthority::issue(
+                &busbar_contract::caps::KernelSeal::acquire_for_kernel(), provider, Default::default(),
+            )),
         },
     )
     .unwrap();
