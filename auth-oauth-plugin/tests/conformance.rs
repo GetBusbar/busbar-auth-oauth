@@ -1124,7 +1124,11 @@ mod mint_door {
                 sink: Arc::new(NoSink),
                 dispatcher: dispatcher.adopter(),
                 conns: busbar_plugin_loader::dispatch::ConnTable::Host(
-                    Arc::clone(&table) as Arc<dyn DeclaredConns>
+                    busbar_contract::conn::admissions::AdmissionAuthority::issue(
+                        &busbar_contract::caps::KernelSeal::acquire_for_kernel(),
+                        Arc::clone(&table) as Arc<dyn DeclaredConns>,
+                        busbar_contract::secret_ref::Sugars::default(),
+                    ),
                 ),
             },
         )

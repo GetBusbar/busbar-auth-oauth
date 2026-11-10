@@ -1273,7 +1273,13 @@ fn product(dropped: bool, d: &Dispatcher, e: Arc<Endpoint>) -> Plugin<Auth> {
         max_inflight_cap: 64,
         sink: Arc::new(NoSink),
         dispatcher: d.adopter(),
-        conns: ConnTable::Host(e),
+        conns: ConnTable::Host(
+            busbar_contract::conn::admissions::AdmissionAuthority::issue(
+                &busbar_contract::caps::KernelSeal::acquire_for_kernel(),
+                e,
+                busbar_contract::secret_ref::Sugars::default(),
+            ),
+        ),
     };
     if dropped {
         load_dropped::<Auth>(
